@@ -10,6 +10,7 @@ import {
   Layout,
   Wifi,
   WifiOff,
+  Server,
 } from 'lucide-react';
 import { Task, TaskStatus, TaskPriority, Project, Agent, OpenCodeAgentInfo } from './types';
 import {
@@ -26,10 +27,12 @@ import {
   moveTask,
 } from './store/kanban';
 import { fetchAgents, createSession, getServerInfo } from './api/opencode';
+import { getServerConfig } from './store/serverConfig';
 import KanbanColumn from './components/KanbanColumn';
 import TaskModal from './components/TaskModal';
 import ProjectModal from './components/ProjectModal';
 import AgentTeamModal from './components/AgentTeamModal';
+import ServerConfigModal from './components/ServerConfigModal';
 import TaskCard from './components/TaskCard';
 
 const COLUMNS: { status: TaskStatus; title: string; icon: string }[] = [
@@ -56,6 +59,7 @@ export default function App() {
   const [showTaskModal, setShowTaskModal] = useState(false);
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [showAgentTeamModal, setShowAgentTeamModal] = useState(false);
+  const [showServerModal, setShowServerModal] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [showProjectDropdown, setShowProjectDropdown] = useState(false);
@@ -110,6 +114,8 @@ export default function App() {
           { id: 'debugger', name: 'Debugger', description: 'Debugging agent', color: '#ef4444' },
         ]);
         setIsConnected(false);
+        // No agents + no saved password → prompt to configure the server
+        if (!getServerConfig().password) setShowServerModal(true);
       }
     } catch {
       setAgents([
@@ -122,6 +128,10 @@ export default function App() {
       setIsConnected(false);
     }
   }, []);
+
+  const handleServerConnected = useCallback(() => {
+    loadAgents();
+  }, [loadAgents]);
 
   useEffect(() => {
     loadData();
@@ -286,12 +296,19 @@ export default function App() {
               </div>
 
               {/* Connection status */}
-              <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs ${
-                isConnected ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'
-              }`}>
+              <button
+                onClick={() => setShowServerModal(true)}
+                title="Configure server connection"
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs transition-all hover:ring-2 hover:ring-offset-1 hover:ring-offset-gray-900 ${
+                  isConnected
+                    ? 'bg-emerald-500/10 text-emerald-400 hover:ring-emerald-500/40'
+                    : 'bg-amber-500/10 text-amber-400 hover:ring-amber-500/40'
+                }`}
+              >
                 {isConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
                 <span>{isConnected ? 'Connected' : 'Demo Mode'}</span>
-              </div>
+                <Settings className="w-3 h-3 opacity-60" />
+              </button>
             </div>
 
             {/* Center: Project Selector */}
@@ -379,6 +396,13 @@ export default function App() {
 
             {/* Right: Actions */}
             <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowServerModal(true)}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-gray-800/80 border border-gray-700/50 hover:border-gray-600 text-sm text-gray-300 hover:text-white transition-all"
+                title="Server connection"
+              >
+                <Server className="w-4 h-4 text-gray-400" />
+              </button>
               {activeProject && (
                 <>
                   <button
@@ -508,6 +532,12 @@ export default function App() {
         onClose={() => setShowAgentTeamModal(false)}
         onSave={handleSaveAgentTeam}
         selectedAgentIds={activeProject?.agentIds || []}
+      />
+
+      <ServerConfigModal
+        isOpen={showServerModal}
+        onClose={() => setShowServerModal(false)}
+        onConnected={handleServerConnected}
       />
     </div>
   );

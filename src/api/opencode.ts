@@ -1,13 +1,25 @@
 import { OpenCodeAgentInfo, OpenCodeSessionInfo } from '../types';
+import { getServerConfig, getAuthHeader } from '../store/serverConfig';
 
-const BASE_URL = '/api';
+function baseUrl(): string {
+  const { url } = getServerConfig();
+  // Normalize: strip trailing slash, ensure /api suffix for v2
+  const clean = url.replace(/\/+$/, '');
+  return clean.endsWith('/api') ? clean : `${clean}/api`;
+}
+
+function headers(extra: Record<string, string> = {}): Record<string, string> {
+  return { ...getAuthHeader(), ...extra };
+}
 
 export async function fetchAgents(): Promise<OpenCodeAgentInfo[]> {
   try {
-    const response = await fetch(`${BASE_URL}/agent`);
-    if (!response.ok) throw new Error('Failed to fetch agents');
-    const data = await response.json();
-    return Array.isArray(data) ? data : [];
+    const response = await fetch(`${baseUrl()}/agent`, { headers: headers() });
+    if (!response.ok) throw new Error(`Failed to fetch agents (${response.status})`);
+    const json = await response.json();
+    // v2 wraps in { data: [...] }, v1 returns array directly
+    const list = Array.isArray(json) ? json : json.data;
+    return Array.isArray(list) ? list : [];
   } catch (error) {
     console.error('Error fetching agents:', error);
     return [];
@@ -16,7 +28,7 @@ export async function fetchAgents(): Promise<OpenCodeAgentInfo[]> {
 
 export async function fetchAgent(agentId: string): Promise<OpenCodeAgentInfo | null> {
   try {
-    const response = await fetch(`${BASE_URL}/agent/${agentId}`);
+    const response = await fetch(`${baseUrl()}/agent/${agentId}`, { headers: headers() });
     if (!response.ok) throw new Error('Failed to fetch agent');
     return await response.json();
   } catch (error) {
@@ -27,9 +39,9 @@ export async function fetchAgent(agentId: string): Promise<OpenCodeAgentInfo | n
 
 export async function createSession(agentId: string, title?: string): Promise<OpenCodeSessionInfo | null> {
   try {
-    const response = await fetch(`${BASE_URL}/session`, {
+    const response = await fetch(`${baseUrl()}/session`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: headers({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ agent: agentId, title }),
     });
     if (!response.ok) throw new Error('Failed to create session');
@@ -42,7 +54,7 @@ export async function createSession(agentId: string, title?: string): Promise<Op
 
 export async function getSession(sessionId: string): Promise<OpenCodeSessionInfo | null> {
   try {
-    const response = await fetch(`${BASE_URL}/session/${sessionId}`);
+    const response = await fetch(`${baseUrl()}/session/${sessionId}`, { headers: headers() });
     if (!response.ok) throw new Error('Failed to get session');
     return await response.json();
   } catch (error) {
@@ -53,9 +65,9 @@ export async function getSession(sessionId: string): Promise<OpenCodeSessionInfo
 
 export async function sendPrompt(sessionId: string, message: string): Promise<boolean> {
   try {
-    const response = await fetch(`${BASE_URL}/session/${sessionId}/prompt`, {
+    const response = await fetch(`${baseUrl()}/session/${sessionId}/prompt`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: headers({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ message }),
     });
     return response.ok;
@@ -67,10 +79,11 @@ export async function sendPrompt(sessionId: string, message: string): Promise<bo
 
 export async function listSessions(): Promise<OpenCodeSessionInfo[]> {
   try {
-    const response = await fetch(`${BASE_URL}/session`);
+    const response = await fetch(`${baseUrl()}/session`, { headers: headers() });
     if (!response.ok) throw new Error('Failed to list sessions');
-    const data = await response.json();
-    return Array.isArray(data) ? data : [];
+    const json = await response.json();
+    const list = Array.isArray(json) ? json : json.data;
+    return Array.isArray(list) ? list : [];
   } catch (error) {
     console.error('Error listing sessions:', error);
     return [];
@@ -79,8 +92,9 @@ export async function listSessions(): Promise<OpenCodeSessionInfo[]> {
 
 export async function deleteSession(sessionId: string): Promise<boolean> {
   try {
-    const response = await fetch(`${BASE_URL}/session/${sessionId}`, {
+    const response = await fetch(`${baseUrl()}/session/${sessionId}`, {
       method: 'DELETE',
+      headers: headers(),
     });
     return response.ok;
   } catch (error) {
@@ -91,8 +105,9 @@ export async function deleteSession(sessionId: string): Promise<boolean> {
 
 export async function interruptSession(sessionId: string): Promise<boolean> {
   try {
-    const response = await fetch(`${BASE_URL}/session/${sessionId}/interrupt`, {
+    const response = await fetch(`${baseUrl()}/session/${sessionId}/interrupt`, {
       method: 'POST',
+      headers: headers(),
     });
     return response.ok;
   } catch (error) {
@@ -103,11 +118,28 @@ export async function interruptSession(sessionId: string): Promise<boolean> {
 
 export async function getServerInfo(): Promise<any> {
   try {
-    const response = await fetch(`${BASE_URL}/info`);
+    const response = await fetch(`${baseUrl()}/info`, { headers: headers() });
     if (!response.ok) throw new Error('Failed to get server info');
     return await response.json();
   } catch (error) {
     console.error('Error getting server info:', error);
     return null;
+  }
+}
+
+/** Test the connection with a given url/password. Returns agent count or -1 on failure. */
+export async function testConnection(url: string, password: string): Promise<{ ok: boolean; agentCount: number; status?: number }> {
+  try {
+    const clean = url.replace(/\/+$/, '');
+    const base = clean.endsWith('/api') ? clean : `${clean}/api`;
+    const h: Record<string, string> = {};
+    if (password) h.Authorization = `Basic ${btoa(`opencode:${password}`)}`;
+    const response = await fetch(`${base}/agent`, { headers: h });
+    if (!response.ok) return { ok: false, agentCount: 0, status: response.status };
+    const json = await response.json();
+    const list = Array.isArray(json) ? json : json.data;
+    return { ok: true, agentCount: Array.isArray(list) ? list.length : 0 };
+  } catch {
+    return { ok: false, agentCount: 0 };
   }
 }
