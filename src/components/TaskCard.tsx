@@ -1,5 +1,5 @@
 import { Task, TaskPriority } from '../types';
-import { MessageSquare, Edit2, Trash2, GripVertical } from 'lucide-react';
+import { MessageSquare, Edit2, Trash2, GripVertical, Play } from 'lucide-react';
 import { useDraggable } from '@dnd-kit/core';
 
 interface TaskCardProps {
@@ -7,6 +7,7 @@ interface TaskCardProps {
   onEdit: (task: Task) => void;
   onDelete: (id: string) => void;
   onOpenChat: (task: Task) => void;
+  onStartTask?: (task: Task) => void;
 }
 
 const priorityConfig: Record<TaskPriority, { color: string; label: string; bg: string }> = {
@@ -16,10 +17,9 @@ const priorityConfig: Record<TaskPriority, { color: string; label: string; bg: s
   critical: { color: 'text-red-400', label: 'Critical', bg: 'bg-red-400/10 border-red-400/30' },
 };
 
-export default function TaskCard({ task, onEdit, onDelete, onOpenChat }: TaskCardProps) {
+export default function TaskCard({ task, onEdit, onDelete, onOpenChat, onStartTask }: TaskCardProps) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: task.id,
-    data: { task },
   });
 
   const style = transform
@@ -29,6 +29,8 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat }: TaskCar
     : undefined;
 
   const priority = priorityConfig[task.priority];
+  const isBacklog = task.status === 'backlog';
+  const canStart = isBacklog && task.agentId && onStartTask;
 
   return (
     <div
@@ -53,6 +55,15 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat }: TaskCar
           {priority.label}
         </span>
         <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          {canStart && (
+            <button
+              onClick={() => onStartTask(task)}
+              className="p-1 rounded hover:bg-emerald-900/50 text-gray-400 hover:text-emerald-400 transition-colors"
+              title="Start task (move to Running)"
+            >
+              <Play className="w-3.5 h-3.5" />
+            </button>
+          )}
           <button
             onClick={() => onEdit(task)}
             className="p-1 rounded hover:bg-gray-700 text-gray-400 hover:text-white transition-colors"

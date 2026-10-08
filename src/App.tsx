@@ -25,7 +25,7 @@ import {
   deleteTask,
   moveTask,
 } from './store/kanban';
-import { fetchAgents, createSession, getServerInfo } from './api/opencode';
+import { fetchAgents, createSession, sendPrompt, getServerInfo } from './api/opencode';
 import KanbanColumn from './components/KanbanColumn';
 import TaskModal from './components/TaskModal';
 import ProjectModal from './components/ProjectModal';
@@ -147,7 +147,7 @@ export default function App() {
     if (task) setActiveTask(task);
   };
 
-  const handleDragEnd = (event: DragEndEvent) => {
+  const handleDragEnd = async (event: DragEndEvent) => {
     setActiveTask(null);
     const { active, over } = event;
     if (!over) return;
@@ -156,22 +156,32 @@ export default function App() {
     const newStatus = over.data.current?.status as TaskStatus;
 
     if (task && newStatus && task.status !== newStatus) {
+      // Move task to new status
       moveTask(task.id, newStatus);
+      loadData();
 
       // If moving to running and task has an agent but no session, create one
       if (newStatus === 'running' && task.agentId && !task.sessionId) {
-        createSessionForTask(task);
+        await createSessionForTask(task);
       }
-
-      loadData();
     }
   };
 
   const createSessionForTask = async (task: Task) => {
     if (!task.agentId) return;
+    
+    // Create session with task context
+    const prompt = `Task: ${task.title}\n\nDescription: ${task.description}\n\nPriority: ${task.priority}\n\nPlease start working on this task.`;
     const session = await createSession(task.agentId, task.title);
+    
     if (session) {
+      // Update task with session ID
       updateTask(task.id, { sessionId: session.id });
+      
+      // Send initial prompt to the agent
+      await sendPrompt(session.id, prompt);
+      
+      // Reload data to reflect changes
       loadData();
     }
   };
@@ -222,6 +232,18 @@ export default function App() {
       // In a real app, this would open the OpenCode chat interface
       window.open(`#session/${task.sessionId}`, '_blank');
     }
+  };
+
+  const handleStartTask = async (task: Task) => {
+    // Move task to running status
+    moveTask(task.id, 'running');
+    
+    // If task has an agent but no session, create one
+    if (task.agentId && !task.sessionId) {
+      await createSessionForTask(task);
+    }
+    
+    loadData();
   };
 
   const handleSaveProject = (data: { name: string; path: string; description: string }) => {
@@ -461,6 +483,7 @@ export default function App() {
                   onDeleteTask={handleDeleteTask}
                   onOpenChat={handleOpenChat}
                   onAddTask={handleAddTask}
+                  onStartTask={handleStartTask}
                 />
               ))}
             </div>
@@ -473,6 +496,7 @@ export default function App() {
                     onEdit={() => {}}
                     onDelete={() => {}}
                     onOpenChat={() => {}}
+                    onStartTask={() => {}}
                   />
                 </div>
               ) : null}
