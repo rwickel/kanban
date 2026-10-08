@@ -185,7 +185,16 @@ export default function App() {
   const buildTaskPrompt = (task: Task): string => {
     const title = task.title?.trim() || 'Untitled task';
     const desc = task.description?.trim() || '(no description provided)';
-    return `Task: ${title}\n\nDescription: ${desc}`;
+    const prio = task.priority ? task.priority.charAt(0).toUpperCase() + task.priority.slice(1) : 'Medium';
+    const project = projects.find((p) => p.id === task.projectId);
+    const projectName = project?.name?.trim();
+    const projectPath = project?.path?.trim();
+    const headerLines = [
+      'You are now executing this task autonomously. Complete it end-to-end — read the project, plan if needed, make the changes, and leave it in a working state. Ask the user only if blocked.',
+      projectName ? `Project: ${projectName}${projectPath ? ` (${projectPath})` : ''}` : undefined,
+      `Priority: ${prio}`,
+    ].filter(Boolean).join('\n');
+    return `${headerLines}\n\nTask: ${title}\n\nDescription: ${desc}`;
   };
 
   const resolveAgentForTask = (task: Task): { id?: string; name?: string } => {
