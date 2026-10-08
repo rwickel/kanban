@@ -10,7 +10,6 @@ import {
   Layout,
   Wifi,
   WifiOff,
-  Command,
 } from 'lucide-react';
 import { Task, TaskStatus, TaskPriority, Project, Agent, OpenCodeAgentInfo } from './types';
 import {
