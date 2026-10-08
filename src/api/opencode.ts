@@ -59,7 +59,15 @@ export async function createSession(opts?: {
     if (opts?.parentID) body.parentID = opts.parentID;
     if (opts?.agent) body.agent = opts.agent;
     if (opts?.model) body.model = opts.model;
-    if (opts?.directory) body.location = { directory: opts.directory };
+    // Only send location for absolute server-side paths — a bare folder
+    // name ("work") makes POST /api/session 500 on the server. Omit it
+    // so the session falls back to the server cwd instead of failing.
+    const dir = opts?.directory?.trim();
+    if (dir && (/^[a-zA-Z]:[\\/]/.test(dir) || dir.startsWith('\\\\') || dir.startsWith('/'))) {
+      body.location = { directory: dir };
+    } else if (dir) {
+      console.warn(`createSession: ignoring relative directory "${dir}" — fix the project path to an absolute server path`);
+    }
     const response = await fetch(`${baseUrl()}/session`, {
       method: 'POST',
       headers: headers({ 'Content-Type': 'application/json' }),

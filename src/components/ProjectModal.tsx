@@ -13,7 +13,31 @@ export default function ProjectModal({ isOpen, onClose, onSave, project }: Proje
   const [name, setName] = useState('');
   const [path, setPath] = useState('');
   const [description, setDescription] = useState('');
+  const [serverDir, setServerDir] = useState<string | null>(null);
+  const [loadingServerDir, setLoadingServerDir] = useState(false);
   const folderInputRef = useRef<HTMLInputElement>(null);
+
+  // Browsers never reveal absolute disk paths — only the UI can know the
+  // full path (typed manually) or the server can report its own cwd.
+  const isAbsolutePath = (p: string) =>
+    /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('\\\\') || p.startsWith('/');
+  const pathLooksRelative = path.trim() !== '' && !isAbsolutePath(path.trim());
+
+  const handleUseServerDir = async () => {
+    setLoadingServerDir(true);
+    try {
+      const { getServerPath } = await import('../api/opencode');
+      const dir = await getServerPath();
+      if (dir) {
+        setServerDir(dir);
+        setPath(dir);
+      } else {
+        setServerDir(null);
+      }
+    } finally {
+      setLoadingServerDir(false);
+    }
+  };
 
   // Native folder picker (File System Access API — Chrome/Edge).
   // Falls back to <input webkitdirectory> so plain file inputs still
@@ -65,13 +89,29 @@ export default function ProjectModal({ isOpen, onClose, onSave, project }: Proje
       setPath('');
       setDescription('');
     }
+    setServerDir(null);
   }, [project, isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    // Prefetch the server cwd so "Use server directory" is one click.
+    (async () => {
+      try {
+        const { getServerPath } = await import('../api/opencode');
+        const dir = await getServerPath();
+        if (dir) setServerDir(dir);
+      } catch { /* offline — manual entry still works */ }
+    })();
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !path.trim()) return;
+    // Relative paths 500 on POST /api/session (server can't resolve them).
+    // Block them here with the warning below instead of failing silently.
+    if (!isAbsolutePath(path.trim())) return;
     onSave({ name: name.trim(), path: path.trim(), description: description.trim() });
     onClose();
   };
@@ -108,7 +148,7 @@ export default function ProjectModal({ isOpen, onClose, onSave, project }: Proje
             />
           </div>
 
-          {/* Path — native Windows-style folder picker */}
+          {/* Path — absolute path on the OpenCode server */}
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-1.5">Project Path</label>
             <div className="flex gap-2">
@@ -116,8 +156,12 @@ export default function ProjectModal({ isOpen, onClose, onSave, project }: Proje
                 type="text"
                 value={path}
                 onChange={(e) => setPath(e.target.value)}
-                placeholder="/home/user/projects/my-app"
-                className="flex-1 min-w-0 px-3 py-2.5 bg-gray-800 border border-gray-700 rounded-xl text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 transition-all font-mono text-sm"
+                placeholder="C:\Users\you\projects\my-app"
+                className={`flex-1 min-w-0 px-3 py-2.5 bg-gray-800 border rounded-xl text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 transition-all font-mono text-sm ${
+                  pathLooksRelative
+                    ? 'border-amber-500/60 focus:ring-amber-500/50 focus:border-amber-500/50'
+                    : 'border-gray-700 focus:ring-violet-500/50 focus:border-violet-500/50'
+                }`}
               />
               <button
                 type="button"
@@ -129,6 +173,32 @@ export default function ProjectModal({ isOpen, onClose, onSave, project }: Proje
                 Browse
               </button>
             </div>
+            {pathLooksRelative ? (
+              <p className="text-[11px] text-amber-400 mt-1.5">
+                Browsers only expose the folder name (“{path.trim()}”) — the server needs the full
+                absolute path, otherwise session creation fails with 500.
+                {serverDir ? (
+                  <> Use <button type="button" onClick={() => setPath(serverDir)} className="underline hover:text-amber-300 font-mono">{serverDir}</button>?</>
+                ) : (
+                  <> Type it manually (e.g. C:\projects\my-app).</>
+                )}
+              </p>
+            ) : (
+              <p className="text-[11px] text-gray-500 mt-1.5">
+                Full absolute path <span className="text-gray-400">on the OpenCode server</span> (e.g. C:\projects\my-app).
+                {serverDir && !path.trim() && (
+                  <> Server runs in <button type="button" onClick={() => setPath(serverDir)} className="underline hover:text-violet-300 font-mono">{serverDir}</button></>
+                )}
+              </p>
+            )}
+            <button
+              type="button"
+              onClick={handleUseServerDir}
+              disabled={loadingServerDir}
+              className="mt-1.5 text-[11px] text-violet-400 hover:text-violet-300 underline disabled:opacity-50"
+            >
+              {loadingServerDir ? 'Reading server directory…' : serverDir ? `Use server directory (${serverDir})` : 'Detect server directory'}
+            </button>
             {/* Hidden directory input — fallback for browsers without showDirectoryPicker.
                 webkitdirectory makes Chrome/Edge show a native "Select Folder" dialog on Windows,
                 which looks and behaves exactly like the OS folder chooser. */}

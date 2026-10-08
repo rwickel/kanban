@@ -145,6 +145,30 @@ export default function App() {
     getServerInfo().then(info => {
       if (info) setIsConnected(true);
     });
+
+    // Agent completion loop: the agent calls the kanban MCP tool
+    // (kanban_update_status) when finished; the MCP server writes a queue file
+    // and we apply it to the board here.
+    const pollPending = async () => {
+      try {
+        const res = await fetch('/api/tasks/pending');
+        if (!res.ok) return;
+        const { pending } = await res.json();
+        if (!Array.isArray(pending) || pending.length === 0) return;
+        for (const p of pending) {
+          if (p?.taskId && p?.status) {
+            const moved = moveTask(p.taskId, p.status);
+            if (moved) console.log(`agent moved task ${p.taskId} → ${p.status}`);
+          }
+        }
+        await fetch('/api/tasks/pending', { method: 'DELETE' });
+        loadData();
+      } catch {
+        /* dev server restarted / unreachable — next tick retries */
+      }
+    };
+    const pendingTimer = setInterval(pollPending, 3000);
+    return () => clearInterval(pendingTimer);
   }, [loadData, loadAgents]);
 
   // Active project
@@ -193,8 +217,13 @@ export default function App() {
       'You are now executing this task autonomously. Complete it end-to-end — read the project, plan if needed, make the changes, and leave it in a working state. Ask the user only if blocked.',
       projectName ? `Project: ${projectName}${projectPath ? ` (${projectPath})` : ''}` : undefined,
       `Priority: ${prio}`,
+      `Task id: ${task.id}`,
     ].filter(Boolean).join('\n');
-    return `${headerLines}\n\nTask: ${title}\n\nDescription: ${desc}`;
+    const footer =
+      `\n---\nWhen you are finished, update the task status with the kanban MCP tool:\n` +
+      `  Call kanban_update_status with { taskId: "${task.id}", status: "done" } when complete, or "blocked" if stuck.\n` +
+      `Do this as the last step — after all code changes are complete. The board will move the task automatically.`;
+    return `${headerLines}\n\nTask: ${title}\n\nDescription: ${desc}${footer}`;
   };
 
   const resolveAgentForTask = (task: Task): { id?: string; name?: string } => {
