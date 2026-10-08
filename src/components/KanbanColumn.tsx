@@ -16,17 +16,10 @@ interface KanbanColumnProps {
 }
 
 const statusColors: Record<TaskStatus, string> = {
-  backlog: 'from-gray-500 to-gray-600',
-  running: 'from-blue-500 to-cyan-500',
-  done: 'from-emerald-500 to-green-500',
-  blocked: 'from-red-500 to-rose-500',
-};
-
-const statusBorderColors: Record<TaskStatus, string> = {
-  backlog: 'border-gray-700/50',
-  running: 'border-blue-500/30',
-  done: 'border-emerald-500/30',
-  blocked: 'border-red-500/30',
+  backlog: 'bg-slate-400',
+  running: 'bg-blue-500',
+  done: 'bg-emerald-500',
+  blocked: 'bg-red-500',
 };
 
 export default function KanbanColumn({
@@ -47,36 +40,36 @@ export default function KanbanColumn({
 
   return (
     <div
-      className={`flex flex-col bg-gray-900/50 backdrop-blur-sm rounded-2xl border ${statusBorderColors[status]} min-w-[300px] w-[320px] max-h-[calc(100vh-200px)] transition-all duration-200 ${
-        isOver ? 'ring-2 ring-violet-500/50 bg-gray-900/80' : ''
+      className={`flex flex-col bg-slate-50/50 rounded-[6px] border min-w-[280px] w-[300px] max-h-[calc(100vh-180px)] transition-all duration-150 ${
+        isOver ? 'border-slate-400 bg-slate-100/80' : 'border-slate-200'
       }`}
     >
       {/* Column header */}
-      <div className="flex items-center justify-between p-4 pb-2">
-        <div className="flex items-center gap-2.5">
-          <span className="text-lg">{icon}</span>
-          <h3 className="font-semibold text-gray-100 text-sm">{title}</h3>
-          <span className={`text-xs px-2 py-0.5 rounded-full bg-gradient-to-r ${statusColors[status]} text-white font-medium`}>
+      <div className="flex items-center justify-between px-3 py-2.5 border-b border-slate-200">
+        <div className="flex items-center gap-2">
+          <span className={`w-2 h-2 rounded-full ${statusColors[status]}`} />
+          <h3 className="text-[13px] font-semibold text-slate-900">{title}</h3>
+          <span className="text-[11px] font-mono text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded-[3px]">
             {tasks.length}
           </span>
         </div>
         <button
           onClick={onAddTask}
-          className="p-1.5 rounded-lg hover:bg-gray-700/50 text-gray-400 hover:text-white transition-colors"
-          title="Add task"
+          className="p-1 rounded-[3px] hover:bg-slate-200 text-slate-400 hover:text-slate-700 transition-colors"
+          title="Add task (N)"
         >
-          <Plus className="w-4 h-4" />
+          <Plus className="w-3.5 h-3.5" />
         </button>
       </div>
 
       {/* Tasks list */}
       <div
         ref={setNodeRef}
-        className="flex-1 overflow-y-auto p-3 pt-1 space-y-0 min-h-[100px]"
+        className="flex-1 overflow-y-auto p-2 min-h-[100px]"
       >
         {tasks.length === 0 && (
-          <div className="flex items-center justify-center h-24 border-2 border-dashed border-gray-700/50 rounded-xl">
-            <p className="text-xs text-gray-500">Drop tasks here</p>
+          <div className="flex items-center justify-center h-20 border border-dashed border-slate-200 rounded-[4px]">
+            <p className="text-[11px] text-slate-400">Drop tasks here</p>
           </div>
         )}
         {tasks.map((task) => (

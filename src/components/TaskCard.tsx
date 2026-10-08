@@ -1,5 +1,5 @@
 import { Task, TaskPriority } from '../types';
-import { MessageSquare, Edit2, Trash2, GripVertical, Play } from 'lucide-react';
+import { MessageSquare, Edit2, Trash2, GripVertical, Play, Circle } from 'lucide-react';
 import { useDraggable } from '@dnd-kit/core';
 
 interface TaskCardProps {
@@ -10,116 +10,123 @@ interface TaskCardProps {
   onStartTask?: (task: Task) => void;
 }
 
-const priorityConfig: Record<TaskPriority, { color: string; label: string; bg: string }> = {
-  low: { color: 'text-emerald-400', label: 'Low', bg: 'bg-emerald-400/10 border-emerald-400/30' },
-  medium: { color: 'text-blue-400', label: 'Medium', bg: 'bg-blue-400/10 border-blue-400/30' },
-  high: { color: 'text-amber-400', label: 'High', bg: 'bg-amber-400/10 border-amber-400/30' },
-  critical: { color: 'text-red-400', label: 'Critical', bg: 'bg-red-400/10 border-red-400/30' },
+const priorityConfig: Record<TaskPriority, { color: string; label: string; dot: string }> = {
+  low: { color: 'text-slate-500', label: 'Low', dot: 'bg-slate-400' },
+  medium: { color: 'text-blue-600', label: 'Med', dot: 'bg-blue-500' },
+  high: { color: 'text-amber-600', label: 'High', dot: 'bg-amber-500' },
+  critical: { color: 'text-red-600', label: 'Urgent', dot: 'bg-red-500' },
 };
 
 export default function TaskCard({ task, onEdit, onDelete, onOpenChat, onStartTask }: TaskCardProps) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: task.id,
+    data: { task },
   });
 
   const style = transform
-    ? {
-        transform: `translate(${transform.x}px, ${transform.y}px)`,
-      }
+    ? { transform: `translate(${transform.x}px, ${transform.y}px)` }
     : undefined;
 
   const priority = priorityConfig[task.priority];
   const isBacklog = task.status === 'backlog';
   const canStart = isBacklog && task.agentId && onStartTask;
 
+  // Generate a deterministic issue ID from the task id
+  const issueId = `ENG-${task.id.slice(0, 3).toUpperCase()}`;
+
   return (
     <div
       ref={setNodeRef}
       style={style}
-      className={`group relative bg-gray-800/80 backdrop-blur-sm border border-gray-700/50 rounded-xl p-4 mb-3 transition-all duration-200 hover:border-gray-600 hover:shadow-lg hover:shadow-black/20 ${
-        isDragging ? 'opacity-50 scale-105 shadow-2xl z-50' : ''
+      className={`group relative bg-white border border-slate-200 rounded-[6px] p-2.5 mb-2 transition-all duration-150 hover:border-slate-300 ${
+        isDragging ? 'shadow-drag opacity-90 z-50' : 'hover:shadow-[0_1px_2px_rgba(0,0,0,0.04)]'
       }`}
     >
-      {/* Drag handle */}
-      <div
-        {...attributes}
-        {...listeners}
-        className="absolute left-1 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 cursor-grab active:cursor-grabbing transition-opacity"
-      >
-        <GripVertical className="w-4 h-4 text-gray-500" />
-      </div>
-
-      {/* Priority badge */}
-      <div className="flex items-center justify-between mb-2">
-        <span className={`text-xs px-2 py-0.5 rounded-full border ${priority.bg} ${priority.color} font-medium`}>
-          {priority.label}
+      {/* Top row: issue ID + priority dot */}
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="font-mono text-[10px] text-slate-500 tracking-tight">
+          {issueId}
         </span>
-        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          {canStart && (
-            <button
-              onClick={() => onStartTask(task)}
-              className="p-1 rounded hover:bg-emerald-900/50 text-gray-400 hover:text-emerald-400 transition-colors"
-              title="Start task (move to Running)"
-            >
-              <Play className="w-3.5 h-3.5" />
-            </button>
-          )}
-          <button
-            onClick={() => onEdit(task)}
-            className="p-1 rounded hover:bg-gray-700 text-gray-400 hover:text-white transition-colors"
-            title="Edit task"
-          >
-            <Edit2 className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={() => onDelete(task.id)}
-            className="p-1 rounded hover:bg-red-900/50 text-gray-400 hover:text-red-400 transition-colors"
-            title="Delete task"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
+        <div className="flex items-center gap-0.5">
+          <span className={`w-1.5 h-1.5 rounded-full ${priority.dot}`} title={priority.label} />
+          <span className={`text-[10px] font-medium ${priority.color}`}>{priority.label}</span>
         </div>
       </div>
 
       {/* Title */}
-      <h4 className="text-sm font-medium text-gray-100 mb-1.5 line-clamp-2">{task.title}</h4>
+      <h4 className="text-[13px] font-medium text-slate-900 leading-snug mb-1 line-clamp-2">
+        {task.title}
+      </h4>
 
       {/* Description */}
       {task.description && (
-        <p className="text-xs text-gray-400 mb-3 line-clamp-2">{task.description}</p>
+        <p className="text-[11px] text-slate-500 leading-relaxed mb-2 line-clamp-2">
+          {task.description}
+        </p>
       )}
 
-      {/* Agent bubble */}
-      <div className="flex items-center justify-between">
+      {/* Footer: agent bubble + actions */}
+      <div className="flex items-center justify-between pt-1.5 border-t border-slate-100">
         {task.agentName ? (
-          <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded-full bg-gradient-to-br from-violet-500 to-purple-600 flex items-center justify-center">
-              <span className="text-[10px] font-bold text-white">
-                {task.agentName.charAt(0).toUpperCase()}
-              </span>
+          <div className="flex items-center gap-1.5">
+            <div className="w-4 h-4 rounded-[3px] flex items-center justify-center text-[9px] font-bold text-white"
+              style={{ backgroundColor: '#6366f1' }}>
+              {task.agentName.charAt(0).toUpperCase()}
             </div>
-            <span className="text-xs text-gray-400">{task.agentName}</span>
+            <span className="text-[11px] text-slate-600 font-medium">{task.agentName}</span>
           </div>
         ) : (
-          <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded-full bg-gray-700 flex items-center justify-center">
-              <span className="text-[10px] text-gray-500">?</span>
+          <div className="flex items-center gap-1.5">
+            <div className="w-4 h-4 rounded-[3px] bg-slate-100 border border-slate-200 flex items-center justify-center">
+              <Circle className="w-2 h-2 text-slate-300" />
             </div>
-            <span className="text-xs text-gray-500">Unassigned</span>
+            <span className="text-[11px] text-slate-400">Unassigned</span>
           </div>
         )}
 
-        {/* Chat icon */}
-        {task.sessionId && (
+        {/* Action buttons - visible on hover */}
+        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+          {canStart && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onStartTask(task); }}
+              className="p-1 rounded-[3px] hover:bg-emerald-50 text-slate-400 hover:text-emerald-600 transition-colors"
+              title="Start task (⌘↵)"
+            >
+              <Play className="w-3 h-3" />
+            </button>
+          )}
+          {task.sessionId && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onOpenChat(task); }}
+              className="p-1 rounded-[3px] hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition-colors"
+              title="Open chat"
+            >
+              <MessageSquare className="w-3 h-3" />
+            </button>
+          )}
           <button
-            onClick={() => onOpenChat(task)}
-            className="p-1.5 rounded-lg bg-gray-700/50 hover:bg-violet-600/30 text-gray-400 hover:text-violet-300 transition-all"
-            title="Open agent chat"
+            onClick={(e) => { e.stopPropagation(); onEdit(task); }}
+            className="p-1 rounded-[3px] hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition-colors"
+            title="Edit"
           >
-            <MessageSquare className="w-3.5 h-3.5" />
+            <Edit2 className="w-3 h-3" />
           </button>
-        )}
+          <button
+            onClick={(e) => { e.stopPropagation(); onDelete(task.id); }}
+            className="p-1 rounded-[3px] hover:bg-red-50 text-slate-400 hover:text-red-600 transition-colors"
+            title="Delete"
+          >
+            <Trash2 className="w-3 h-3" />
+          </button>
+        </div>
       </div>
+
+      {/* Drag handle - left edge */}
+      <div
+        {...attributes}
+        {...listeners}
+        className="absolute left-0 top-0 bottom-0 w-1 cursor-grab active:cursor-grabbing opacity-0 group-hover:opacity-100 hover:bg-slate-200 transition-opacity rounded-l-[6px]"
+      />
     </div>
   );
 }

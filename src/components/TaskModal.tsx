@@ -53,89 +53,83 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
     onClose();
   };
 
+  const priorityOptions: { value: TaskPriority; label: string; color: string }[] = [
+    { value: 'low', label: 'Low', color: 'hover:border-slate-300 data-[active=true]:border-slate-400 data-[active=true]:bg-slate-50' },
+    { value: 'medium', label: 'Med', color: 'hover:border-blue-300 data-[active=true]:border-blue-500 data-[active=true]:bg-blue-50 data-[active=true]:text-blue-700' },
+    { value: 'high', label: 'High', color: 'hover:border-amber-300 data-[active=true]:border-amber-500 data-[active=true]:bg-amber-50 data-[active=true]:text-amber-700' },
+    { value: 'critical', label: 'Urgent', color: 'hover:border-red-300 data-[active=true]:border-red-500 data-[active=true]:bg-red-50 data-[active=true]:text-red-700' },
+  ];
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden">
+      <div className="absolute inset-0 bg-slate-900/20 backdrop-blur-[2px]" onClick={onClose} />
+      <div className="relative bg-white border border-slate-200 rounded-[6px] shadow-[0_8px_24px_rgba(0,0,0,0.08)] w-full max-w-md mx-4 overflow-hidden">
         {/* Header */}
-        <div className="flex items-center justify-between p-5 border-b border-gray-700/50">
-          <h2 className="text-lg font-semibold text-gray-100">
-            {task ? 'Edit Task' : 'New Task'}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200">
+          <h2 className="text-[13px] font-semibold text-slate-900">
+            {task ? 'Edit task' : 'New task'}
           </h2>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg hover:bg-gray-700 text-gray-400 hover:text-white transition-colors"
+            className="p-1 rounded-[3px] hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition-colors"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4" />
           </button>
         </div>
 
         {/* Form */}
-        <form onSubmit={handleSubmit} className="p-5 space-y-4">
+        <form onSubmit={handleSubmit} className="p-4 space-y-3">
           {/* Title */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1.5">Title</label>
             <input
               type="text"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder="Task title..."
-              className="w-full px-3 py-2.5 bg-gray-800 border border-gray-700 rounded-xl text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 transition-all"
+              placeholder="Task title"
+              className="w-full px-2.5 py-2 bg-white border border-slate-200 rounded-[4px] text-[13px] text-slate-900 placeholder-slate-400 focus:outline-none focus:border-slate-400 focus:ring-1 focus:ring-slate-400/20 transition-all"
               autoFocus
             />
           </div>
 
           {/* Description */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1.5">Description</label>
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="Task description..."
+              placeholder="Description (optional)"
               rows={3}
-              className="w-full px-3 py-2.5 bg-gray-800 border border-gray-700 rounded-xl text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 transition-all resize-none"
+              className="w-full px-2.5 py-2 bg-white border border-slate-200 rounded-[4px] text-[13px] text-slate-900 placeholder-slate-400 focus:outline-none focus:border-slate-400 focus:ring-1 focus:ring-slate-400/20 transition-all resize-none"
             />
           </div>
 
           {/* Priority */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1.5">Priority</label>
-            <div className="grid grid-cols-4 gap-2">
-              {(['low', 'medium', 'high', 'critical'] as TaskPriority[]).map((p) => {
-                const colors: Record<TaskPriority, string> = {
-                  low: 'border-emerald-500/50 bg-emerald-500/10 text-emerald-400',
-                  medium: 'border-blue-500/50 bg-blue-500/10 text-blue-400',
-                  high: 'border-amber-500/50 bg-amber-500/10 text-amber-400',
-                  critical: 'border-red-500/50 bg-red-500/10 text-red-400',
-                };
-                return (
-                  <button
-                    key={p}
-                    type="button"
-                    onClick={() => setPriority(p)}
-                    className={`px-3 py-2 rounded-xl border text-xs font-medium capitalize transition-all ${
-                      priority === p
-                        ? colors[p]
-                        : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600'
-                    }`}
-                  >
-                    {p}
-                  </button>
-                );
-              })}
+            <label className="block text-[11px] font-medium text-slate-500 uppercase tracking-wide mb-1.5">Priority</label>
+            <div className="grid grid-cols-4 gap-1.5">
+              {priorityOptions.map((p) => (
+                <button
+                  key={p.value}
+                  type="button"
+                  data-active={priority === p.value}
+                  onClick={() => setPriority(p.value)}
+                  className={`px-2 py-1.5 rounded-[4px] border text-[11px] font-medium text-slate-600 border-slate-200 bg-white transition-all ${p.color}`}
+                >
+                  {p.label}
+                </button>
+              ))}
             </div>
           </div>
 
           {/* Agent Selection */}
           {availableAgents.length > 0 && (
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1.5">Assign Agent</label>
+              <label className="block text-[11px] font-medium text-slate-500 uppercase tracking-wide mb-1.5">Agent</label>
               <select
                 value={selectedAgentId}
                 onChange={(e) => setSelectedAgentId(e.target.value)}
-                className="w-full px-3 py-2.5 bg-gray-800 border border-gray-700 rounded-xl text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 transition-all"
+                className="w-full px-2.5 py-2 bg-white border border-slate-200 rounded-[4px] text-[13px] text-slate-900 focus:outline-none focus:border-slate-400 focus:ring-1 focus:ring-slate-400/20 transition-all"
               >
-                <option value="">No agent assigned</option>
+                <option value="">Unassigned</option>
                 {availableAgents.map((agent) => (
                   <option key={agent.id} value={agent.id}>
                     {agent.name}
@@ -146,19 +140,19 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
           )}
 
           {/* Actions */}
-          <div className="flex items-center justify-end gap-3 pt-2">
+          <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2.5 rounded-xl border border-gray-700 text-gray-300 hover:bg-gray-800 text-sm font-medium transition-colors"
+              className="px-3 py-1.5 rounded-[4px] border border-slate-200 text-slate-600 hover:bg-slate-50 text-[12px] font-medium transition-colors"
             >
               Cancel
             </button>
             <button
               type="submit"
-              className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-purple-600 text-white text-sm font-medium hover:from-violet-500 hover:to-purple-500 transition-all shadow-lg shadow-violet-500/20"
+              className="px-3 py-1.5 rounded-[4px] bg-slate-900 text-white text-[12px] font-medium hover:bg-slate-800 transition-colors"
             >
-              {task ? 'Save Changes' : 'Create Task'}
+              {task ? 'Save' : 'Create'}
             </button>
           </div>
         </form>
