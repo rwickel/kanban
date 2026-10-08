@@ -183,33 +183,65 @@ export default function App() {
   };
 
   const buildTaskPrompt = (task: Task): string => {
-    const desc = task.description?.trim() ? `\n\n${task.description.trim()}` : '';
-    return `${task.title}${desc}`;
+    const title = task.title?.trim() || 'Untitled task';
+    const desc = task.description?.trim() || '(no description provided)';
+    return `Task: ${title}\n\nDescription: ${desc}`;
+  };
+
+  const resolveAgentForTask = (task: Task): { id?: string; name?: string } => {
+    if (task.agentId) {
+      const found = agents.find((a) => a.id === task.agentId);
+      return { id: task.agentId, name: task.agentName ?? found?.name };
+    }
+    // No agent on task — fall back to project team, then any available agent
+    const project = projects.find((p) => p.id === task.projectId);
+    const teamIds = project?.agentIds ?? [];
+    const fallback =
+      agents.find((a) => teamIds.includes(a.id)) ??
+      (teamIds.length === 0 ? agents[0] : undefined) ??
+      agents[0];
+    if (fallback) return { id: fallback.id, name: fallback.name };
+    return {};
   };
 
   const startTaskExecution = async (task: Task) => {
-    if (!task.agentId) {
-      console.warn('startTaskExecution: task has no agentId, skipping session creation', task.id);
-      return;
+    const resolved = resolveAgentForTask(task);
+    // Persist resolved agent so TaskCard/chat have it even if user never assigned one
+    if (resolved.id && !task.agentId) {
+      updateTask(task.id, { agentId: resolved.id, agentName: resolved.name });
+      task = { ...task, agentId: resolved.id, agentName: resolved.name };
     }
-    if (task.sessionId) return;
 
-    // v2: POST /session { title, agent?, location? } — create in project.path so
-    // /work vs /work/Bridge-Server stays correct. Falls back to server default.
-    const project = projects.find(p => p.id === task.projectId);
+    const project = projects.find((p) => p.id === task.projectId);
     const directory = project?.path?.trim() || undefined;
 
-    const session = await createSession({ title: task.title, agent: task.agentId, directory });
-    if (!session?.id) {
-      console.error('startTaskExecution: no session id returned, chat icon will not appear');
-      return;
+    // Reuse existing session if the task already has one, otherwise create it.
+    let sessionId = task.sessionId;
+    if (!sessionId) {
+      // v2: POST /session { title, agent?, location? } — `agent` is the agent id/name;
+      // keep the previous behaviour (send the id) so server lookup succeeds.
+      const session = await createSession({ title: task.title, agent: resolved.id ?? resolved.name, directory });
+      if (!session?.id) {
+        console.error('startTaskExecution: no session id returned — check server connection / password');
+        return;
+      }
+      sessionId = session.id;
+      // Pin the real server-assigned session id to the task
+      updateTask(task.id, { sessionId: session.id, agentId: resolved.id, agentName: resolved.name });
+      task = { ...task, sessionId: session.id };
     }
 
+    // Execute the task: title + description go out as the prompt message
+    // on EVERY transition to running — including re-drops of an existing session.
     const prompt = buildTaskPrompt(task);
-    await sendPrompt(session.id, prompt, task.agentName);
+    console.log('startTaskExecution: sending prompt for task', task.id, '→ session', sessionId, prompt);
+    const sent = await sendPrompt(sessionId, prompt, resolved.name);
+    if (!sent) console.error('startTaskExecution: sendPrompt failed for', sessionId);
 
-    updateTask(task.id, { sessionId: session.id });
     loadData();
+    // Auto-open live chat so the user sees the agent working
+    const fresh = { ...task, sessionId, agentId: resolved.id, agentName: resolved.name, status: 'running' as const };
+    setChatTask(fresh);
   };
 
   const handleOpenChat = (task: Task) => {

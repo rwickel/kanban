@@ -5,16 +5,23 @@
 // user → text field; assistant → content[] parts; idle → protocol noise.
 
 export interface ToolCallInfo {
+  /** e.g. "write", "bash", "read" */
   tool: string;
+  /** completed | pending | running | error … */
   status: string;
+  /** one-liner: key input → key output */
   summary: string;
+  /** full input text (command / path+content …) for the details view */
+  input?: string;
+  /** full result text for the details view */
+  output?: string;
 }
 
 export interface ChatMessage {
   /** message id (msg_...) — stable across polls */
   id: string;
-  kind: 'user' | 'assistant' | 'tool' | 'error';
-  /** Markdown body for user/assistant/error messages. */
+  kind: 'user' | 'assistant' | 'reasoning' | 'tool' | 'error';
+  /** Markdown body for user/assistant/reasoning/error messages. */
   markdown: string;
   tool?: ToolCallInfo;
 }
@@ -27,10 +34,26 @@ function str(value: unknown): string {
 
 /** "action → output" one-liner, never raw JSON. */
 function toolSummary(part: Payload): string {
+  const input = toolInput(part);
+  const action = input.action || str(part.tool) || 'call';
+  return input.brief;
+}
+
+interface ToolDetail { action: string; brief: string; input: string; output: string }
+
+/** Extract human-readable input/output from a v2 tool part. */
+function toolInput(part: Payload): ToolDetail {
   const state = (part.state as Payload | undefined) ?? {};
-  const input = (state.input as Payload | undefined) ?? {};
-  const action = str(input.action) || str(input.tool) || str(part.tool) || 'call';
-  let output = str(state.output) || str(state.title) || str(state.summary);
+  const rawInput = (state.input as Payload | undefined) ?? {};
+  const outputParts = state.content;
+  let output = '';
+  if (Array.isArray(outputParts)) {
+    output = (outputParts as Payload[])
+      .map((c) => str(c.text))
+      .filter(Boolean)
+      .join('\n');
+  }
+  if (!output) output = str(state.output) || str(state.title) || str(state.summary);
   try {
     const parsed: unknown = JSON.parse(output);
     if (parsed && typeof parsed === 'object') {
@@ -38,9 +61,42 @@ function toolSummary(part: Payload): string {
       output = str(o.error) ? `error: ${str(o.error)}` : o.data != null ? String(o.data) : '';
     }
   } catch {
-    /* not JSON — keep raw, truncated below */
+    /* not JSON — keep raw */
   }
-  return [action, output].filter(Boolean).join(' → ').slice(0, 200);
+
+  // Pick the most informative input field per tool
+  const pick = (...keys: string[]): string => {
+    for (const k of keys) {
+      const v = rawInput[k];
+      if (typeof v === 'string' && v.trim()) return v.trim();
+    }
+    return '';
+  };
+  const command = pick('command');
+  const path = pick('path', 'file', 'filePath', 'filename', 'url');
+  const pattern = pick('pattern', 'query');
+  const text = pick('text', 'content');
+  const action =
+    command || (path ? `${str(part.tool) || 'tool'} ${path}` : '') || pattern || str(part.tool) || 'call';
+
+  // Brief one-liner: action → output, capped
+  const briefOut = output.replace(/\s+/g, ' ').trim().slice(0, 120);
+  const brief = [action, briefOut].filter(Boolean).join(' → ').slice(0, 200);
+
+  // Full details: command or path+content, then output
+  const inputLines: string[] = [];
+  if (command) inputLines.push(`$ ${command}`);
+  if (path) inputLines.push(path);
+  if (!command && !path && pattern) inputLines.push(pattern);
+  if (text && text !== command) inputLines.push(text.length > 2000 ? `${text.slice(0, 2000)}\n… (truncated)` : text);
+  if (inputLines.length === 0) {
+    try {
+      const raw = JSON.stringify(rawInput);
+      if (raw && raw !== '{}') inputLines.push(raw.length > 2000 ? `${raw.slice(0, 2000)}…` : raw);
+    } catch { /* ignore */ }
+  }
+  const input = inputLines.join('\n');
+  return { action, brief, input, output: output.length > 4000 ? `${output.slice(0, 4000)}\n… (truncated)` : output };
 }
 
 function contentToMessages(id: string, kind: 'user' | 'assistant', part: Payload): ChatMessage[] {
@@ -54,23 +110,35 @@ function contentToMessages(id: string, kind: 'user' | 'assistant', part: Payload
     case 'reasoning': {
       const text = str(part.text).trim();
       if (!text) return [];
-      return [{ id: `${id}-reasoning`, kind: 'assistant', markdown: `> ${text}` }];
+      return [{ id: `${id}-reasoning`, kind: 'reasoning', markdown: text }];
     }
     case 'tool': {
       const state = (part.state as Payload | undefined) ?? {};
       const status = str(state.status) || 'pending';
-      if (status === 'error' || str(state.error)) {
+      const detail = toolInput(part);
+      const execErr = str(state.error);
+      const exec = (part as Record<string, unknown>).executed as boolean | undefined;
+      if (status === 'error' || execErr) {
         return [{
           id: `${id}-tool`,
           kind: 'error',
-          markdown: str(state.error) || toolSummary(part) || 'Tool call failed.',
+          markdown: execErr || toolSummary(part) || 'Tool call failed.',
         }];
       }
+      // Treat both executed:true and status:completed as "executed" (v2 sends completed)
+      const executed = exec === true || status === 'completed';
+      const st = executed ? 'executed' : status;
       return [{
         id: `${id}-tool`,
         kind: 'tool',
         markdown: '',
-        tool: { tool: str(part.tool) || 'tool', status, summary: toolSummary(part) },
+        tool: {
+          tool: str(part.name) || str(part.tool) || 'tool',
+          status: st,
+          summary: detail.brief,
+          input: detail.input || detail.action,
+          output: detail.output,
+        },
       }];
     }
     case 'file': {
@@ -109,6 +177,7 @@ export function toChatMessage(raw: unknown): ChatMessage[] {
   for (const part of content) {
     if (part && typeof part === 'object') out.push(...contentToMessages(id, 'assistant', part));
   }
+  // Keep server content order (reasoning / text / tools as they arrived).
   return out;
 }
 
