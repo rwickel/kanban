@@ -478,7 +478,6 @@ export default function App() {
                   title={col.title}
                   icon={col.icon}
                   tasks={tasks[col.status]}
-                  color={col.status}
                   onEditTask={handleEditTask}
                   onDeleteTask={handleDeleteTask}
                   onOpenChat={handleOpenChat}

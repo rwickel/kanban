@@ -8,7 +8,6 @@ interface KanbanColumnProps {
   title: string;
   icon: string;
   tasks: Task[];
-  color: string;
   onEditTask: (task: Task) => void;
   onDeleteTask: (id: string) => void;
   onOpenChat: (task: Task) => void;
@@ -35,7 +34,6 @@ export default function KanbanColumn({
   title,
   icon,
   tasks,
-  color,
   onEditTask,
   onDeleteTask,
   onOpenChat,
