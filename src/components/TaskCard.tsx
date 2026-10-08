@@ -98,8 +98,8 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat }: TaskCar
           </div>
         )}
 
-        {/* Chat icon */}
-        {task.sessionId && (
+        {/* Chat icon — always visible when a session exists; pulsing placeholder while wiring up */}
+        {task.sessionId ? (
           <button
             onClick={() => onOpenChat(task)}
             className="p-1.5 rounded-lg bg-gray-700/50 hover:bg-violet-600/30 text-gray-400 hover:text-violet-300 transition-all"
@@ -107,6 +107,16 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat }: TaskCar
           >
             <MessageSquare className="w-3.5 h-3.5" />
           </button>
+        ) : (
+          task.agentId && (
+            <button
+              onClick={() => onOpenChat(task)}
+              className="p-1.5 rounded-lg bg-gray-700/30 text-gray-600 hover:text-violet-300 transition-all animate-pulse"
+              title="Start session & open chat"
+            >
+              <MessageSquare className="w-3.5 h-3.5" />
+            </button>
+          )
         )}
       </div>
     </div>

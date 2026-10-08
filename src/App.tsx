@@ -26,10 +26,11 @@ import {
   deleteTask,
   moveTask,
 } from './store/kanban';
-import { fetchAgents, createSession, getServerInfo } from './api/opencode';
+import { fetchAgents, createSession, sendPrompt, getServerInfo } from './api/opencode';
 import { getServerConfig } from './store/serverConfig';
 import KanbanColumn from './components/KanbanColumn';
 import TaskModal from './components/TaskModal';
+import SessionChatWindow from './components/SessionChatWindow';
 import ProjectModal from './components/ProjectModal';
 import AgentTeamModal from './components/AgentTeamModal';
 import ServerConfigModal from './components/ServerConfigModal';
@@ -66,6 +67,9 @@ export default function App() {
 
   // Drag state
   const [activeTask, setActiveTask] = useState<Task | null>(null);
+
+  // Chat window state
+  const [chatTask, setChatTask] = useState<Task | null>(null);
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -166,23 +170,60 @@ export default function App() {
     const newStatus = over.data.current?.status as TaskStatus;
 
     if (task && newStatus && task.status !== newStatus) {
-      moveTask(task.id, newStatus);
+      const movedTask = moveTask(task.id, newStatus);
 
-      // If moving to running and task has an agent but no session, create one
-      if (newStatus === 'running' && task.agentId && !task.sessionId) {
-        createSessionForTask(task);
+      // If moving to running, wire task execution to the agent:
+      // ensure project folder exists, create session in it, send task prompt.
+      if (newStatus === 'running') {
+        startTaskExecution(movedTask ?? { ...task, status: newStatus });
       }
 
       loadData();
     }
   };
 
-  const createSessionForTask = async (task: Task) => {
-    if (!task.agentId) return;
-    const session = await createSession(task.agentId, task.title);
-    if (session) {
-      updateTask(task.id, { sessionId: session.id });
-      loadData();
+  const buildTaskPrompt = (task: Task): string => {
+    const desc = task.description?.trim() ? `\n\n${task.description.trim()}` : '';
+    return `${task.title}${desc}`;
+  };
+
+  const startTaskExecution = async (task: Task) => {
+    if (!task.agentId) {
+      console.warn('startTaskExecution: task has no agentId, skipping session creation', task.id);
+      return;
+    }
+    if (task.sessionId) return;
+
+    // v2: POST /session { title, agent?, location? } — create in project.path so
+    // /work vs /work/Bridge-Server stays correct. Falls back to server default.
+    const project = projects.find(p => p.id === task.projectId);
+    const directory = project?.path?.trim() || undefined;
+
+    const session = await createSession({ title: task.title, agent: task.agentId, directory });
+    if (!session?.id) {
+      console.error('startTaskExecution: no session id returned, chat icon will not appear');
+      return;
+    }
+
+    const prompt = buildTaskPrompt(task);
+    await sendPrompt(session.id, prompt, task.agentName);
+
+    updateTask(task.id, { sessionId: session.id });
+    loadData();
+  };
+
+  const handleOpenChat = (task: Task) => {
+    if (task.sessionId) {
+      setChatTask(task);
+      return;
+    }
+    // No session yet (e.g. creation failed, or task never went through running):
+    // wire it up now so the icon has something to open.
+    if (task.agentId) {
+      startTaskExecution(task).then(() => {
+        const fresh = getTasksByStatus(task.projectId, task.status).find(t => t.id === task.id);
+        if (fresh?.sessionId) setChatTask(fresh);
+      });
     }
   };
 
@@ -227,12 +268,22 @@ export default function App() {
     setShowTaskModal(true);
   };
 
-  const handleOpenChat = (task: Task) => {
-    if (task.sessionId) {
-      // In a real app, this would open the OpenCode chat interface
-      window.open(`#session/${task.sessionId}`, '_blank');
+  // Deep-link / pop-out window: support both hash and path (e.g. /#session/<id> or /session/<id>)
+  useEffect(() => {
+    const sid =
+      window.location.hash.match(/#session\/([\w-]+)/)?.[1] ??
+      window.location.pathname.match(/\/session\/([\w-]+)/)?.[1];
+    if (!sid) return;
+    // Find task by sessionId in localStorage even if project state hasn't loaded yet
+    try {
+      const raw = localStorage.getItem('kanban_tasks');
+      const all: Task[] = raw ? JSON.parse(raw) : [];
+      const found = all.find((t) => t.sessionId === sid);
+      if (found) setChatTask(found);
+    } catch {
+      // ignore
     }
-  };
+  }, []);
 
   const handleSaveProject = (data: { name: string; path: string; description: string }) => {
     if (editingProject) {
@@ -539,6 +590,9 @@ export default function App() {
         onClose={() => setShowServerModal(false)}
         onConnected={handleServerConnected}
       />
+
+      {/* Session chat — in-app side panel + deep-linkable pop-out window */}
+      <SessionChatWindow task={chatTask} onClose={() => setChatTask(null)} />
     </div>
   );
 }
