@@ -61,3 +61,11 @@ export interface OpenCodeSessionInfo {
     content?: string;
   }>;
 }
+
+// Raw v2 message item from GET /api/session/{id}/message:
+// { data: SessionMessage[], cursor } where items carry info + parts.
+export interface V2SessionMessage {
+  info?: { id?: string; role?: string; text?: string; [k: string]: unknown };
+  parts?: Array<{ type?: string; text?: string; [k: string]: unknown }>;
+  [k: string]: unknown;
+}
