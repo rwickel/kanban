@@ -31,7 +31,6 @@ export default function AgentTeamModal({ isOpen, onClose, onSave, selectedAgentI
       if (fetchedAgents.length > 0) {
         setAgents(fetchedAgents);
       } else {
-        // Fallback demo agents if API is not available
         setAgents([
           { id: 'coder', name: 'Coder', description: 'General coding agent', color: '#8b5cf6' },
           { id: 'reviewer', name: 'Reviewer', description: 'Code review agent', color: '#3b82f6' },
@@ -69,46 +68,45 @@ export default function AgentTeamModal({ isOpen, onClose, onSave, selectedAgentI
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden">
-        {/* Header */}
-        <div className="flex items-center justify-between p-5 border-b border-gray-700/50">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <div className="relative modal-card w-full max-w-lg mx-4 overflow-hidden animate-fadeIn">
+        {/* Header — matches TaskModal / theme vars */}
+        <div className="flex items-center justify-between px-4 py-3 modal-head">
           <div className="flex items-center gap-2">
-            <Bot className="w-5 h-5 text-violet-400" />
-            <h2 className="text-lg font-semibold text-gray-100">Agent Team</h2>
+            <Bot className="w-4 h-4 muted" strokeWidth={1.75} />
+            <h2 className="text-[13px] font-semibold t-strong">Agent Team</h2>
+            <span className="pill p-neutral mono text-[11px]">{agents.length} agents</span>
           </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded-lg hover:bg-gray-700 text-gray-400 hover:text-white transition-colors"
-          >
-            <X className="w-5 h-5" />
+          <button onClick={onClose} className="btn p-1" aria-label="Close">
+            <X className="w-4 h-4" strokeWidth={1.75} />
           </button>
         </div>
 
         {/* Content */}
-        <div className="p-5">
+        <div className="p-4">
           {error && (
-            <div className="mb-4 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs">
+            <div className="mb-3 px-3 py-2 rounded-md text-[12px] p-amber">
               {error}
             </div>
           )}
 
-          <div className="flex items-center justify-between mb-3">
-            <p className="text-sm text-gray-400">Select agents for this project</p>
+          <div className="flex items-center justify-between mb-2.5">
+            <p className="text-[12px] muted">Select agents for this project</p>
             <button
               onClick={loadAgents}
               disabled={loading}
-              className="p-1.5 rounded-lg hover:bg-gray-700 text-gray-400 hover:text-white transition-colors disabled:opacity-50"
+              className="btn p-1 disabled:opacity-50"
               title="Refresh agents"
+              aria-label="Refresh agents"
             >
-              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} strokeWidth={1.75} />
             </button>
           </div>
 
-          <div className="space-y-2 max-h-[300px] overflow-y-auto">
+          <div className="space-y-1.5 max-h-[300px] overflow-y-auto pr-1">
             {loading && agents.length === 0 ? (
               <div className="flex items-center justify-center h-32">
-                <RefreshCw className="w-5 h-5 text-gray-500 animate-spin" />
+                <RefreshCw className="w-4 h-4 muted animate-spin" />
               </div>
             ) : (
               agents.map((agent) => {
@@ -117,37 +115,38 @@ export default function AgentTeamModal({ isOpen, onClose, onSave, selectedAgentI
                   <button
                     key={agent.id}
                     onClick={() => toggleAgent(agent.id)}
-                    className={`w-full flex items-center gap-3 p-3 rounded-xl border transition-all ${
+                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md border text-left transition-colors ${
                       isChecked
-                        ? 'border-violet-500/50 bg-violet-500/10'
-                        : 'border-gray-700/50 bg-gray-800/50 hover:border-gray-600'
+                        ? 'bg-[var(--surface-2)]'
+                        : 'bg-[var(--surface)] hoverable'
                     }`}
+                    style={{ borderColor: isChecked ? 'var(--border-strong)' : 'var(--border)' }}
                   >
                     <div
-                      className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0"
-                      style={{ backgroundColor: (agent.color || '#8b5cf6') + '30' }}
+                      className="w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0 mono text-[11px] font-bold"
+                      style={{
+                        backgroundColor: `color-mix(in srgb, ${agent.color || '#0F172A'} 14%, var(--surface-2))`,
+                        color: agent.color || 'var(--text)',
+                        border: `1px solid color-mix(in srgb, ${agent.color || '#0F172A'} 22%, transparent)`,
+                      }}
                     >
-                      <span
-                        className="text-xs font-bold"
-                        style={{ color: agent.color || '#8b5cf6' }}
-                      >
-                        {agent.name.charAt(0).toUpperCase()}
-                      </span>
+                      {agent.name.charAt(0).toUpperCase()}
                     </div>
-                    <div className="flex-1 text-left">
-                      <p className="text-sm font-medium text-gray-100">{agent.name}</p>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[13px] font-medium t-strong leading-tight truncate">{agent.name}</p>
                       {agent.description && (
-                        <p className="text-xs text-gray-400">{agent.description}</p>
+                        <p className="text-[11px] muted leading-tight truncate">{agent.description}</p>
                       )}
                     </div>
                     <div
-                      className={`w-5 h-5 rounded-md border-2 flex items-center justify-center transition-all ${
-                        isChecked
-                          ? 'border-violet-500 bg-violet-500'
-                          : 'border-gray-600 bg-gray-800'
-                      }`}
+                      className="w-[18px] h-[18px] rounded flex items-center justify-center flex-shrink-0 transition-colors"
+                      style={{
+                        border: `1.5px solid ${isChecked ? 'var(--accent)' : 'var(--border-strong)'}`,
+                        background: isChecked ? 'var(--accent)' : 'var(--surface)',
+                        color: 'var(--accent-text)',
+                      }}
                     >
-                      {isChecked && <Check className="w-3 h-3 text-white" />}
+                      {isChecked && <Check className="w-3 h-3" strokeWidth={2.5} />}
                     </div>
                   </button>
                 );
@@ -157,20 +156,20 @@ export default function AgentTeamModal({ isOpen, onClose, onSave, selectedAgentI
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between p-5 border-t border-gray-700/50">
-          <span className="text-xs text-gray-500">
+        <div className="flex items-center justify-between px-4 py-3 border-t hairline" style={{ borderTopStyle: 'solid', borderTopWidth: 1 }}>
+          <span className="text-[11px] mono muted">
             {checkedIds.length} agent{checkedIds.length !== 1 ? 's' : ''} selected
           </span>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
             <button
               onClick={onClose}
-              className="px-4 py-2.5 rounded-xl border border-gray-700 text-gray-300 hover:bg-gray-800 text-sm font-medium transition-colors"
+              className="btn px-3 py-1.5 text-[12px] font-medium"
             >
-              Cancel
+              Cancel <span className="kbd ml-1">esc</span>
             </button>
             <button
               onClick={handleSave}
-              className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-purple-600 text-white text-sm font-medium hover:from-violet-500 hover:to-purple-500 transition-all shadow-lg shadow-violet-500/20"
+              className="btn btn-primary px-3 py-1.5 text-[12px] font-medium"
             >
               Save Team
             </button>
