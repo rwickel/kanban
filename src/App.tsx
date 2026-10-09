@@ -7,11 +7,15 @@ import {
   Settings,
   Trash2,
   ChevronDown,
-  Layout,
+  LayoutGrid,
   Wifi,
   WifiOff,
   Server,
+  Moon,
+  Sun,
+  Search,
 } from 'lucide-react';
+import { useTheme } from './hooks/useTheme';
 import { Task, TaskStatus, TaskPriority, Project, Agent, OpenCodeAgentInfo } from './types';
 import {
   getProjects,
@@ -20,15 +24,16 @@ import {
   createProject,
   updateProject,
   deleteProject,
-  getTasksByStatus,
+  getTasks,
   createTask,
   updateTask,
   deleteTask,
   moveTask,
+  migrateLocalStorageToServer,
 } from './store/kanban';
 import { fetchAgents, createSession, sendPrompt, getServerInfo } from './api/opencode';
-import { getServerConfig } from './store/serverConfig';
-import KanbanColumn from './components/KanbanColumn';
+import { getServerConfig, getTaskModelPref } from './store/serverConfig';
+import KanbanColumn, { columnIcons } from './components/KanbanColumn';
 import TaskModal from './components/TaskModal';
 import SessionChatWindow from './components/SessionChatWindow';
 import ProjectModal from './components/ProjectModal';
@@ -36,11 +41,11 @@ import AgentTeamModal from './components/AgentTeamModal';
 import ServerConfigModal from './components/ServerConfigModal';
 import TaskCard from './components/TaskCard';
 
-const COLUMNS: { status: TaskStatus; title: string; icon: string }[] = [
-  { status: 'backlog', title: 'Backlog', icon: '📋' },
-  { status: 'running', title: 'Running', icon: '⚡' },
-  { status: 'done', title: 'Done', icon: '✅' },
-  { status: 'blocked', title: 'Blocked', icon: '🚫' },
+const COLUMNS: { status: TaskStatus; title: string }[] = [
+  { status: 'backlog', title: 'Backlog' },
+  { status: 'running', title: 'In Progress' },
+  { status: 'done', title: 'Complete' },
+  { status: 'blocked', title: 'Blocked' },
 ];
 
 export default function App() {
@@ -77,12 +82,24 @@ export default function App() {
     })
   );
 
-  // Load data
-  const loadData = useCallback(() => {
-    const projs = getProjects();
-    setProjects(projs);
+  // Load data — Option B: SQLite via /api/kanban (async).
+  const loadData = useCallback(async () => {
+    // First run: push any legacy localStorage rows into the shared DB.
+    try {
+      if (!localStorage.getItem('kanban_migrated_v2')) {
+        await migrateLocalStorageToServer();
+        localStorage.setItem('kanban_migrated_v2', '1');
+      }
+    } catch { /* server down — fall back to cache */ }
 
     let activeId = getActiveProjectId();
+    const peek = activeId;
+    const [projs, all] = await Promise.all([
+      getProjects(),
+      peek ? getTasks(peek) : Promise.resolve([] as Task[]),
+    ]);
+    setProjects(projs);
+
     if (!activeId && projs.length > 0) {
       activeId = projs[0].id;
       setActiveProjectId(activeId);
@@ -91,10 +108,10 @@ export default function App() {
 
     if (activeId) {
       setTasks({
-        backlog: getTasksByStatus(activeId, 'backlog'),
-        running: getTasksByStatus(activeId, 'running'),
-        done: getTasksByStatus(activeId, 'done'),
-        blocked: getTasksByStatus(activeId, 'blocked'),
+        backlog: all.filter((t) => t.status === 'backlog'),
+        running: all.filter((t) => t.status === 'running'),
+        done: all.filter((t) => t.status === 'done'),
+        blocked: all.filter((t) => t.status === 'blocked'),
       });
     } else {
       setTasks({ backlog: [], running: [], done: [], blocked: [] });
@@ -146,37 +163,24 @@ export default function App() {
       if (info) setIsConnected(true);
     });
 
-    // Agent completion loop: the agent calls the kanban MCP tool
-    // (kanban_update_status) when finished; the MCP server writes a queue file
-    // and we apply it to the board here.
-    const pollPending = async () => {
-      try {
-        const res = await fetch('/api/tasks/pending');
-        if (!res.ok) return;
-        const { pending } = await res.json();
-        if (!Array.isArray(pending) || pending.length === 0) return;
-        for (const p of pending) {
-          if (p?.taskId && p?.status) {
-            const moved = moveTask(p.taskId, p.status);
-            if (moved) console.log(`agent moved task ${p.taskId} → ${p.status}`);
-          }
-        }
-        await fetch('/api/tasks/pending', { method: 'DELETE' });
-        loadData();
-      } catch {
-        /* dev server restarted / unreachable — next tick retries */
-      }
-    };
-    const pendingTimer = setInterval(pollPending, 3000);
-    return () => clearInterval(pendingTimer);
+    // Option B: MCP writes straight to SQLite — just refresh from the store.
+    // 5s covers agent-side create/move/update without hammering the CLI.
+    const refreshTimer = setInterval(() => {
+      loadData().catch(() => { /* server down — next tick retries */ });
+    }, 5000);
+    return () => clearInterval(refreshTimer);
   }, [loadData, loadAgents]);
 
   // Active project
   const activeProject = projects.find(p => p.id === activeProjectId) || null;
 
-  // Get available agents for current project
+  // Get available agents for current project.
+  // If the project has no team configured yet, fall back to all agents
+  // so the New Task modal still offers an agent picker.
   const availableAgents = activeProject
-    ? agents.filter(a => activeProject.agentIds.includes(a.id))
+    ? (activeProject.agentIds.length > 0
+        ? agents.filter(a => activeProject.agentIds.includes(a.id))
+        : agents)
     : [];
 
   // Handlers
@@ -185,7 +189,34 @@ export default function App() {
     if (task) setActiveTask(task);
   };
 
-  const handleDragEnd = (event: DragEndEvent) => {
+  // Optimistic helpers: update the board instantly, reconcile with server after.
+  const moveTaskInState = (id: string, newStatus: TaskStatus) => {
+    setTasks((prev) => {
+      let found: Task | null = null;
+      const next = { ...prev };
+      for (const key of Object.keys(next) as TaskStatus[]) {
+        const idx = next[key].findIndex((t) => t.id === id);
+        if (idx !== -1) {
+          const [t] = next[key].splice(idx, 1);
+          found = { ...t, status: newStatus };
+          next[key] = [...next[key]];
+        }
+      }
+      if (!found) return prev;
+      return { ...next, [newStatus]: [...next[newStatus], found] };
+    });
+  };
+  const upsertTaskInState = (task: Task) => {
+    setTasks((prev) => {
+      const next = { ...prev };
+      for (const key of Object.keys(next) as TaskStatus[]) {
+        next[key] = next[key].filter((t) => t.id !== task.id);
+      }
+      return { ...next, [task.status]: [...next[task.status], task] };
+    });
+  };
+
+  const handleDragEnd = async (event: DragEndEvent) => {
     setActiveTask(null);
     const { active, over } = event;
     if (!over) return;
@@ -194,15 +225,26 @@ export default function App() {
     const newStatus = over.data.current?.status as TaskStatus;
 
     if (task && newStatus && task.status !== newStatus) {
-      const movedTask = moveTask(task.id, newStatus);
-
-      // If moving to running, wire task execution to the agent:
-      // ensure project folder exists, create session in it, send task prompt.
+      // 1. Move instantly in UI, flag startup so the card shows progress.
       if (newStatus === 'running') {
-        startTaskExecution(movedTask ?? { ...task, status: newStatus });
+        upsertTaskInState({ ...task, status: 'running', startupPhase: 'creating-session', startupError: undefined });
+      } else {
+        moveTaskInState(task.id, newStatus);
       }
+      try {
+        const movedTask = await moveTask(task.id, newStatus);
 
-      loadData();
+        // If moving to running, wire task execution to the agent.
+        if (newStatus === 'running') {
+          startTaskExecution(movedTask ?? { ...task, status: newStatus });
+        }
+      } catch (e) {
+        console.error('move failed, reverting', e);
+        moveTaskInState(task.id, task.status);
+      } finally {
+        // 2. Reconcile in background (don't block the drag animation).
+        loadData().catch(() => {});
+      }
     }
   };
 
@@ -218,11 +260,14 @@ export default function App() {
       projectName ? `Project: ${projectName}${projectPath ? ` (${projectPath})` : ''}` : undefined,
       `Priority: ${prio}`,
       `Task id: ${task.id}`,
+      `Project id: ${task.projectId}`,
     ].filter(Boolean).join('\n');
     const footer =
-      `\n---\nWhen you are finished, update the task status with the kanban MCP tool:\n` +
+      `\n---\nWhen you are finished, use the kanban MCP tools (shared SQLite store):\n` +
       `  Call kanban_update_status with { taskId: "${task.id}", status: "done" } when complete, or "blocked" if stuck.\n` +
-      `Do this as the last step — after all code changes are complete. The board will move the task automatically.`;
+      `  To break off follow-up work, call kanban_create_task with { projectId: "${task.projectId}", title, description, priority }.\n` +
+      `  To list/search work, call kanban_list_tasks with { projectId: "${task.projectId}" }.\n` +
+      `Do the status update as the last step — after all code changes are complete. The board refreshes from the store automatically.`;
     return `${headerLines}\n\nTask: ${title}\n\nDescription: ${desc}${footer}`;
   };
 
@@ -243,42 +288,99 @@ export default function App() {
   };
 
   const startTaskExecution = async (task: Task) => {
+    const fail = async (msg: string, taskId: string) => {
+      await updateTask(taskId, { startupPhase: 'error', startupError: msg } as unknown as Partial<Task>).catch(() => {});
+      upsertTaskInState({ ...task, startupPhase: 'error', startupError: msg, status: 'running' as const } as Task);
+      setChatTask((cur) => (cur?.id === task.id ? ({ ...cur, startupPhase: 'error', startupError: msg } as Task) : cur));
+      console.error(msg);
+    };
+
     const resolved = resolveAgentForTask(task);
     // Persist resolved agent so TaskCard/chat have it even if user never assigned one
     if (resolved.id && !task.agentId) {
-      updateTask(task.id, { agentId: resolved.id, agentName: resolved.name });
       task = { ...task, agentId: resolved.id, agentName: resolved.name };
+      await updateTask(task.id, { agentId: resolved.id, agentName: resolved.name } as unknown as Partial<Task>).catch(() => {});
+      upsertTaskInState(task);
     }
 
     const project = projects.find((p) => p.id === task.projectId);
     const directory = project?.path?.trim() || undefined;
 
+    // Pinned branch: warn (not block) if the checkout differs from project.gitBranch.
+    // Never auto-switches — that would nuke WIP when parallel tasks run.
+    if (project?.id) {
+      try {
+        const { checkProjectBranch } = await import('./store/kanban');
+        const bc = await checkProjectBranch(project.id);
+        if (bc && !bc.ok && !bc.skipped) {
+          const go = confirm(
+            `Branch mismatch in ${project.folder || project.name}:\ncheckout is "${bc.current}", pinned is "${bc.pinned}".\n\nStart the session anyway? (OK = continue, Cancel = stop)`
+          );
+          if (!go) {
+            moveTaskInState(task.id, task.status === 'running' ? 'backlog' : task.status);
+            await loadData().catch(() => {});
+            return;
+          }
+        }
+      } catch { /* offline — skip branch check */ }
+    }
+
+    // Model: task-level pick → saved default → omit (server default).
+    // OpenAPI Model.Ref is { providerID, id } — NOT { providerID, modelID }.
+    const pref = getTaskModelPref();
+    const raw =
+      task.modelProviderID && task.modelId
+        ? { providerID: task.modelProviderID, modelID: task.modelId }
+        : pref
+          ? pref
+          : undefined;
+    const model = raw ? { providerID: raw.providerID, id: raw.modelID } : undefined;
+
     // Reuse existing session if the task already has one, otherwise create it.
     let sessionId = task.sessionId;
     if (!sessionId) {
-      // v2: POST /session { title, agent?, location? } — `agent` is the agent id/name;
-      // keep the previous behaviour (send the id) so server lookup succeeds.
-      const session = await createSession({ title: task.title, agent: resolved.id ?? resolved.name, directory });
+      // Show progress on the card + open chat right away so the user sees "creating session…" instead of empty.
+      upsertTaskInState({ ...task, startupPhase: 'creating-session', startupError: undefined } as Task);
+      setChatTask({ ...task, startupPhase: 'creating-session', startupError: undefined } as Task);
+      const res = await createSession({ title: task.title, agent: resolved.id ?? resolved.name, model, directory });
+      const session = res.session;
       if (!session?.id) {
-        console.error('startTaskExecution: no session id returned — check server connection / password');
+        const msg = [
+          res.error ?? 'Failed to create session — no id returned.',
+          !isConnected ? 'Server is offline (DEMO mode). Open Server settings, Save & test the connection.' : undefined,
+        ].filter(Boolean).join(' ');
+        await fail(msg, task.id);
+        await loadData().catch(() => {});
         return;
       }
       sessionId = session.id;
       // Pin the real server-assigned session id to the task
-      updateTask(task.id, { sessionId: session.id, agentId: resolved.id, agentName: resolved.name });
       task = { ...task, sessionId: session.id };
+      await updateTask(task.id, { sessionId: session.id, agentId: resolved.id, agentName: resolved.name, startupPhase: 'sending-prompt' } as unknown as Partial<Task>).catch(() => {});
+      upsertTaskInState({ ...task, startupPhase: 'sending-prompt' } as Task);
+      setChatTask({ ...task, startupPhase: 'sending-prompt' } as Task);
+    } else {
+      upsertTaskInState({ ...task, startupPhase: 'sending-prompt', startupError: undefined } as Task);
+      setChatTask({ ...task, startupPhase: 'sending-prompt', startupError: undefined } as Task);
     }
 
     // Execute the task: title + description go out as the prompt message
     // on EVERY transition to running — including re-drops of an existing session.
     const prompt = buildTaskPrompt(task);
-    console.log('startTaskExecution: sending prompt for task', task.id, '→ session', sessionId, prompt);
-    const sent = await sendPrompt(sessionId, prompt, resolved.name);
-    if (!sent) console.error('startTaskExecution: sendPrompt failed for', sessionId);
+    console.log('startTaskExecution: sending prompt for task', task.id, '→ session', sessionId);
+    const sent = await sendPrompt(sessionId, prompt, resolved.id);
+    if (!sent.ok) {
+      await fail(`Failed to send prompt: ${sent.error ?? 'unknown error'}`, task.id);
+      await loadData().catch(() => {});
+      return;
+    }
 
-    loadData();
-    // Auto-open live chat so the user sees the agent working
-    const fresh = { ...task, sessionId, agentId: resolved.id, agentName: resolved.name, status: 'running' as const };
+    await updateTask(task.id, { startupPhase: 'ready' } as unknown as Partial<Task>).catch(() => {});
+    upsertTaskInState({ ...task, startupPhase: 'ready', startupError: undefined, sessionId } as Task);
+    setChatTask((cur) => (cur?.id === task.id ? ({ ...cur, startupPhase: 'ready' } as Task) : cur));
+    await loadData();
+    // Ensure chat points at the live session
+    const fresh = { ...task, sessionId, agentId: resolved.id, agentName: resolved.name, status: 'running' as const, startupPhase: 'ready' as const };
     setChatTask(fresh);
   };
 
@@ -290,47 +392,90 @@ export default function App() {
     // No session yet (e.g. creation failed, or task never went through running):
     // wire it up now so the icon has something to open.
     if (task.agentId) {
-      startTaskExecution(task).then(() => {
-        const fresh = getTasksByStatus(task.projectId, task.status).find(t => t.id === task.id);
+      startTaskExecution(task).then(async () => {
+        const all = await getTasks(task.projectId);
+        const fresh = all.find(t => t.id === task.id);
         if (fresh?.sessionId) setChatTask(fresh);
       });
     }
   };
 
-  const handleSaveTask = (data: {
+  const handleSaveTask = async (data: {
     title: string;
     description: string;
     priority: TaskPriority;
     agentId?: string;
     agentName?: string;
+    modelId?: string;
+    modelProviderID?: string;
   }) => {
     if (!activeProjectId) return;
 
     if (editingTask) {
-      updateTask(editingTask.id, {
+      // Optimistic: reflect edit instantly, persist in background.
+      upsertTaskInState({ ...editingTask, ...data });
+      setEditingTask(null);
+      try {
+        await updateTask(editingTask.id, {
+          title: data.title,
+          description: data.description,
+          priority: data.priority,
+          agentId: data.agentId,
+          agentName: data.agentName,
+          modelId: data.modelId,
+          modelProviderID: data.modelProviderID,
+        });
+      } catch (e) {
+        console.error('update failed', e);
+      } finally {
+        loadData().catch(() => {});
+      }
+    } else {
+      // Optimistic: insert a temp card instantly, swap in server row after.
+      const tempId = `temp-${Date.now()}`;
+      const tempTask: Task = {
+        id: tempId,
+        projectId: activeProjectId,
         title: data.title,
         description: data.description,
+        status: 'backlog',
         priority: data.priority,
         agentId: data.agentId,
         agentName: data.agentName,
-      });
-    } else {
-      createTask(
-        activeProjectId,
-        data.title,
-        data.description,
-        data.priority,
-        data.agentId,
-        data.agentName
-      );
+        modelId: data.modelId,
+        modelProviderID: data.modelProviderID,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      upsertTaskInState(tempTask);
+      setEditingTask(null);
+      try {
+        await createTask(
+          activeProjectId,
+          data.title,
+          data.description,
+          data.priority,
+          data.agentId,
+          data.agentName,
+          undefined,
+          data.modelId,
+          data.modelProviderID
+        );
+      } catch (e) {
+        console.error('create failed, removing temp card', e);
+        setTasks((prev) => ({
+          ...prev,
+          backlog: prev.backlog.filter((t) => t.id !== tempId),
+        }));
+      } finally {
+        loadData().catch(() => {});
+      }
     }
-    setEditingTask(null);
-    loadData();
   };
 
-  const handleDeleteTask = (id: string) => {
-    deleteTask(id);
-    loadData();
+  const handleDeleteTask = async (id: string) => {
+    await deleteTask(id);
+    await loadData();
   };
 
   const handleEditTask = (task: Task) => {
@@ -339,57 +484,92 @@ export default function App() {
   };
 
   // Deep-link / pop-out window: support both hash and path (e.g. /#session/<id> or /session/<id>)
-  useEffect(() => {
-    const sid =
+  // Pop-out renders chat-only (no board) via the standalone flag.
+  const [popoutSessionId, setPopoutSessionId] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    return (
       window.location.hash.match(/#session\/([\w-]+)/)?.[1] ??
-      window.location.pathname.match(/\/session\/([\w-]+)/)?.[1];
-    if (!sid) return;
-    // Find task by sessionId in localStorage even if project state hasn't loaded yet
-    try {
-      const raw = localStorage.getItem('kanban_tasks');
-      const all: Task[] = raw ? JSON.parse(raw) : [];
-      const found = all.find((t) => t.sessionId === sid);
+      window.location.pathname.match(/\/session\/([\w-]+)/)?.[1] ??
+      null
+    );
+  });
+  useEffect(() => {
+    if (!popoutSessionId) return;
+    getTasks().then((all) => {
+      const found = all.find((t) => t.sessionId === popoutSessionId);
       if (found) setChatTask(found);
-    } catch {
-      // ignore
-    }
-  }, []);
+    }).catch(() => { /* ignore */ });
+  }, [popoutSessionId]);
 
-  const handleSaveProject = (data: { name: string; path: string; description: string }) => {
+  const handleSaveProject = async (data: { name: string; folder: string; description: string; gitUrl?: string; gitBranch?: string; mkdir?: boolean }) => {
+    const targetId = editingProject?.id ?? null;
+    const folder = data.folder.trim();
+    // Clone into the new folder if a URL was given (server does git clone).
+    if (data.gitUrl && data.mkdir && folder) {
+      try {
+        const { cloneRepo } = await import('./store/kanban');
+        await cloneRepo(data.gitUrl, folder, data.gitBranch);
+      } catch (e: unknown) {
+        alert(`Clone failed: ${String((e as Error)?.message ?? e).slice(0, 400)}`);
+        return;
+      }
+    }
+    const projPayload: Partial<import('./types').Project> = {
+      folder,
+      description: data.description,
+      name: data.name,
+      gitUrl: data.gitUrl,
+      gitBranch: data.gitBranch,
+    };
     if (editingProject) {
-      updateProject(editingProject.id, data);
+      const updated = await updateProject(editingProject.id, projPayload);
+      if (updated && (updated.folder ?? '') !== folder) {
+        alert(`Project saved, but stored folder differs:\ntyped: ${folder}\nstored: ${updated.folder ?? updated.path}`);
+      }
     } else {
-      const newProject = createProject(data.name, data.path, data.description);
+      const newProject = await createProject(data.name, folder, data.description);
+      // Persist git link if provided on create (createProject only knows name/folder).
+      if (data.gitUrl || data.gitBranch) {
+        await updateProject(newProject.id, { gitUrl: data.gitUrl, gitBranch: data.gitBranch });
+      }
       setActiveProjectId(newProject.id);
     }
     setEditingProject(null);
-    loadData();
+    await loadData();
+    try {
+      const projs = await getProjects();
+      const check = targetId ? projs.find((p) => p.id === targetId) : projs[projs.length - 1];
+      if (check && (check.folder ?? '') !== folder) {
+        alert(`Warning: folder not stored correctly.\nexpected: ${folder}\nstored:    ${check.folder ?? check.path}`);
+      }
+    } catch { /* offline */ }
   };
 
-  const handleDeleteProject = (id: string) => {
+  const handleDeleteProject = async (id: string) => {
     if (confirm('Delete this project and all its tasks?')) {
-      deleteProject(id);
-      loadData();
+      await deleteProject(id);
+      await loadData();
     }
   };
 
-  const handleSwitchProject = (id: string) => {
+  const handleSwitchProject = async (id: string) => {
     setActiveProjectId(id);
     setActiveProjectIdState(id);
     setShowProjectDropdown(false);
 
+    const all = await getTasks(id);
     setTasks({
-      backlog: getTasksByStatus(id, 'backlog'),
-      running: getTasksByStatus(id, 'running'),
-      done: getTasksByStatus(id, 'done'),
-      blocked: getTasksByStatus(id, 'blocked'),
+      backlog: all.filter((t) => t.status === 'backlog'),
+      running: all.filter((t) => t.status === 'running'),
+      done: all.filter((t) => t.status === 'done'),
+      blocked: all.filter((t) => t.status === 'blocked'),
     });
   };
 
-  const handleSaveAgentTeam = (agentIds: string[]) => {
+  const handleSaveAgentTeam = async (agentIds: string[]) => {
     if (activeProjectId) {
-      updateProject(activeProjectId, { agentIds });
-      loadData();
+      await updateProject(activeProjectId, { agentIds });
+      await loadData();
     }
   };
 
@@ -398,21 +578,73 @@ export default function App() {
     setShowTaskModal(true);
   };
 
+  // Keyboard-first: N = new task, Esc closes dropdown
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = document.activeElement as HTMLElement | null;
+      const typing = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        handleAddTask();
+        return;
+      }
+      if (typing) {
+        if (e.key === 'Escape') (el as HTMLElement).blur();
+        return;
+      }
+      if (e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        handleAddTask();
+      } else if (e.key === 'Escape') {
+        setShowProjectDropdown(false);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [activeProjectId]);
+
+  const { theme, toggle } = useTheme();
+
+  // Pop-out windows (window.open with #session/…) render chat-only — not the full board.
+  if (popoutSessionId) {
+    return (
+      <div className="app-shell">
+        <SessionChatWindow
+          task={chatTask}
+          standalone
+          onClose={() => {
+            if (window.opener) window.close();
+            else {
+              history.replaceState(null, '', window.location.pathname);
+              setPopoutSessionId(null);
+              setChatTask(null);
+            }
+          }}
+        />
+        {!chatTask && (
+          <div className="flex-1 flex items-center justify-center p-8 muted text-[13px] text-center">
+            Loading session {popoutSessionId}…
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 text-gray-100">
+    <div className="app-shell">
       {/* Header */}
-      <header className="sticky top-0 z-40 bg-gray-900/80 backdrop-blur-xl border-b border-gray-800/50">
-        <div className="max-w-full mx-auto px-6 py-3">
-          <div className="flex items-center justify-between">
+      <header className="topbar">
+        <div className="max-w-full mx-auto px-4 py-2">
+          <div className="flex items-center justify-between gap-3">
             {/* Left: Logo & Title */}
-            <div className="flex items-center gap-4">
-              <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-500 to-purple-600 flex items-center justify-center shadow-lg shadow-violet-500/20">
-                  <Layout className="w-5 h-5 text-white" />
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2">
+                <div className="w-7 h-7 flex items-center justify-center" style={{ background: 'var(--accent)', borderRadius: 6 }}>
+                  <LayoutGrid className="w-4 h-4" style={{ color: 'var(--accent-text)' }} strokeWidth={1.75} />
                 </div>
                 <div>
-                  <h1 className="text-base font-bold text-gray-100">Kanban Agent Board</h1>
-                  <p className="text-[10px] text-gray-500 -mt-0.5">Powered by OpenCode v2</p>
+                  <h1 className="text-[15px] font-semibold t-strong leading-tight">Kanban Board</h1>
+                  <p className="text-[11px] muted mono -mt-px">OPENCODE · V2</p>
                 </div>
               </div>
 
@@ -420,92 +652,91 @@ export default function App() {
               <button
                 onClick={() => setShowServerModal(true)}
                 title="Configure server connection"
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs transition-all hover:ring-2 hover:ring-offset-1 hover:ring-offset-gray-900 ${
-                  isConnected
-                    ? 'bg-emerald-500/10 text-emerald-400 hover:ring-emerald-500/40'
-                    : 'bg-amber-500/10 text-amber-400 hover:ring-amber-500/40'
-                }`}
+                className={`pill ${isConnected ? 'p-green' : 'p-amber'}`}
               >
-                {isConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
-                <span>{isConnected ? 'Connected' : 'Demo Mode'}</span>
-                <Settings className="w-3 h-3 opacity-60" />
+                <span className="dot" style={{ background: isConnected ? 'var(--emerald)' : 'var(--amber)' }} />
+                {isConnected ? <Wifi className="w-3 h-3" strokeWidth={1.75} /> : <WifiOff className="w-3 h-3" strokeWidth={1.75} />}
+                <span>{isConnected ? 'CONNECTED' : 'DEMO'}</span>
               </button>
+              {/* Search hint */}
+              <span className="hidden md:flex items-center gap-1.5 pill p-neutral">
+                <Search className="w-3 h-3" strokeWidth={1.75} />
+                <span>Search</span>
+                <span className="kbd">⌘K</span>
+              </span>
             </div>
 
             {/* Center: Project Selector */}
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
               <div className="relative">
                 <button
                   onClick={() => setShowProjectDropdown(!showProjectDropdown)}
-                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gray-800/80 border border-gray-700/50 hover:border-gray-600 transition-all"
+                  className="btn flex items-center gap-2 px-4 py-2 text-[14px]"
                 >
-                  <FolderKanban className="w-4 h-4 text-violet-400" />
-                  <span className="text-sm font-medium text-gray-200">
+                  <FolderKanban className="w-3.5 h-3.5 muted" strokeWidth={1.75} />
+                  <span className="font-medium t-strong">
                     {activeProject?.name || 'Select Project'}
                   </span>
-                  <ChevronDown className="w-4 h-4 text-gray-400" />
+                  <ChevronDown className="w-3.5 h-3.5 muted" strokeWidth={1.75} />
                 </button>
 
                 {/* Dropdown */}
                 {showProjectDropdown && (
                   <>
                     <div className="fixed inset-0 z-10" onClick={() => setShowProjectDropdown(false)} />
-                    <div className="absolute top-full left-0 mt-2 w-80 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl z-20 overflow-hidden">
-                      <div className="p-2 max-h-64 overflow-y-auto">
+                    <div className="absolute top-full left-0 mt-1.5 w-80 modal-card z-20 overflow-hidden animate-fadeIn">
+                      <div className="p-1.5 max-h-64 overflow-y-auto">
                         {projects.length === 0 ? (
-                          <p className="text-sm text-gray-500 p-3 text-center">No projects yet</p>
+                          <p className="text-[13px] muted p-3 text-center">No projects yet</p>
                         ) : (
                           projects.map((project) => (
                             <div
                               key={project.id}
-                              className={`flex items-center justify-between p-2.5 rounded-lg cursor-pointer transition-colors ${
-                                project.id === activeProjectId
-                                  ? 'bg-violet-500/10 border border-violet-500/30'
-                                  : 'hover:bg-gray-800'
-                              }`}
+                              className="flex items-center justify-between p-2 rounded cursor-pointer hoverable"
+                              style={{ border: project.id === activeProjectId ? '1px solid var(--border-strong)' : '1px solid transparent' }}
                             >
                               <button
                                 onClick={() => handleSwitchProject(project.id)}
-                                className="flex-1 text-left"
+                                className="flex-1 text-left min-w-0"
                               >
-                                <p className="text-sm font-medium text-gray-200">{project.name}</p>
-                                <p className="text-xs text-gray-500 font-mono truncate">{project.path}</p>
+                                <p className="text-[13px] font-medium t-strong truncate">{project.name}</p>
+                                <p className="text-[11px] muted mono truncate">{project.path}</p>
                               </button>
-                              <div className="flex items-center gap-1">
+                              <div className="flex items-center gap-0.5 shrink-0">
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     setEditingProject(project);
                                     setShowProjectModal(true);
                                   }}
-                                  className="p-1 rounded hover:bg-gray-700 text-gray-400 hover:text-white"
+                                  className="btn p-1"
                                 >
-                                  <Settings className="w-3.5 h-3.5" />
+                                  <Settings className="w-3 h-3" strokeWidth={1.75} />
                                 </button>
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     handleDeleteProject(project.id);
                                   }}
-                                  className="p-1 rounded hover:bg-red-900/50 text-gray-400 hover:text-red-400"
+                                  className="btn p-1"
                                 >
-                                  <Trash2 className="w-3.5 h-3.5" />
+                                  <Trash2 className="w-3 h-3" strokeWidth={1.75} />
                                 </button>
                               </div>
                             </div>
                           ))
                         )}
                       </div>
-                      <div className="p-2 border-t border-gray-700/50">
+                      <div className="p-1.5 border-t hairline" style={{ borderTopStyle: 'solid', borderTopWidth: 1 }}>
                         <button
                           onClick={() => {
                             setEditingProject(null);
                             setShowProjectModal(true);
                             setShowProjectDropdown(false);
                           }}
-                          className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-violet-600/20 border border-violet-500/30 text-violet-300 text-sm font-medium hover:bg-violet-600/30 transition-colors"
+                          className="btn w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-[13px] font-medium"
                         >
-                          <Plus className="w-4 h-4" />
+                          <Plus className="w-3.5 h-3.5" strokeWidth={1.75} />
                           New Project
                         </button>
                       </div>
@@ -516,35 +747,42 @@ export default function App() {
             </div>
 
             {/* Right: Actions */}
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={toggle}
+                className="btn flex items-center gap-1.5 px-3 py-2 text-[13px]"
+                title={theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme'}
+              >
+                {theme === 'light' ? <Moon className="w-3.5 h-3.5" strokeWidth={1.75} /> : <Sun className="w-3.5 h-3.5" strokeWidth={1.75} />}
+                <span className="hidden sm:inline mono">{theme === 'light' ? 'DARK' : 'LIGHT'}</span>
+              </button>
               <button
                 onClick={() => setShowServerModal(true)}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-gray-800/80 border border-gray-700/50 hover:border-gray-600 text-sm text-gray-300 hover:text-white transition-all"
+                className="btn flex items-center px-2.5 py-1.5"
                 title="Server connection"
               >
-                <Server className="w-4 h-4 text-gray-400" />
+                <Server className="w-3.5 h-3.5" strokeWidth={1.75} />
               </button>
               {activeProject && (
                 <>
                   <button
                     onClick={() => setShowAgentTeamModal(true)}
-                    className="flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-800/80 border border-gray-700/50 hover:border-gray-600 text-sm text-gray-300 hover:text-white transition-all"
+                    className="btn flex items-center gap-1.5 px-3 py-2 text-[13px]"
                     title="Configure agent team"
                   >
-                    <Users className="w-4 h-4 text-violet-400" />
+                    <Users className="w-3.5 h-3.5" strokeWidth={1.75} />
                     <span className="hidden lg:inline">Team</span>
                     {availableAgents.length > 0 && (
-                      <span className="px-1.5 py-0.5 rounded-full bg-violet-500/20 text-violet-300 text-xs">
-                        {availableAgents.length}
-                      </span>
+                      <span className="pill p-neutral">{availableAgents.length}</span>
                     )}
                   </button>
                   <button
                     onClick={handleAddTask}
-                    className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-violet-600 to-purple-600 text-white text-sm font-medium hover:from-violet-500 hover:to-purple-500 transition-all shadow-lg shadow-violet-500/20"
+                    className="btn btn-primary flex items-center gap-1.5 px-4 py-2 text-[14px] font-medium"
                   >
-                    <Plus className="w-4 h-4" />
+                    <Plus className="w-3.5 h-3.5" strokeWidth={1.75} />
                     <span>New Task</span>
+                    <span className="kbd" style={{ color: 'inherit', borderColor: 'currentColor', opacity: 0.7 }}>N</span>
                   </button>
                 </>
               )}
@@ -554,9 +792,9 @@ export default function App() {
                     setEditingProject(null);
                     setShowProjectModal(true);
                   }}
-                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-violet-600 to-purple-600 text-white text-sm font-medium hover:from-violet-500 hover:to-purple-500 transition-all shadow-lg shadow-violet-500/20"
+                  className="btn btn-primary flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium"
                 >
-                  <Plus className="w-4 h-4" />
+                  <Plus className="w-3.5 h-3.5" strokeWidth={1.75} />
                   <span>New Project</span>
                 </button>
               )}
@@ -566,24 +804,24 @@ export default function App() {
       </header>
 
       {/* Main Content */}
-      <main className="p-6">
+      <main className="p-4">
         {!activeProject ? (
           <div className="flex flex-col items-center justify-center h-[calc(100vh-120px)]">
-            <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-violet-500/20 to-purple-600/20 border border-violet-500/30 flex items-center justify-center mb-6">
-              <FolderKanban className="w-10 h-10 text-violet-400" />
+            <div className="w-12 h-12 panel flex items-center justify-center mb-4">
+              <FolderKanban className="w-5 h-5 muted" strokeWidth={1.5} />
             </div>
-            <h2 className="text-2xl font-bold text-gray-100 mb-2">Welcome to Kanban Agent Board</h2>
-            <p className="text-gray-400 mb-6 text-center max-w-md">
-              Create a project to get started. Manage tasks with AI agents powered by OpenCode v2.
+            <h2 className="text-lg font-semibold t-strong mb-1">Kanban Agent Board</h2>
+            <p className="muted mb-4 text-center max-w-md text-[13px]">
+              Create a project to get started. Manage tasks with AI agents. <span className="kbd">N</span> new task · <span className="kbd">⌘K</span> search
             </p>
             <button
               onClick={() => {
                 setEditingProject(null);
                 setShowProjectModal(true);
               }}
-              className="flex items-center gap-2 px-6 py-3 rounded-xl bg-gradient-to-r from-violet-600 to-purple-600 text-white font-medium hover:from-violet-500 hover:to-purple-500 transition-all shadow-lg shadow-violet-500/20"
+              className="btn btn-primary flex items-center gap-2 px-4 py-2 text-[13px] font-medium"
             >
-              <Plus className="w-5 h-5" />
+              <Plus className="w-4 h-4" strokeWidth={1.75} />
               Create Your First Project
             </button>
           </div>
@@ -593,15 +831,14 @@ export default function App() {
             onDragStart={handleDragStart}
             onDragEnd={handleDragEnd}
           >
-            <div className="flex gap-5 overflow-x-auto pb-4">
+            <div className="flex gap-3 overflow-x-auto pb-4">
               {COLUMNS.map((col) => (
                 <KanbanColumn
                   key={col.status}
                   status={col.status}
                   title={col.title}
-                  icon={col.icon}
+                  icon={columnIcons[col.status]}
                   tasks={tasks[col.status]}
-                  color={col.status}
                   onEditTask={handleEditTask}
                   onDeleteTask={handleDeleteTask}
                   onOpenChat={handleOpenChat}
@@ -612,7 +849,7 @@ export default function App() {
 
             <DragOverlay>
               {activeTask ? (
-                <div className="rotate-3 scale-105">
+                <div>
                   <TaskCard
                     task={activeTask}
                     onEdit={() => {}}

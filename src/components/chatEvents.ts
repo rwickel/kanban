@@ -4,6 +4,11 @@
 // //             agents?, agent?, model?, ... } ], cursor: {...} }
 // user → text field; assistant → content[] parts; idle → protocol noise.
 
+export interface DiffLine { type: 'add' | 'del' | 'ctx' | 'hunk'; text: string }
+export interface QuestionOption { label: string; description: string }
+export interface QuestionItem { header: string; question: string; options: QuestionOption[]; multiple?: boolean }
+export interface TodoItem { content: string; status: string; activeForm?: string }
+
 export interface ToolCallInfo {
   /** e.g. "write", "bash", "read" */
   tool: string;
@@ -15,6 +20,12 @@ export interface ToolCallInfo {
   input?: string;
   /** full result text for the details view */
   output?: string;
+  /** rich render kind */
+  render?: 'diff' | 'question' | 'todo' | 'generic';
+  diff?: DiffLine[];
+  filePath?: string;
+  questions?: QuestionItem[];
+  todos?: TodoItem[];
 }
 
 export interface ChatMessage {
@@ -39,7 +50,7 @@ function toolSummary(part: Payload): string {
   return input.brief;
 }
 
-interface ToolDetail { action: string; brief: string; input: string; output: string }
+interface ToolDetail { action: string; brief: string; input: string; output: string; render?: 'diff' | 'question' | 'todo' | 'generic'; diff?: DiffLine[]; filePath?: string; questions?: QuestionItem[]; todos?: TodoItem[] }
 
 /** Extract human-readable input/output from a v2 tool part. */
 function toolInput(part: Payload): ToolDetail {
@@ -83,6 +94,49 @@ function toolInput(part: Payload): ToolDetail {
   const briefOut = output.replace(/\s+/g, ' ').trim().slice(0, 120);
   const brief = [action, briefOut].filter(Boolean).join(' → ').slice(0, 200);
 
+  // Rich render detection
+  const toolName = (str(part.tool) || str(part.name) || '').toLowerCase();
+  let render: 'diff' | 'question' | 'todo' | 'generic' = 'generic';
+  let diff: DiffLine[] | undefined;
+  let questions: QuestionItem[] | undefined;
+  let todos: TodoItem[] | undefined;
+  const filePath = path || undefined;
+
+  // question tool: rawInput.questions = [{header, question, options:[{label,description}], multiple}]
+  const qRaw = (rawInput as Payload)['questions'];
+  if (toolName.includes('question') && Array.isArray(qRaw)) {
+    render = 'question';
+    questions = (qRaw as Payload[]).map((q) => ({
+      header: str((q as Payload).header) || 'Question',
+      question: str((q as Payload).question),
+      multiple: Boolean((q as Payload).multiple),
+      options: Array.isArray((q as Payload).options)
+        ? ((q as Payload).options as Payload[]).map((o) => ({ label: str(o.label), description: str(o.description) }))
+        : [],
+    }));
+  }
+  // todowrite/todo: rawInput.todos = [{content, status, activeForm}]
+  const tRaw = (rawInput as Payload)['todos'];
+  if (Array.isArray(tRaw) && (toolName.includes('todo') || (tRaw as unknown[]).length > 0 && toolName.includes('write'))) {
+    const looksTodo = (tRaw as Payload[]).every((t) => typeof (t as Payload).content === 'string' && typeof (t as Payload).status === 'string');
+    if (looksTodo) {
+      render = 'todo';
+      todos = (tRaw as Payload[]).map((t) => ({ content: str(t.content), status: str(t.status), activeForm: str(t.activeForm) }));
+    }
+  }
+  // write/edit: rawInput.oldString/newString or content → line diff
+  const oldS = str((rawInput as Payload).oldString);
+  const newS = str((rawInput as Payload).newString) || (toolName.includes('write') ? text : '');
+  if (!questions && !todos && (oldS || newS) && (toolName.includes('edit') || toolName.includes('write'))) {
+    render = 'diff';
+    const olds = oldS ? oldS.split('\n') : [];
+    const news = newS ? newS.split('\n') : [];
+    diff = [
+      ...olds.map((l): DiffLine => ({ type: 'del', text: l })),
+      ...news.map((l): DiffLine => ({ type: 'add', text: l })),
+    ].slice(0, 60);
+  }
+
   // Full details: command or path+content, then output
   const inputLines: string[] = [];
   if (command) inputLines.push(`$ ${command}`);
@@ -96,7 +150,7 @@ function toolInput(part: Payload): ToolDetail {
     } catch { /* ignore */ }
   }
   const input = inputLines.join('\n');
-  return { action, brief, input, output: output.length > 4000 ? `${output.slice(0, 4000)}\n… (truncated)` : output };
+  return { action, brief, input, output: output.length > 4000 ? `${output.slice(0, 4000)}\n… (truncated)` : output, render, diff, filePath, questions, todos };
 }
 
 function contentToMessages(id: string, kind: 'user' | 'assistant', part: Payload): ChatMessage[] {
@@ -136,8 +190,13 @@ function contentToMessages(id: string, kind: 'user' | 'assistant', part: Payload
           tool: str(part.name) || str(part.tool) || 'tool',
           status: st,
           summary: detail.brief,
-          input: detail.input || detail.action,
-          output: detail.output,
+          input: (detail as any).input || (detail as any).action,
+          output: (detail as any).output,
+          render: (detail as any).render,
+          diff: (detail as any).diff,
+          filePath: (detail as any).filePath,
+          questions: (detail as any).questions,
+          todos: (detail as any).todos,
         },
       }];
     }

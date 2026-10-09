@@ -1,40 +1,38 @@
 import { Task, TaskStatus } from '../types';
 import TaskCard from './TaskCard';
 import { useDroppable } from '@dnd-kit/core';
-import { Plus } from 'lucide-react';
+import { Plus, Inbox, Loader, CheckCircle2, AlertOctagon, LucideIcon } from 'lucide-react';
 
 interface KanbanColumnProps {
   status: TaskStatus;
   title: string;
-  icon: string;
+  icon: LucideIcon;
   tasks: Task[];
-  color: string;
   onEditTask: (task: Task) => void;
   onDeleteTask: (id: string) => void;
   onOpenChat: (task: Task) => void;
   onAddTask: () => void;
 }
 
-const statusColors: Record<TaskStatus, string> = {
-  backlog: 'from-gray-500 to-gray-600',
-  running: 'from-blue-500 to-cyan-500',
-  done: 'from-emerald-500 to-green-500',
-  blocked: 'from-red-500 to-rose-500',
+const statusDot: Record<TaskStatus, string> = {
+  backlog: 'var(--muted)',
+  running: 'var(--amber)',
+  done: 'var(--emerald)',
+  blocked: 'var(--danger)',
 };
 
-const statusBorderColors: Record<TaskStatus, string> = {
-  backlog: 'border-gray-700/50',
-  running: 'border-blue-500/30',
-  done: 'border-emerald-500/30',
-  blocked: 'border-red-500/30',
+export const columnIcons: Record<TaskStatus, LucideIcon> = {
+  backlog: Inbox,
+  running: Loader,
+  done: CheckCircle2,
+  blocked: AlertOctagon,
 };
 
 export default function KanbanColumn({
   status,
   title,
-  icon,
+  icon: Icon,
   tasks,
-  color,
   onEditTask,
   onDeleteTask,
   onOpenChat,
@@ -47,36 +45,25 @@ export default function KanbanColumn({
 
   return (
     <div
-      className={`flex flex-col bg-gray-900/50 backdrop-blur-sm rounded-2xl border ${statusBorderColors[status]} min-w-[300px] w-[320px] max-h-[calc(100vh-200px)] transition-all duration-200 ${
-        isOver ? 'ring-2 ring-violet-500/50 bg-gray-900/80' : ''
-      }`}
+      className="column-shell flex flex-col min-w-[320px] w-[340px] max-h-[calc(100vh-170px)]"
+      style={isOver ? { borderColor: 'var(--border-strong)' } : undefined}
     >
-      {/* Column header */}
-      <div className="flex items-center justify-between p-4 pb-2">
-        <div className="flex items-center gap-2.5">
-          <span className="text-lg">{icon}</span>
-          <h3 className="font-semibold text-gray-100 text-sm">{title}</h3>
-          <span className={`text-xs px-2 py-0.5 rounded-full bg-gradient-to-r ${statusColors[status]} text-white font-medium`}>
-            {tasks.length}
-          </span>
+      <div className="flex items-center justify-between px-3.5 py-3 border-b hairline" style={{ borderBottomStyle: 'solid', borderBottomWidth: 1 }}>
+        <div className="flex items-center gap-2">
+          <Icon className="w-4 h-4 muted" strokeWidth={1.75} />
+          <span className="dot" style={{ background: statusDot[status], width: 6, height: 6 }} />
+          <h3 className="font-semibold t-strong text-[13px] uppercase tracking-wide">{title}</h3>
+          <span className="pill p-neutral">{tasks.length}</span>
         </div>
-        <button
-          onClick={onAddTask}
-          className="p-1.5 rounded-lg hover:bg-gray-700/50 text-gray-400 hover:text-white transition-colors"
-          title="Add task"
-        >
-          <Plus className="w-4 h-4" />
+        <button onClick={onAddTask} className="btn p-1.5" title="Add task (N)">
+          <Plus className="w-4 h-4" strokeWidth={1.75} />
         </button>
       </div>
 
-      {/* Tasks list */}
-      <div
-        ref={setNodeRef}
-        className="flex-1 overflow-y-auto p-3 pt-1 space-y-0 min-h-[100px]"
-      >
+      <div ref={setNodeRef} className="flex-1 overflow-y-auto p-3 min-h-[120px]">
         {tasks.length === 0 && (
-          <div className="flex items-center justify-center h-24 border-2 border-dashed border-gray-700/50 rounded-xl">
-            <p className="text-xs text-gray-500">Drop tasks here</p>
+          <div className="flex items-center justify-center h-20 border border-dashed hairline" style={{ borderRadius: 6 }}>
+            <p className="text-[13px] muted mono">Drop here</p>
           </div>
         )}
         {tasks.map((task) => (

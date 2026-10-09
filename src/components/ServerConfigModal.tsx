@@ -49,6 +49,12 @@ export default function ServerConfigModal({ isOpen, onClose, onConnected }: Serv
     }
   };
 
+  const handleSaveOnly = () => {
+    saveServerConfig({ url: url.trim(), password });
+    onConnected();
+    onClose();
+  };
+
   const handleDisconnect = () => {
     saveServerConfig({ password: '' });
     onConnected();
@@ -164,7 +170,15 @@ export default function ServerConfigModal({ isOpen, onClose, onConnected }: Serv
               className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-purple-600 text-white text-sm font-medium hover:from-violet-500 hover:to-purple-500 transition-all shadow-lg shadow-violet-500/20 disabled:opacity-50"
             >
               {testing && <Loader2 className="w-4 h-4 animate-spin" />}
-              Connect
+              Save & Connect
+            </button>
+            <button
+              onClick={handleSaveOnly}
+              disabled={testing || !url.trim()}
+              className="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-gray-700 text-gray-300 hover:bg-gray-800 text-sm font-medium transition-colors disabled:opacity-50"
+              title="Save without testing the connection"
+            >
+              Save
             </button>
           </div>
         </div>

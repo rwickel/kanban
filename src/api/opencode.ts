@@ -1,4 +1,4 @@
-import { OpenCodeAgentInfo, OpenCodeSessionInfo } from '../types';
+import { OpenCodeAgentInfo, OpenCodeModelInfo, OpenCodeSessionInfo } from '../types';
 import { getServerConfig, getAuthHeader } from '../store/serverConfig';
 
 function baseUrl(): string {
@@ -46,27 +46,62 @@ export async function fetchAgent(agentId: string): Promise<OpenCodeAgentInfo | n
   }
 }
 
+/** GET /model → { data: Model.Info[] }. Each carries providerID + modelID. */
+export async function fetchModels(): Promise<OpenCodeModelInfo[]> {
+  try {
+    const response = await fetch(`${baseUrl()}/model`, { headers: headers() });
+    if (!response.ok) throw new Error(`Failed to fetch models (${response.status})`);
+    const list = unwrapData<unknown>(await response.json());
+    const raw = Array.isArray(list) ? (list as OpenCodeModelInfo[]) : [];
+    // Dedupe: server can return the same providerID/modelID twice
+    // (e.g. google/gemma-3-12b-it) which trips React's duplicate-key warning.
+    const seen = new Set<string>();
+    const out: OpenCodeModelInfo[] = [];
+    for (const m of raw) {
+      const key = `${m?.providerID ?? ''}/${m?.modelID ?? m?.id ?? ''}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(m);
+    }
+    out.sort((a, b) => `${a.providerID}/${a.modelID}`.localeCompare(`${b.providerID}/${b.modelID}`));
+    return out;
+  } catch (error) {
+    console.error('Error fetching models:', error);
+    return [];
+  }
+}
+
 export async function createSession(opts?: {
   title?: string;
   parentID?: string;
   agent?: string;
-  model?: { providerID: string; modelID: string };
+  model?: { providerID: string; id: string };
   directory?: string;
-}): Promise<OpenCodeSessionInfo | null> {
+}): Promise<{ session: OpenCodeSessionInfo | null; error?: string }> {
   try {
     const body: Record<string, unknown> = {};
-    if (opts?.title) body.title = opts.title;
+    // NOTE: v2 POST /api/session schema is { id?, agent?, model?, location? }
+    // (additionalProperties: false) — sending `title`/`parentID` can 400/500
+    // the create, so only send the allow-listed keys.
     if (opts?.parentID) body.parentID = opts.parentID;
     if (opts?.agent) body.agent = opts.agent;
-    if (opts?.model) body.model = opts.model;
+    // Only send model when both halves are non-empty — a half-filled
+    // Model.Ref ({providerID, id: undefined}) makes POST /session 400
+    // "Missing key at [model][id]".
+    if (opts?.model?.providerID && opts?.model?.id) body.model = opts.model;
     // Only send location for absolute server-side paths — a bare folder
-    // name ("work") makes POST /api/session 500 on the server. Omit it
-    // so the session falls back to the server cwd instead of failing.
+    // name ("work") makes POST /api/session 500 on the server, and omitting
+    // it silently lands the session in the server cwd (wrong project).
+    // Fail fast so the UI can tell the user to fix the project path.
     const dir = opts?.directory?.trim();
-    if (dir && (/^[a-zA-Z]:[\\/]/.test(dir) || dir.startsWith('\\\\') || dir.startsWith('/'))) {
-      body.location = { directory: dir };
-    } else if (dir) {
-      console.warn(`createSession: ignoring relative directory "${dir}" — fix the project path to an absolute server path`);
+    if (dir) {
+      if (/^[a-zA-Z]:[\\/]/.test(dir) || dir.startsWith('\\\\') || dir.startsWith('/')) {
+        body.location = { directory: dir };
+      } else {
+        return { session: null, error: `relative project path "${dir}" — OpenCode needs an absolute server-side path (e.g. C:\\projects\\my-app). Fix it in Project settings.` };
+      }
+    } else {
+      return { session: null, error: 'missing project path — set an absolute server-side path in Project settings before moving to running.' };
     }
     const response = await fetch(`${baseUrl()}/session`, {
       method: 'POST',
@@ -74,13 +109,16 @@ export async function createSession(opts?: {
       body: JSON.stringify(body),
     });
     if (!response.ok) {
-      console.error('createSession failed:', response.status, await response.text().catch(() => ''));
-      return null;
+      const text = await response.text().catch(() => '');
+      console.error('createSession failed:', response.status, text);
+      return { session: null, error: `session create failed (HTTP ${response.status}) — ${text.slice(0, 300)}` };
     }
-    return unwrapData<OpenCodeSessionInfo>(await response.json());
+    const session = unwrapData<OpenCodeSessionInfo>(await response.json());
+    if (!session?.id) return { session: null, error: 'session create returned no id' };
+    return { session };
   } catch (error) {
     console.error('Error creating session:', error);
-    return null;
+    return { session: null, error: `network error — is the OpenCode server running at ${baseUrl()}?` };
   }
 }
 
@@ -121,25 +159,32 @@ export async function getSession(sessionId: string): Promise<OpenCodeSessionInfo
 export async function sendPrompt(
   sessionId: string,
   text: string,
-  agentName?: string
-): Promise<boolean> {
-  // v2: POST /api/session/{id}/prompt { text, agents?, ... } → { data: Session.Inbox.User }
+  _agentId?: string
+): Promise<{ ok: boolean; error?: string }> {
+  // v2: POST /api/session/{id}/prompt { text, ... } → { data: Session.Inbox.User }
+  // NOTE: session is already created with its agent — sending `agents` again
+  // can 500 the server (unknown id, stale display name). Text-only is safest.
   try {
     const body: Record<string, unknown> = { text };
-    if (agentName) body.agents = [{ name: agentName }];
     const res = await fetch(`${baseUrl()}/session/${sessionId}/prompt`, {
       method: 'POST',
       headers: headers({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
     });
     if (!res.ok) {
-      console.error('sendPrompt failed:', res.status, await res.text().catch(() => ''));
-      return false;
+      const text = await res.text().catch(() => '');
+      console.error('sendPrompt failed:', res.status, text);
+      const hint =
+        res.status === 401 ? 'unauthorized (401) — check Server password'
+        : res.status === 404 ? `session not found (404) — ${sessionId} may have been pruned on server restart`
+        : res.status === 500 ? `server error (500) — ${text.slice(0, 200)}`
+        : `HTTP ${res.status} — ${text.slice(0, 200)}`;
+      return { ok: false, error: hint };
     }
-    return true;
+    return { ok: true };
   } catch (error) {
     console.error('Error sending prompt:', error);
-    return false;
+    return { ok: false, error: `network error — is the OpenCode server running at ${baseUrl()}?` };
   }
 }
 

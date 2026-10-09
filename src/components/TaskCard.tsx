@@ -1,5 +1,5 @@
 import { Task, TaskPriority } from '../types';
-import { MessageSquare, Edit2, Trash2, GripVertical } from 'lucide-react';
+import { MessageSquare, Pencil, Trash2, GripVertical, Loader2, AlertTriangle } from 'lucide-react';
 import { useDraggable } from '@dnd-kit/core';
 
 interface TaskCardProps {
@@ -9,12 +9,19 @@ interface TaskCardProps {
   onOpenChat: (task: Task) => void;
 }
 
-const priorityConfig: Record<TaskPriority, { color: string; label: string; bg: string }> = {
-  low: { color: 'text-emerald-400', label: 'Low', bg: 'bg-emerald-400/10 border-emerald-400/30' },
-  medium: { color: 'text-blue-400', label: 'Medium', bg: 'bg-blue-400/10 border-blue-400/30' },
-  high: { color: 'text-amber-400', label: 'High', bg: 'bg-amber-400/10 border-amber-400/30' },
-  critical: { color: 'text-red-400', label: 'Critical', bg: 'bg-red-400/10 border-red-400/30' },
+const priorityConfig: Record<TaskPriority, { label: string; cls: string; dot: string }> = {
+  low: { label: 'LOW', cls: 'p-green', dot: 'var(--emerald)' },
+  medium: { label: 'MED', cls: 'p-blue', dot: 'var(--blue)' },
+  high: { label: 'HIGH', cls: 'p-amber', dot: 'var(--amber)' },
+  critical: { label: 'URGENT', cls: 'p-red', dot: 'var(--danger)' },
 };
+
+function shortId(id: string): string {
+  if (!id) return '';
+  const parts = id.split('-');
+  const tail = parts[parts.length - 1] || id;
+  return `ENG-${tail.slice(0, 4).toUpperCase()}`;
+}
 
 export default function TaskCard({ task, onEdit, onDelete, onOpenChat }: TaskCardProps) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
@@ -23,9 +30,7 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat }: TaskCar
   });
 
   const style = transform
-    ? {
-        transform: `translate(${transform.x}px, ${transform.y}px)`,
-      }
+    ? { transform: `translate(${transform.x}px, ${transform.y}px)` }
     : undefined;
 
   const priority = priorityConfig[task.priority];
@@ -34,90 +39,94 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat }: TaskCar
     <div
       ref={setNodeRef}
       style={style}
-      className={`group relative bg-gray-800/80 backdrop-blur-sm border border-gray-700/50 rounded-xl p-4 mb-3 transition-all duration-200 hover:border-gray-600 hover:shadow-lg hover:shadow-black/20 ${
-        isDragging ? 'opacity-50 scale-105 shadow-2xl z-50' : ''
-      }`}
+      className={`task-card group relative mb-2 ${isDragging ? 'is-dragging z-50' : ''}`}
     >
-      {/* Drag handle */}
       <div
         {...attributes}
         {...listeners}
-        className="absolute left-1 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 cursor-grab active:cursor-grabbing transition-opacity"
+        className="absolute left-0.5 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 cursor-grab active:cursor-grabbing transition-opacity"
       >
-        <GripVertical className="w-4 h-4 text-gray-500" />
+        <GripVertical className="w-3 h-3 muted" />
       </div>
 
-      {/* Priority badge */}
-      <div className="flex items-center justify-between mb-2">
-        <span className={`text-xs px-2 py-0.5 rounded-full border ${priority.bg} ${priority.color} font-medium`}>
-          {priority.label}
+      {/* top meta row: mono ID + priority pill */}
+      <div className="flex items-center justify-between gap-2 mb-1">
+        <span className="pill pill-id">{shortId(task.id)}</span>
+        <span className="flex items-center gap-1.5">
+          <span className={`pill ${priority.cls}`}>
+            <span className="dot" style={{ background: priority.dot }} />
+            {priority.label}
+          </span>
+          <span className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+            <button onClick={() => onEdit(task)} className="p-1 rounded hoverable" title="Edit task">
+              <Pencil className="w-3 h-3 muted" />
+            </button>
+            <button onClick={() => onDelete(task.id)} className="p-1 rounded hoverable" title="Delete task">
+              <Trash2 className="w-3 h-3 muted" />
+            </button>
+          </span>
         </span>
-        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button
-            onClick={() => onEdit(task)}
-            className="p-1 rounded hover:bg-gray-700 text-gray-400 hover:text-white transition-colors"
-            title="Edit task"
-          >
-            <Edit2 className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={() => onDelete(task.id)}
-            className="p-1 rounded hover:bg-red-900/50 text-gray-400 hover:text-red-400 transition-colors"
-            title="Delete task"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
-        </div>
       </div>
 
-      {/* Title */}
-      <h4 className="text-sm font-medium text-gray-100 mb-1.5 line-clamp-2">{task.title}</h4>
-
-      {/* Description */}
+      <h4 className="text-[15px] font-medium t-strong leading-snug line-clamp-2">{task.title}</h4>
       {task.description && (
-        <p className="text-xs text-gray-400 mb-3 line-clamp-2">{task.description}</p>
+        <p className="text-[13px] muted mt-1 line-clamp-2 leading-snug">{task.description}</p>
       )}
 
-      {/* Agent bubble */}
-      <div className="flex items-center justify-between">
-        {task.agentName ? (
-          <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded-full bg-gradient-to-br from-violet-500 to-purple-600 flex items-center justify-center">
-              <span className="text-[10px] font-bold text-white">
-                {task.agentName.charAt(0).toUpperCase()}
-              </span>
-            </div>
-            <span className="text-xs text-gray-400">{task.agentName}</span>
-          </div>
-        ) : (
-          <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded-full bg-gray-700 flex items-center justify-center">
-              <span className="text-[10px] text-gray-500">?</span>
-            </div>
-            <span className="text-xs text-gray-500">Unassigned</span>
-          </div>
-        )}
+      {/* startup state: visible progress / error for running tasks */}
+      {task.status === 'running' && task.startupPhase && task.startupPhase !== 'ready' && (
+        <div className="mt-2 rounded-md px-2 py-1.5 text-[12px] leading-snug"
+          style={task.startupPhase === 'error'
+            ? { background: 'color-mix(in srgb, var(--danger) 12%, transparent)', color: 'var(--danger)', border: '1px solid var(--danger)' }
+            : { background: 'var(--surface-2)', color: 'var(--text-2)', border: '1px solid var(--border)' }}>
+          {task.startupPhase === 'creating-session' && (
+            <span className="flex items-center gap-1.5">
+              <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" /> Creating session…
+            </span>
+          )}
+          {task.startupPhase === 'sending-prompt' && (
+            <span className="flex items-center gap-1.5">
+              <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" /> Sending prompt…
+            </span>
+          )}
+          {task.startupPhase === 'error' && (
+            <span className="flex items-start gap-1.5" title={task.startupError}>
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-px" />
+              <span className="line-clamp-3">{task.startupError || 'Failed to start session'}</span>
+            </span>
+          )}
+        </div>
+      )}
 
-        {/* Chat icon — always visible when a session exists; pulsing placeholder while wiring up */}
-        {task.sessionId ? (
-          <button
-            onClick={() => onOpenChat(task)}
-            className="p-1.5 rounded-lg bg-gray-700/50 hover:bg-violet-600/30 text-gray-400 hover:text-violet-300 transition-all"
-            title="Open agent chat"
-          >
-            <MessageSquare className="w-3.5 h-3.5" />
-          </button>
+      <div className="flex items-center justify-between mt-3 pt-2 border-t hairline" style={{ borderTopStyle: 'solid', borderTopWidth: 1 }}>
+        {task.agentName ? (
+          <span className="flex items-center gap-1.5 min-w-0">
+            <span className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text-2)' }}>
+              {task.agentName.charAt(0).toUpperCase()}
+            </span>
+            <span className="text-[13px] t-soft truncate" title={task.modelProviderID && task.modelId ? `model: ${task.modelProviderID}/${task.modelId}` : undefined}>
+              {task.agentName}
+              {task.modelProviderID && task.modelId && (
+                <span className="muted mono"> · {task.modelProviderID}/{task.modelId}</span>
+              )}
+            </span>
+          </span>
         ) : (
-          task.agentId && (
-            <button
-              onClick={() => onOpenChat(task)}
-              className="p-1.5 rounded-lg bg-gray-700/30 text-gray-600 hover:text-violet-300 transition-all animate-pulse"
-              title="Start session & open chat"
-            >
-              <MessageSquare className="w-3.5 h-3.5" />
-            </button>
-          )
+          <span className="text-[13px] muted">Unassigned</span>
         )}
+        {task.sessionId ? (
+          <button onClick={() => onOpenChat(task)} className="btn p-1" title="Open agent chat">
+            <MessageSquare className="w-3 h-3" />
+          </button>
+        ) : task.startupPhase === 'error' ? (
+          <button onClick={() => onOpenChat(task)} className="btn p-1" title={task.startupError || 'Open — startup failed'} style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }}>
+            <AlertTriangle className="w-3 h-3" />
+          </button>
+        ) : task.agentId ? (
+          <button onClick={() => onOpenChat(task)} className="btn p-1" title={task.startupPhase ? 'Starting session…' : 'Start session & open chat'}>
+            {task.startupPhase ? <Loader2 className="w-3 h-3 animate-spin" /> : <MessageSquare className="w-3 h-3" />}
+          </button>
+        ) : null}
       </div>
     </div>
   );

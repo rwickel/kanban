@@ -10,6 +10,12 @@ export interface Task {
   agentId?: string;
   agentName?: string;
   sessionId?: string;
+  /** Visible startup state for running tasks: creating session → sending prompt → ready/error */
+  startupPhase?: 'creating-session' | 'sending-prompt' | 'ready' | 'error';
+  startupError?: string;
+  /** "providerID/modelID" e.g. "ollama/gemma4:e2b" — passed to createSession */
+  modelId?: string;
+  modelProviderID?: string;
   projectId: string;
   createdAt: string;
   updatedAt: string;
@@ -19,9 +25,36 @@ export interface Project {
   id: string;
   name: string;
   path: string;
+  /** Folder name inside KANBAN_PROJECTS_ROOT (portable; path = ROOT/folder). */
+  folder?: string;
+  /** Origin URL recorded at link/clone time. */
+  gitUrl?: string | null;
+  /** Pinned branch — tasks warn if checkout differs. */
+  gitBranch?: string;
   description: string;
   agentIds: string[];
   createdAt: string;
+}
+
+export interface RootsInfo {
+  root: string;
+  folders: string[];
+}
+
+export interface FolderGitInfo {
+  folder: string;
+  isRepo: boolean;
+  branch?: string | null;
+  dirty?: boolean;
+  remote?: string | null;
+  branches?: string[];
+}
+
+export interface BranchCheck {
+  ok: boolean;
+  current?: string | null;
+  pinned: string;
+  skipped?: string;
 }
 
 export interface Agent {
@@ -44,6 +77,13 @@ export interface OpenCodeAgentInfo {
   description?: string;
   color?: string;
   model?: string;
+}
+
+export interface OpenCodeModelInfo {
+  id: string;
+  modelID: string;
+  providerID: string;
+  name?: string;
 }
 
 export interface OpenCodeSessionInfo {
