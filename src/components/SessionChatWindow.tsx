@@ -10,6 +10,8 @@ import { Task } from '../types';
 import { sendPrompt } from '../api/opencode';
 import { useSessionStream, type ChatStatus } from '../hooks/useSessionStream';
 import type { ChatMessage } from './chatEvents';
+import { linkifyFilePaths, parsePreviewHref } from './filePaths';
+import FilePreviewModal from './FilePreviewModal';
 
 interface SessionChatWindowProps {
   task: Task | null;
@@ -27,7 +29,7 @@ const STATUS_DOT: Record<ChatStatus, { bg: string; label: string; pulse: boolean
   'no-run': { bg: 'var(--muted)', label: 'no session', pulse: false },
 };
 
-function ThinkingBlock({ msg, showAvatar, agentName }: { msg: ChatMessage; showAvatar?: boolean; agentName?: string }) {
+function ThinkingBlock({ msg, showAvatar, agentName, onFileClick }: { msg: ChatMessage; showAvatar?: boolean; agentName?: string; onFileClick: (absPath: string) => void }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="flex gap-2 justify-start animate-fadeIn">
@@ -48,7 +50,17 @@ function ThinkingBlock({ msg, showAvatar, agentName }: { msg: ChatMessage; showA
         </button>
         {open && (
           <div className="mt-1 panel p-2.5 text-[11.5px] leading-relaxed t-soft whitespace-pre-wrap break-words md-body">
-            <Markdown>{msg.markdown}</Markdown>
+            <Markdown
+              components={{
+                a: ({ href, children, ...props }) => {
+                  const abs = parsePreviewHref(href);
+                  if (abs) {
+                    return <button type="button" title={abs} onClick={(e) => { e.preventDefault(); e.stopPropagation(); onFileClick(abs); }} className="underline mono text-[12px] break-all" style={{ color: 'var(--info)', cursor: 'pointer' }}>{children}</button>;
+                  }
+                  return <a href={href} target="_blank" rel="noreferrer" {...props}>{children}</a>;
+                },
+              }}
+            >{linkifyFilePaths(msg.markdown)}</Markdown>
           </div>
         )}
       </div>
@@ -56,7 +68,7 @@ function ThinkingBlock({ msg, showAvatar, agentName }: { msg: ChatMessage; showA
   );
 }
 
-function ToolRow({ msg }: { msg: ChatMessage }) {
+function ToolRow({ msg, onFileClick }: { msg: ChatMessage; onFileClick: (absPath: string) => void }) {
   const t = msg.tool;
   const isErr = msg.kind === 'error';
   const executed = (t?.status ?? '').toLowerCase() === 'executed';
@@ -85,7 +97,10 @@ function ToolRow({ msg }: { msg: ChatMessage }) {
           <div className="mt-1 panel overflow-hidden">
             {t?.filePath && (
               <div className="px-2.5 pt-2">
-                <p className="mono text-[11px] t-strong truncate" title={t.filePath}>{t.filePath}</p>
+                <button type="button" title={t.filePath} onClick={() => onFileClick(t.filePath!)}
+                  className="mono text-[11px] t-strong truncate underline text-left max-w-full block" style={{ cursor: 'pointer' }}>
+                  {t.filePath}
+                </button>
               </div>
             )}
             {hasDiff ? (
@@ -152,7 +167,7 @@ function ToolRow({ msg }: { msg: ChatMessage }) {
   );
 }
 
-function Bubble({ msg, agentName, showAvatar = true }: { msg: ChatMessage; agentName?: string; showAvatar?: boolean }) {
+function Bubble({ msg, agentName, showAvatar = true, onFileClick }: { msg: ChatMessage; agentName?: string; showAvatar?: boolean; onFileClick: (absPath: string) => void }) {
   const isUser = msg.kind === 'user';
   return (
     <div className={`flex gap-2 animate-fadeIn ${isUser ? 'justify-end' : 'justify-start'}`}>
@@ -169,7 +184,27 @@ function Bubble({ msg, agentName, showAvatar = true }: { msg: ChatMessage; agent
           style={isUser
             ? { background: 'var(--accent)', color: 'var(--accent-text)', border: '1px solid var(--accent)', borderRadius: 6, padding: '8px 10px' }
             : { background: 'var(--surface)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 6, padding: '8px 10px' }}>
-          <Markdown>{msg.markdown}</Markdown>
+          <Markdown
+            components={{
+              a: ({ href, children, ...props }) => {
+                const abs = parsePreviewHref(href);
+                if (abs) {
+                  return (
+                    <button
+                      type="button"
+                      title={abs}
+                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); onFileClick(abs); }}
+                      className="underline mono text-[12px] break-all"
+                      style={{ color: 'var(--info)', cursor: 'pointer' }}
+                    >
+                      {children}
+                    </button>
+                  );
+                }
+                return <a href={href} target="_blank" rel="noreferrer" {...props}>{children}</a>;
+              },
+            }}
+          >{linkifyFilePaths(msg.markdown)}</Markdown>
         </div>
       </div>
       {isUser && (
@@ -184,6 +219,7 @@ function Bubble({ msg, agentName, showAvatar = true }: { msg: ChatMessage; agent
 export default function SessionChatWindow({ task, onClose, standalone }: SessionChatWindowProps) {
   const sessionId = task?.sessionId ?? null;
   const { messages, status, retry } = useSessionStream(sessionId);
+  const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -308,9 +344,9 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
         {messages.map((msg, idx) => {
           const prev = idx > 0 ? messages[idx - 1] : undefined;
           const startsTurn = msg.kind !== 'user' && (!prev || prev.kind === 'user');
-          if (msg.kind === 'tool' || msg.kind === 'error') return <ToolRow key={msg.id} msg={msg} />;
-          if (msg.kind === 'reasoning') return <ThinkingBlock key={msg.id} msg={msg} showAvatar={startsTurn} agentName={task.agentName} />;
-          return <Bubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : task.agentName} showAvatar={msg.kind === 'user' ? true : startsTurn} />;
+          if (msg.kind === 'tool' || msg.kind === 'error') return <ToolRow key={msg.id} msg={msg} onFileClick={(p) => setPreviewPath(p)} />;
+          if (msg.kind === 'reasoning') return <ThinkingBlock key={msg.id} msg={msg} showAvatar={startsTurn} agentName={task.agentName} onFileClick={(p) => setPreviewPath(p)} />;
+          return <Bubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : task.agentName} showAvatar={msg.kind === 'user' ? true : startsTurn} onFileClick={(p) => setPreviewPath(p)} />;
         })}
         <div ref={bottomRef} />
       </div>
@@ -332,6 +368,7 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
     return (
       <div className="h-screen flex flex-col" style={{ background: 'var(--surface)' }}>
         {body}
+        {previewPath && <FilePreviewModal absPath={previewPath} onClose={() => setPreviewPath(null)} />}
       </div>
     );
   }
@@ -345,6 +382,7 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
           style={{ touchAction: 'none' }} />
         {body}
       </div>
+      {previewPath && <FilePreviewModal absPath={previewPath} onClose={() => setPreviewPath(null)} />}
     </div>
   );
 }

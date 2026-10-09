@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { DndContext, DragEndEvent, DragOverlay, DragStartEvent, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
 import {
   Plus,
@@ -14,6 +14,7 @@ import {
   Moon,
   Sun,
   Search,
+  FlaskConical,
 } from 'lucide-react';
 import { useTheme } from './hooks/useTheme';
 import { Task, TaskStatus, TaskPriority, Project, Agent, OpenCodeAgentInfo } from './types';
@@ -40,6 +41,7 @@ import ProjectModal from './components/ProjectModal';
 import AgentTeamModal from './components/AgentTeamModal';
 import ServerConfigModal from './components/ServerConfigModal';
 import TaskCard from './components/TaskCard';
+import ApiExplorer from './components/ApiExplorer';
 
 const COLUMNS: { status: TaskStatus; title: string }[] = [
   { status: 'backlog', title: 'Backlog' },
@@ -48,8 +50,11 @@ const COLUMNS: { status: TaskStatus; title: string }[] = [
   { status: 'blocked', title: 'Blocked' },
 ];
 
+type View = 'board' | 'api';
+
 export default function App() {
   // State
+  const [view, setView] = useState<View>('board');
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectIdState] = useState<string | null>(null);
   const [tasks, setTasks] = useState<Record<TaskStatus, Task[]>>({
@@ -82,6 +87,15 @@ export default function App() {
     })
   );
 
+  // Optimistic-move stamps: id → {status, at}. Guards against two races:
+  // 1) the 5s refresh poll firing while the Python CLI write is still in
+  //    flight (cold-start can take seconds) — the fetched row still carries
+  //    the OLD status and would snap the card back to backlog.
+  // 2) startTaskExecution's updateTask(...startupPhase) responses echoing a
+  //    row whose status lags the drag target.
+  // Entries expire after 15s so a genuinely failed move still reconciles.
+  const optimisticRef = useRef<Record<string, { status: TaskStatus; at: number }>>({});
+
   // Load data — Option B: SQLite via /api/kanban (async).
   const loadData = useCallback(async () => {
     // First run: push any legacy localStorage rows into the shared DB.
@@ -107,11 +121,24 @@ export default function App() {
     setActiveProjectIdState(activeId);
 
     if (activeId) {
+      const now = Date.now();
+      const guarded = all.map((t) => {
+        const opt = optimisticRef.current[t.id];
+        if (opt && now - opt.at < 15000 && t.status !== opt.status) {
+          // Server hasn't caught up with our optimistic move yet — keep
+          // showing the card in the dragged-to column.
+          return { ...t, status: opt.status };
+        }
+        if (opt && (now - opt.at >= 15000 || t.status === opt.status)) {
+          delete optimisticRef.current[t.id];
+        }
+        return t;
+      });
       setTasks({
-        backlog: all.filter((t) => t.status === 'backlog'),
-        running: all.filter((t) => t.status === 'running'),
-        done: all.filter((t) => t.status === 'done'),
-        blocked: all.filter((t) => t.status === 'blocked'),
+        backlog: guarded.filter((t) => t.status === 'backlog'),
+        running: guarded.filter((t) => t.status === 'running'),
+        done: guarded.filter((t) => t.status === 'done'),
+        blocked: guarded.filter((t) => t.status === 'blocked'),
       });
     } else {
       setTasks({ backlog: [], running: [], done: [], blocked: [] });
@@ -191,6 +218,10 @@ export default function App() {
 
   // Optimistic helpers: update the board instantly, reconcile with server after.
   const moveTaskInState = (id: string, newStatus: TaskStatus) => {
+    // Stamp the optimistic move so stale full-refreshes (5s poll, or the
+    // post-drag loadData racing the Python CLI write) can't snap the card
+    // back to the old column: loadData skips any row older than this stamp.
+    optimisticRef.current[id] = { status: newStatus, at: Date.now() };
     setTasks((prev) => {
       let found: Task | null = null;
       const next = { ...prev };
@@ -207,6 +238,8 @@ export default function App() {
     });
   };
   const upsertTaskInState = (task: Task) => {
+    // Same stamp as moveTaskInState — see comment there.
+    optimisticRef.current[task.id] = { status: task.status, at: Date.now() };
     setTasks((prev) => {
       const next = { ...prev };
       for (const key of Object.keys(next) as TaskStatus[]) {
@@ -255,18 +288,36 @@ export default function App() {
     const project = projects.find((p) => p.id === task.projectId);
     const projectName = project?.name?.trim();
     const projectPath = project?.path?.trim();
+    // Agent team context: assigned agent + project team roster + all known agents.
+    const assigned = task.agentId
+      ? (agents.find((a) => a.id === task.agentId) ?? { id: task.agentId, name: task.agentName ?? task.agentId })
+      : undefined;
+    const teamIds = project?.agentIds ?? [];
+    const teamAgents = teamIds
+      .map((id) => agents.find((a) => a.id === id))
+      .filter((a): a is Agent => Boolean(a));
+    const teamLines = teamAgents.length > 0
+      ? teamAgents.map((a) => `- ${a.name} (id: ${a.id})${a.description ? ` — ${a.description}` : ''}`).join('\n')
+      : teamIds.length > 0
+        ? teamIds.map((id) => `- (id: ${id})`).join('\n')
+        : '(no project team configured — all agents available)';
     const headerLines = [
       'You are now executing this task autonomously. Complete it end-to-end — read the project, plan if needed, make the changes, and leave it in a working state. Ask the user only if blocked.',
       projectName ? `Project: ${projectName}${projectPath ? ` (${projectPath})` : ''}` : undefined,
       `Priority: ${prio}`,
       `Task id: ${task.id}`,
       `Project id: ${task.projectId}`,
+      assigned ? `Assigned agent: ${assigned.name} (id: ${assigned.id})` : undefined,
+      `Agent team for this project:\n${teamLines}`,
     ].filter(Boolean).join('\n');
     const footer =
-      `\n---\nWhen you are finished, use the kanban MCP tools (shared SQLite store):\n` +
-      `  Call kanban_update_status with { taskId: "${task.id}", status: "done" } when complete, or "blocked" if stuck.\n` +
-      `  To break off follow-up work, call kanban_create_task with { projectId: "${task.projectId}", title, description, priority }.\n` +
-      `  To list/search work, call kanban_list_tasks with { projectId: "${task.projectId}" }.\n` +
+      `\n---\nAssume an agent system which uses tasks for sharing.\n` +
+      `There is http://localhost:3001/api (all available endpoints are described at http://localhost:3001/api/kanban/docs).\n` +
+      `When you are finished, call the HTTP endpoint PATCH http://localhost:3001/api/kanban/tasks/${task.id}` +
+      ` with body { "status": "done" } when complete, or { "status": "blocked" } if stuck.\n` +
+      `To break off follow-up work, POST to http://localhost:3001/api/kanban/tasks with { "projectId": "${task.projectId}", "title": "...", "description": "...", "priority": "medium" }.\n` +
+      `To delegate to a teammate and WAIT for the result (sync, like read/write): POST to http://localhost:3001/api/kanban/delegate with { "projectId": "${task.projectId}", "title": "...", "description": "...", "agentId": "<teammate-id from the team list above>" } — it creates the subtask, runs it immediately, and returns the finished Task (give the client a generous timeout).\n` +
+      `To list/search work, GET http://localhost:3001/api/kanban/tasks?projectId=${task.projectId}.\n` +
       `Do the status update as the last step — after all code changes are complete. The board refreshes from the store automatically.`;
     return `${headerLines}\n\nTask: ${title}\n\nDescription: ${desc}${footer}`;
   };
@@ -471,9 +522,25 @@ export default function App() {
     }
   };
 
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
+
   const handleDeleteTask = async (id: string) => {
-    await deleteTask(id);
-    await loadData();
+    // Flag first so the card shows the spinner — the Python CLI round-trip
+    // (cold-start + SQLite write + reload) can take several seconds.
+    setDeletingIds((prev) => new Set(prev).add(id));
+    try {
+      await deleteTask(id);
+      await loadData();
+    } catch (e) {
+      console.error('delete failed', e);
+      await loadData().catch(() => {});
+    } finally {
+      setDeletingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
   };
 
   const handleEditTask = (task: Task) => {
@@ -755,6 +822,16 @@ export default function App() {
                 <span className="hidden sm:inline mono">{theme === 'light' ? 'DARK' : 'LIGHT'}</span>
               </button>
               <button
+                onClick={() => setView(view === 'api' ? 'board' : 'api')}
+                className="btn flex items-center gap-1.5 px-3 py-2 text-[13px]"
+                title={view === 'api' ? 'Back to board' : 'API explorer — test the endpoints'}
+              >
+                {view === 'api'
+                  ? <LayoutGrid className="w-3.5 h-3.5" strokeWidth={1.75} />
+                  : <FlaskConical className="w-3.5 h-3.5" strokeWidth={1.75} />}
+                <span className="hidden sm:inline mono">{view === 'api' ? 'BOARD' : 'API'}</span>
+              </button>
+              <button
                 onClick={() => setShowServerModal(true)}
                 className="btn flex items-center px-2.5 py-1.5"
                 title="Server connection"
@@ -803,7 +880,9 @@ export default function App() {
 
       {/* Main Content */}
       <main className="p-4">
-        {!activeProject ? (
+        {view === 'api' ? (
+          <ApiExplorer projectId={activeProjectId} />
+        ) : !activeProject ? (
           <div className="flex flex-col items-center justify-center h-[calc(100vh-120px)]">
             <div className="w-12 h-12 panel flex items-center justify-center mb-4">
               <FolderKanban className="w-5 h-5 muted" strokeWidth={1.5} />
@@ -841,6 +920,7 @@ export default function App() {
                   onDeleteTask={handleDeleteTask}
                   onOpenChat={handleOpenChat}
                   onAddTask={handleAddTask}
+                  deletingIds={deletingIds}
                 />
               ))}
             </div>

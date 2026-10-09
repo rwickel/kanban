@@ -15,19 +15,35 @@ export function useSessionStream(sessionId: string | null) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [status, setStatus] = useState<ChatStatus>('idle');
   const [attempt, setAttempt] = useState(0);
-  const seenRef = useRef<Set<string>>(new Set());
   const sessionIdRef = useRef<string | null>(null);
 
+  // Reconcile, don't just append: a tool part keeps the same id
+  // (`${msgId}-tool`) while its state flips pending → completed, so
+  // dedup-by-id would freeze the row on "pending" forever. Incoming
+  // rows replace same-id rows (status/detail update in place), order
+  // follows the server list.
   const merge = useCallback((rawList: unknown) => {
-    const fresh = toChatMessages(rawList).filter((m) => !seenRef.current.has(m.id));
-    if (fresh.length === 0) return;
-    for (const m of fresh) seenRef.current.add(m.id);
-    setMessages((prev) => [...prev, ...fresh]);
+    const incoming = toChatMessages(rawList);
+    if (incoming.length === 0) return;
+    setMessages((prev) => {
+      if (prev.length === 0) return incoming;
+      const byId = new Map(prev.map((m) => [m.id, m]));
+      let changed = false;
+      for (const m of incoming) {
+        const old = byId.get(m.id);
+        if (!old || JSON.stringify(old) !== JSON.stringify(m)) changed = true;
+        byId.set(m.id, m);
+      }
+      if (!changed && incoming.length === prev.length) return prev;
+      // Keep server order; append any local ids the server no longer sends.
+      const order = incoming.map((m) => m.id);
+      const incomingIds = new Set(order);
+      for (const m of prev) if (!incomingIds.has(m.id)) order.push(m.id);
+      return order.map((id) => byId.get(id)!).filter(Boolean);
+    });
   }, []);
 
   useEffect(() => {
-    seenRef.current = new Set();
-    setMessages([]);
     sessionIdRef.current = sessionId;
     if (!sessionId) {
       setStatus('idle');

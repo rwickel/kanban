@@ -44,6 +44,15 @@ export default function ServerConfigModal({ isOpen, onClose, onConnected }: Serv
     setTesting(false);
     if (r.ok) {
       saveServerConfig({ url: url.trim(), password });
+      // Persist server-side too so POST /api/kanban/delegate can spawn
+      // sessions without a per-call password.
+      try {
+        await fetch('/api/kanban/server', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: url.trim(), password }),
+        });
+      } catch { /* offline — delegate falls back to env */ }
       onConnected();
       onClose();
     }
@@ -51,12 +60,26 @@ export default function ServerConfigModal({ isOpen, onClose, onConnected }: Serv
 
   const handleSaveOnly = () => {
     saveServerConfig({ url: url.trim(), password });
+    try {
+      fetch('/api/kanban/server', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: url.trim(), password }),
+      }).catch(() => {});
+    } catch { /* offline */ }
     onConnected();
     onClose();
   };
 
   const handleDisconnect = () => {
     saveServerConfig({ password: '' });
+    try {
+      fetch('/api/kanban/server', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: '' }),
+      }).catch(() => {});
+    } catch { /* offline */ }
     onConnected();
     onClose();
   };

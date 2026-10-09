@@ -7,6 +7,7 @@ interface TaskCardProps {
   onEdit: (task: Task) => void;
   onDelete: (id: string) => void;
   onOpenChat: (task: Task) => void;
+  isDeleting?: boolean;
 }
 
 const priorityConfig: Record<TaskPriority, { label: string; cls: string; dot: string }> = {
@@ -23,7 +24,7 @@ function shortId(id: string): string {
   return `ENG-${tail.slice(0, 4).toUpperCase()}`;
 }
 
-export default function TaskCard({ task, onEdit, onDelete, onOpenChat }: TaskCardProps) {
+export default function TaskCard({ task, onEdit, onDelete, onOpenChat, isDeleting }: TaskCardProps) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: task.id,
     data: { task },
@@ -40,7 +41,16 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat }: TaskCar
       ref={setNodeRef}
       style={style}
       className={`task-card group relative mb-2 ${isDragging ? 'is-dragging z-50' : ''}`}
+      aria-busy={isDeleting || undefined}
     >
+      {/* deleting overlay: spinner — the Python CLI write can take seconds */}
+      {isDeleting && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center gap-2"
+          style={{ background: 'color-mix(in srgb, var(--surface) 72%, transparent)', borderRadius: 'inherit' }}>
+          <Loader2 className="w-4 h-4 animate-spin" strokeWidth={1.75} />
+          <span className="text-[12px] t-soft mono">Deleting…</span>
+        </div>
+      )}
       <div
         {...attributes}
         {...listeners}
@@ -61,8 +71,10 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat }: TaskCar
             <button onClick={() => onEdit(task)} className="p-1 rounded hoverable" title="Edit task">
               <Pencil className="w-3 h-3 muted" />
             </button>
-            <button onClick={() => onDelete(task.id)} className="p-1 rounded hoverable" title="Delete task">
-              <Trash2 className="w-3 h-3 muted" />
+            <button onClick={() => onDelete(task.id)} disabled={isDeleting} className="p-1 rounded hoverable disabled:opacity-50" title={isDeleting ? 'Deleting…' : 'Delete task'}>
+              {isDeleting
+                ? <Loader2 className="w-3 h-3 animate-spin" />
+                : <Trash2 className="w-3 h-3 muted" />}
             </button>
           </span>
         </span>

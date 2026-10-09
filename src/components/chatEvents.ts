@@ -43,6 +43,22 @@ function str(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
+/** One-line summary of a nested Code Mode subcall input — never raw JSON. */
+function summarizeCallInput(tool: string, input: Payload, full = false): string {
+  const keys = Object.keys(input);
+  if (keys.length === 0) return `${tool}()`;
+  const lines = keys.map((k) => {
+    let v: string;
+    try {
+      v = typeof input[k] === 'string' ? (input[k] as string) : JSON.stringify(input[k]);
+    } catch { v = String(input[k]); }
+    const cap = full ? 500 : 120;
+    if (v.length > cap) v = `${v.slice(0, cap)}…`;
+    return `${k}: ${v}`;
+  });
+  return `${tool}(${lines.join(full ? '\n' : ' · ')})`;
+}
+
 /** "action → output" one-liner, never raw JSON. */
 function toolSummary(part: Payload): string {
   const input = toolInput(part);
@@ -69,11 +85,18 @@ function toolInput(part: Payload): ToolDetail {
     const parsed: unknown = JSON.parse(output);
     if (parsed && typeof parsed === 'object') {
       const o = parsed as Payload;
-      output = str(o.error) ? `error: ${str(o.error)}` : o.data != null ? String(o.data) : '';
+      // Only collapse the envelope when it actually carries data/error —
+      // otherwise keep the raw text (e.g. execute results like {a, b}).
+      if (str(o.error)) output = `error: ${str(o.error)}`;
+      else if (o.data != null && typeof o.data !== 'object') output = String(o.data);
+      else if (o.data != null) output = JSON.stringify(o.data).slice(0, 2000);
     }
   } catch {
     /* not JSON — keep raw */
   }
+
+  // Rich render detection
+  const toolName = (str(part.tool) || str(part.name) || '').toLowerCase();
 
   // Pick the most informative input field per tool
   const pick = (...keys: string[]): string => {
@@ -94,8 +117,6 @@ function toolInput(part: Payload): ToolDetail {
   const briefOut = output.replace(/\s+/g, ' ').trim().slice(0, 120);
   const brief = [action, briefOut].filter(Boolean).join(' → ').slice(0, 200);
 
-  // Rich render detection
-  const toolName = (str(part.tool) || str(part.name) || '').toLowerCase();
   let render: 'diff' | 'question' | 'todo' | 'generic' = 'generic';
   let diff: DiffLine[] | undefined;
   let questions: QuestionItem[] | undefined;
@@ -172,7 +193,6 @@ function contentToMessages(id: string, kind: 'user' | 'assistant', part: Payload
     case 'tool': {
       const state = (part.state as Payload | undefined) ?? {};
       const status = str(state.status) || 'pending';
-      const detail = toolInput(part);
       const execErr = str(state.error);
       const exec = (part as Record<string, unknown>).executed as boolean | undefined;
       if (status === 'error' || execErr) {
@@ -182,6 +202,33 @@ function contentToMessages(id: string, kind: 'user' | 'assistant', part: Payload
           markdown: execErr || toolSummary(part) || 'Tool call failed.',
         }];
       }
+      // Code Mode `execute` wrapper: { type:"tool", name:"execute", ...,
+      //   metadata.toolCalls: [{tool:"search", input:{...}}, ...] } plus one
+      //   giant nested content dump. Render each inner call as its own compact
+      //   row instead of the raw JSON blob.
+      if ((str(part.name) || str(part.tool)).toLowerCase() === 'execute') {
+        const meta = (part.metadata ?? (state as Payload).metadata) as Payload | undefined;
+        const calls = meta && Array.isArray(meta.toolCalls) ? (meta.toolCalls as Payload[]) : [];
+        const innerInput = ((state.input as Payload | undefined) ?? {}) as Payload;
+        const code = str(innerInput.code).slice(0, 2000);
+        if (calls.length > 0) {
+          return calls.map((c, i) => ({
+            id: `${id}-tool-${i}`,
+            kind: 'tool' as const,
+            markdown: '',
+            tool: {
+              tool: str(c.tool) || 'subcall',
+              status: str(c.status) || 'completed',
+              summary: summarizeCallInput(str(c.tool), (c.input ?? {}) as Payload),
+              input: summarizeCallInput(str(c.tool), (c.input ?? {}) as Payload, true),
+              output: '',
+              render: 'generic' as const,
+            },
+          }));
+        }
+        void code;
+      }
+      const detail = toolInput(part);
       // Treat both executed:true and status:completed as "executed" (v2 sends completed)
       const executed = exec === true || status === 'completed';
       const st = executed ? 'executed' : status;

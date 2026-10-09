@@ -12,6 +12,7 @@ interface KanbanColumnProps {
   onDeleteTask: (id: string) => void;
   onOpenChat: (task: Task) => void;
   onAddTask: () => void;
+  deletingIds?: Set<string>;
 }
 
 const statusDot: Record<TaskStatus, string> = {
@@ -37,6 +38,7 @@ export default function KanbanColumn({
   onDeleteTask,
   onOpenChat,
   onAddTask,
+  deletingIds,
 }: KanbanColumnProps) {
   const { setNodeRef, isOver } = useDroppable({
     id: status,
@@ -73,6 +75,7 @@ export default function KanbanColumn({
             onEdit={onEditTask}
             onDelete={onDeleteTask}
             onOpenChat={onOpenChat}
+            isDeleting={deletingIds?.has(task.id)}
           />
         ))}
       </div>
