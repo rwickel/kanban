@@ -138,11 +138,14 @@ function toolInput(part: Payload): ToolDetail {
   }
 
   // Full details: command or path+content, then output
+  // When we have a diff render (edit/write) the diff panel already shows the
+  // content, so we keep Input to just the path to avoid duplicating the body.
+  const hasDiff = render === 'diff' && !!diff && diff.length > 0;
   const inputLines: string[] = [];
   if (command) inputLines.push(`$ ${command}`);
   if (path) inputLines.push(path);
   if (!command && !path && pattern) inputLines.push(pattern);
-  if (text && text !== command) inputLines.push(text.length > 2000 ? `${text.slice(0, 2000)}\n… (truncated)` : text);
+  if (!hasDiff && text && text !== command) inputLines.push(text.length > 2000 ? `${text.slice(0, 2000)}\n… (truncated)` : text);
   if (inputLines.length === 0) {
     try {
       const raw = JSON.stringify(rawInput);

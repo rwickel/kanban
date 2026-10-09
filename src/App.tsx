@@ -339,9 +339,8 @@ export default function App() {
     // Reuse existing session if the task already has one, otherwise create it.
     let sessionId = task.sessionId;
     if (!sessionId) {
-      // Show progress on the card + open chat right away so the user sees "creating session…" instead of empty.
+      // Show progress on the card — chat stays closed until the user opens it.
       upsertTaskInState({ ...task, startupPhase: 'creating-session', startupError: undefined } as Task);
-      setChatTask({ ...task, startupPhase: 'creating-session', startupError: undefined } as Task);
       const res = await createSession({ title: task.title, agent: resolved.id ?? resolved.name, model, directory });
       const session = res.session;
       if (!session?.id) {
@@ -358,10 +357,8 @@ export default function App() {
       task = { ...task, sessionId: session.id };
       await updateTask(task.id, { sessionId: session.id, agentId: resolved.id, agentName: resolved.name, startupPhase: 'sending-prompt' } as unknown as Partial<Task>).catch(() => {});
       upsertTaskInState({ ...task, startupPhase: 'sending-prompt' } as Task);
-      setChatTask({ ...task, startupPhase: 'sending-prompt' } as Task);
     } else {
       upsertTaskInState({ ...task, startupPhase: 'sending-prompt', startupError: undefined } as Task);
-      setChatTask({ ...task, startupPhase: 'sending-prompt', startupError: undefined } as Task);
     }
 
     // Execute the task: title + description go out as the prompt message
@@ -377,11 +374,12 @@ export default function App() {
 
     await updateTask(task.id, { startupPhase: 'ready' } as unknown as Partial<Task>).catch(() => {});
     upsertTaskInState({ ...task, startupPhase: 'ready', startupError: undefined, sessionId } as Task);
-    setChatTask((cur) => (cur?.id === task.id ? ({ ...cur, startupPhase: 'ready' } as Task) : cur));
     await loadData();
-    // Ensure chat points at the live session
-    const fresh = { ...task, sessionId, agentId: resolved.id, agentName: resolved.name, status: 'running' as const, startupPhase: 'ready' as const };
-    setChatTask(fresh);
+    // Keep an already-open chat on this task in sync — but never steal/open
+    // the chat window. It stays pinned to whatever the user explicitly opened.
+    setChatTask((cur) => (cur?.id === task.id
+      ? { ...task, sessionId, agentId: resolved.id, agentName: resolved.name, status: 'running' as const, startupPhase: 'ready' as const } as Task
+      : cur));
   };
 
   const handleOpenChat = (task: Task) => {

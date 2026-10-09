@@ -57,10 +57,13 @@ function ThinkingBlock({ msg, showAvatar, agentName }: { msg: ChatMessage; showA
 }
 
 function ToolRow({ msg }: { msg: ChatMessage }) {
-  const [open, setOpen] = useState(false);
-  const isErr = msg.kind === 'error';
   const t = msg.tool;
+  const isErr = msg.kind === 'error';
   const executed = (t?.status ?? '').toLowerCase() === 'executed';
+  const hasDiff = !!t?.diff && t.diff.length > 0;
+  // Only edit/write (diff render) starts expanded — everything else collapsed.
+  const [open, setOpen] = useState(hasDiff);
+  const isWrite = (t?.tool ?? '').toLowerCase().includes('write') && !(t?.tool ?? '').toLowerCase().includes('todo');
   return (
     <div className="flex gap-2 justify-start animate-fadeIn">
       <div className="w-6 h-6 flex items-center justify-center shrink-0" style={{ border: '1px solid var(--border)', borderRadius: 6, background: 'var(--surface)' }}>
@@ -80,12 +83,58 @@ function ToolRow({ msg }: { msg: ChatMessage }) {
         </button>
         {open && (
           <div className="mt-1 panel overflow-hidden">
-            {t?.input && (
+            {t?.filePath && (
+              <div className="px-2.5 pt-2">
+                <p className="mono text-[11px] t-strong truncate" title={t.filePath}>{t.filePath}</p>
+              </div>
+            )}
+            {hasDiff ? (
+              <div className="px-2.5 py-2">
+                <p className="text-[10px] uppercase tracking-widest muted mono mb-1">
+                  {isWrite ? 'Content' : 'Diff'}
+                </p>
+                <pre className="mono text-[11px] leading-relaxed whitespace-pre-wrap break-words overflow-x-auto" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 6, padding: '4px 0', maxHeight: 320, overflowY: 'auto' }}>
+                  {t!.diff!.map((d, i) => (
+                    <div
+                      key={i}
+                      style={d.type === 'add'
+                        ? { background: 'color-mix(in srgb, var(--emerald) 14%, transparent)', padding: '1px 10px' }
+                        : d.type === 'del'
+                          ? { background: 'color-mix(in srgb, var(--danger) 12%, transparent)', padding: '1px 10px' }
+                          : { padding: '1px 10px' }}
+                    >
+                      {d.text === '' ? ' ' : d.text}
+                    </div>
+                  ))}
+                </pre>
+              </div>
+            ) : t?.input && (
               <div className="px-2.5 py-2 border-b hairline" style={{ borderBottomWidth: 1, borderBottomStyle: 'solid' }}>
                 <p className="text-[10px] uppercase tracking-widest muted mono mb-1">Input</p>
                 <pre className="mono text-[11px] leading-relaxed t-soft whitespace-pre-wrap break-words">{t.input}</pre>
               </div>
             )}
+            {t?.render === 'question' && t.questions ? (
+              <div className="px-2.5 py-2 space-y-2">
+                {t.questions.map((q, i) => (
+                  <div key={i}>
+                    <p className="text-[11px] font-semibold t-strong">{q.header}: {q.question}</p>
+                    {q.options.map((o, j) => (
+                      <p key={j} className="mono text-[11px] muted">· {o.label}{o.description ? ` — ${o.description}` : ''}</p>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {t?.render === 'todo' && t.todos ? (
+              <div className="px-2.5 py-2 space-y-1">
+                {t.todos.map((td, i) => (
+                  <p key={i} className="mono text-[11px] t-soft">
+                    {td.status === 'completed' ? '✓' : td.status === 'in_progress' ? '◐' : '○'} {td.content}
+                  </p>
+                ))}
+              </div>
+            ) : null}
             {t?.output ? (
               <div className="px-2.5 py-2">
                 <p className="text-[10px] uppercase tracking-widest muted mono mb-1">Result</p>
