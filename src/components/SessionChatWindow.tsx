@@ -3,13 +3,14 @@
 import { useEffect, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import {
-  X, Send, Loader2, ExternalLink, Copy, Check,
+  X, Send, Loader2, ExternalLink, Copy, Check, Download,
   Bot, User, ChevronDown, Wrench, AlertTriangle,
 } from 'lucide-react';
 import { Task } from '../types';
 import { sendPrompt } from '../api/opencode';
 import { useSessionStream, type ChatStatus } from '../hooks/useSessionStream';
 import type { ChatMessage } from './chatEvents';
+import { chatToMarkdown } from './chatEvents';
 import { linkifyFilePaths, parsePreviewHref } from './filePaths';
 import FilePreviewModal from './FilePreviewModal';
 
@@ -224,6 +225,7 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [exported, setExported] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(() => {
     try {
@@ -296,6 +298,22 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
     window.open(`${window.location.pathname}#session/${sessionId}`, '_blank', 'width=480,height=720');
   };
 
+  const exportMarkdown = () => {
+    const md = chatToMarkdown(messages, { title: task.title, sessionId, agentName: task.agentName ?? undefined });
+    const name = `${(task.title || 'session').replace(/[^\w\-]+/g, '-').slice(0, 60) || 'session'}-${(sessionId ?? 'no-session').slice(0, 12)}.md`;
+    try {
+      const blob = new Blob([md], { type: 'text/markdown' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = name; document.body.appendChild(a); a.click();
+      document.body.removeChild(a); URL.revokeObjectURL(url);
+    } catch {
+      // clipboard fallback
+      try { navigator.clipboard.writeText(md); } catch { /* ignore */ }
+    }
+    setExported(true); setTimeout(() => setExported(false), 1500);
+  };
+
   const msgCount = messages.length;
 
   const body = (
@@ -316,6 +334,9 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
             </button>
           </div>
           <div className="flex items-center gap-1 shrink-0">
+            <button onClick={exportMarkdown} className="btn p-1.5" title="Export chat as Markdown">
+              {exported ? <Check className="w-3.5 h-3.5" style={{ color: 'var(--emerald)' }} strokeWidth={1.75} /> : <Download className="w-3.5 h-3.5" strokeWidth={1.75} />}
+            </button>
             {!standalone && (
               <button onClick={popOut} className="btn p-1.5" title="Pop out"><ExternalLink className="w-3.5 h-3.5" strokeWidth={1.75} /></button>
             )}

@@ -304,3 +304,49 @@ export function toChatMessages(rawList: unknown): ChatMessage[] {
   }
   return out;
 }
+
+/** Serialize the current chat feed to Markdown (user/assistant text, thinking, tool calls). */
+export function chatToMarkdown(messages: ChatMessage[], opts?: { title?: string; sessionId?: string | null; agentName?: string }): string {
+  const lines: string[] = [];
+  if (opts?.title) lines.push(`# ${opts.title}`, '');
+  const meta: string[] = [];
+  if (opts?.agentName) meta.push(`agent: ${opts.agentName}`);
+  if (opts?.sessionId) meta.push(`session: ${opts.sessionId}`);
+  if (meta.length) lines.push(`_${meta.join(' · ')}_`, '');
+  for (const m of messages) {
+    if (m.kind === 'user') {
+      lines.push(`## 🧑 User`, '', m.markdown.trim(), '');
+    } else if (m.kind === 'assistant') {
+      lines.push(`## 🤖 Assistant`, '', m.markdown.trim(), '');
+    } else if (m.kind === 'reasoning') {
+      lines.push(`<details><summary>💭 Thinking</summary>`, '', m.markdown.trim(), '', `</details>`, '');
+    } else if (m.kind === 'tool' && m.tool) {
+      const t = m.tool;
+      lines.push(`### 🔧 \`${t.tool}\` — ${t.status}`);
+      if (t.summary) lines.push('', `_${t.summary}_`);
+      if (t.filePath) lines.push('', `file: \`${t.filePath}\``);
+      if (t.diff && t.diff.length) {
+        lines.push('', '```diff');
+        for (const d of t.diff) lines.push(`${d.type === 'add' ? '+' : d.type === 'del' ? '-' : ' '} ${d.text}`);
+        lines.push('```');
+      } else if (t.input) {
+        lines.push('', '**Input:**', '', '```', t.input.slice(0, 4000), '```');
+      }
+      if (t.questions) {
+        for (const q of t.questions) {
+          lines.push('', `**${q.header}: ${q.question}**`);
+          for (const o of q.options) lines.push(`- ${o.label}${o.description ? ` — ${o.description}` : ''}`);
+        }
+      }
+      if (t.todos) {
+        lines.push('');
+        for (const td of t.todos) lines.push(`- [${td.status === 'completed' ? 'x' : ' '}] ${td.content}`);
+      }
+      if (t.output) lines.push('', '**Result:**', '', '```', t.output.slice(0, 8000), '```');
+      lines.push('');
+    } else if (m.kind === 'error') {
+      lines.push(`### ❌ Error`, '', m.markdown.trim(), '');
+    }
+  }
+  return lines.join('\n').trim() + '\n';
+}

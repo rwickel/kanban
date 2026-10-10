@@ -223,6 +223,33 @@ modal → `PUT /api/kanban/server` or `OPENCODE_SERVER_PASSWORD` /
 `KANBAN_OPENCODE_PASSWORD` env).
 **Give the client a generous `-TimeoutSec`** (≥ `timeoutSec`).
 
+## Follow-up — `POST /api/kanban/message_to` (same session, no new task)
+
+After a `delegate` returns, ask more **in the same subtask session** —
+no new card, history preserved. Sends `text` to the existing session and
+**waits for the next assistant message**, returning only that last message:
+
+```powershell
+$body = @{
+  sessionId = "ses_abc123"   # from a delegate return — or pass taskId instead
+  text      = "also list the files you read"
+  timeoutSec = 120
+} | ConvertTo-Json
+
+Invoke-WebRequest http://localhost:3001/api/kanban/message_to `
+  -Method POST -ContentType "application/json" -Body $body `
+  -TimeoutSec 180 -UseBasicParsing |
+  Select-Object -ExpandProperty Content
+# → {"sessionId":"ses_abc123","taskId":"<subtask-uuid>","resultText":"README.md, docs/...","resultTruncated":false,"messageId":"msg_...","waited":true}
+```
+
+Body: `sessionId` **or** `taskId` (resolves via the task's `sessionId`) +
+`text*`; optional `serverUrl`, `serverPassword`, `timeoutSec` (default 120,
+cap 600), `pollMs` (default 1500). Only the **last assistant message** is
+relevant — tool/reasoning frames are skipped, capped at 4000 chars
+(`resultTruncated: true` when cut). MCP: `kanban_message_to
+{sessionId?|taskId?,text,...}`. Same OpenCode auth as delegate.
+
 ### `GET` / `PUT /api/kanban/server`
 
 One-time creds storage so delegate needs **no per-call password**:
@@ -273,6 +300,7 @@ Same SQLite rows, stdio transport, actor recorded as `"agent"`:
 | `kanban_list_tasks {projectId?,status?}` | `GET /api/kanban/tasks?...` |
 | `kanban_task_status {taskId?}` | `GET /api/kanban/tasks/:id` or `GET /api/kanban/events` |
 | `kanban_delegate {projectId,title,...}` | `POST /api/kanban/delegate` — sync: create + run + WAIT for done |
+| `kanban_message_to {sessionId?|taskId?,text,...}` | `POST /api/kanban/message_to` — follow-up in SAME session, returns last message |
 
 Canonical reference: [`vite.config.js` `kanbanApi()`](../vite.config.js) (routes),
 [`server/kanban.py`](../server/kanban.py) (store/CLI), [`README.md`](../README.md) (workflow).

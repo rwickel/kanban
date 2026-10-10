@@ -1,6 +1,7 @@
 import { Task, TaskPriority } from '../types';
-import { MessageSquare, Pencil, Trash2, GripVertical, Loader2, AlertTriangle } from 'lucide-react';
+import { MessageSquare, Pencil, Trash2, GripVertical, Loader2, AlertTriangle, Copy, Check } from 'lucide-react';
 import { useDraggable } from '@dnd-kit/core';
+import { useState } from 'react';
 
 interface TaskCardProps {
   task: Task;
@@ -17,13 +18,6 @@ const priorityConfig: Record<TaskPriority, { label: string; cls: string; dot: st
   critical: { label: 'URGENT', cls: 'p-red', dot: 'var(--danger)' },
 };
 
-function shortId(id: string): string {
-  if (!id) return '';
-  const parts = id.split('-');
-  const tail = parts[parts.length - 1] || id;
-  return `ENG-${tail.slice(0, 4).toUpperCase()}`;
-}
-
 export default function TaskCard({ task, onEdit, onDelete, onOpenChat, isDeleting }: TaskCardProps) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: task.id,
@@ -35,6 +29,22 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat, isDeletin
     : undefined;
 
   const priority = priorityConfig[task.priority];
+  const [copied, setCopied] = useState(false);
+
+  const copyId = async () => {
+    try {
+      await navigator.clipboard.writeText(task.id);
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = task.id;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  };
 
   return (
     <div
@@ -61,7 +71,12 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat, isDeletin
 
       {/* top meta row: mono ID + priority pill */}
       <div className="flex items-center justify-between gap-2 mb-1">
-        <span className="pill pill-id">{shortId(task.id)}</span>
+        <span className="inline-flex items-center gap-1 min-w-0">
+          <span className="pill pill-id" title={task.id}>{task.id.slice(0, 8)}</span>
+          <button onClick={copyId} className="p-1 rounded hoverable shrink-0" title={copied ? 'Copied!' : `Copy full id ${task.id}`} aria-label="Copy task id">
+            {copied ? <Check className="w-3 h-3" style={{ color: 'var(--emerald)' }} /> : <Copy className="w-3 h-3 muted" />}
+          </button>
+        </span>
         <span className="flex items-center gap-1.5">
           <span className={`pill ${priority.cls}`}>
             <span className="dot" style={{ background: priority.dot }} />

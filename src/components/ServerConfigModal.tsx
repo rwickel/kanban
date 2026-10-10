@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react';
 import { X, Server, Lock, Link2, CheckCircle2, XCircle, Loader2, Eye, EyeOff } from 'lucide-react';
 import { getServerConfig, saveServerConfig } from '../store/serverConfig';
 import { testConnection } from '../api/opencode';
-
 interface ServerConfigModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -20,8 +19,15 @@ export default function ServerConfigModal({ isOpen, onClose, onConnected }: Serv
     if (isOpen) {
       const cfg = getServerConfig();
       setUrl(cfg.url);
-      setPassword(cfg.password);
+      setPassword('');
       setResult(null);
+      // Show whether the server already has a password (never its value).
+      fetch('/api/kanban/server').then(async (r) => {
+        try {
+          const j = await r.json();
+          if (j?.url) setUrl(j.url);
+        } catch { /* offline */ }
+      }).catch(() => {});
     }
   }, [isOpen]);
 
@@ -36,16 +42,15 @@ export default function ServerConfigModal({ isOpen, onClose, onConnected }: Serv
   };
 
   const handleSave = async () => {
-    // Test first, then save + reconnect
+    // Test first (server-side), then persist server-side + connect.
     setTesting(true);
     setResult(null);
     const r = await testConnection(url.trim(), password);
     setResult(r);
     setTesting(false);
     if (r.ok) {
-      saveServerConfig({ url: url.trim(), password });
-      // Persist server-side too so POST /api/kanban/delegate can spawn
-      // sessions without a per-call password.
+      saveServerConfig({ url: url.trim() });
+      // Persist server-side only — the browser never keeps the password.
       try {
         await fetch('/api/kanban/server', {
           method: 'PUT',
@@ -53,13 +58,14 @@ export default function ServerConfigModal({ isOpen, onClose, onConnected }: Serv
           body: JSON.stringify({ url: url.trim(), password }),
         });
       } catch { /* offline — delegate falls back to env */ }
+      setPassword('');
       onConnected();
       onClose();
     }
   };
 
   const handleSaveOnly = () => {
-    saveServerConfig({ url: url.trim(), password });
+    saveServerConfig({ url: url.trim() });
     try {
       fetch('/api/kanban/server', {
         method: 'PUT',
@@ -67,12 +73,12 @@ export default function ServerConfigModal({ isOpen, onClose, onConnected }: Serv
         body: JSON.stringify({ url: url.trim(), password }),
       }).catch(() => {});
     } catch { /* offline */ }
+    setPassword('');
     onConnected();
     onClose();
   };
 
   const handleDisconnect = () => {
-    saveServerConfig({ password: '' });
     try {
       fetch('/api/kanban/server', {
         method: 'PUT',
@@ -143,7 +149,7 @@ export default function ServerConfigModal({ isOpen, onClose, onConnected }: Serv
                 {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               </button>
             </div>
-            <p className="text-[11px] text-gray-500 mt-1">Sent as Basic auth (opencode:password). Stored locally.</p>
+            <p className="text-[11px] text-gray-500 mt-1">Sent once to the board server, kept in .kanban-data/opencode.json. Never stored in the browser.</p>
           </div>
 
           {/* Test result */}

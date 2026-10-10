@@ -95,6 +95,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     model_provider_id TEXT,
     startup_phase TEXT,
     startup_error TEXT,
+    kind TEXT NOT NULL DEFAULT 'oneshot',
+    heartbeat_at TEXT,
+    expected_sec INTEGER,
+    progress TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -133,6 +137,14 @@ def get_conn(db_path: Path) -> sqlite3.Connection:
                 "startup_phase", "startup_error"):
         if col not in cols:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} TEXT")
+    for col, ddl in (
+        ("kind", "TEXT NOT NULL DEFAULT 'oneshot'"),
+        ("heartbeat_at", "TEXT"),
+        ("expected_sec", "INTEGER"),
+        ("progress", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {ddl}")
     pcols = {r[1] for r in conn.execute("PRAGMA table_info(projects)").fetchall()}
     for col, ddl in (
         ("agent_ids", "TEXT NOT NULL DEFAULT '[]'"),
@@ -207,6 +219,7 @@ def check_branch_pinned(project_row, folder: str) -> dict:
 
 
 def row_to_task(r: sqlite3.Row) -> dict:
+    keys = r.keys()
     return {
         "id": r["id"],
         "projectId": r["project_id"],
@@ -219,8 +232,12 @@ def row_to_task(r: sqlite3.Row) -> dict:
         "sessionId": r["session_id"],
         "modelId": r["model_id"],
         "modelProviderID": r["model_provider_id"],
-        "startupPhase": r["startup_phase"] if "startup_phase" in r.keys() else None,
-        "startupError": r["startup_error"] if "startup_error" in r.keys() else None,
+        "startupPhase": r["startup_phase"] if "startup_phase" in keys else None,
+        "startupError": r["startup_error"] if "startup_error" in keys else None,
+        "kind": r["kind"] if "kind" in keys and r["kind"] else "oneshot",
+        "heartbeatAt": r["heartbeat_at"] if "heartbeat_at" in keys else None,
+        "expectedSec": r["expected_sec"] if "expected_sec" in keys else None,
+        "progress": r["progress"] if "progress" in keys and r["progress"] else "",
         "createdAt": r["created_at"],
         "updatedAt": r["updated_at"],
     }
@@ -277,6 +294,13 @@ def require_priority(v: str) -> str:
     v = (v or "medium").strip()
     if v not in VALID_PRIORITIES:
         fail(f"Invalid priority '{v}'. Valid: {', '.join(VALID_PRIORITIES)}")
+    return v
+
+
+def require_kind(v) -> str:
+    v = (v or "oneshot").strip().lower()
+    if v not in ("oneshot", "service"):
+        fail(f"Invalid kind '{v}'. Valid: oneshot, service")
     return v
 
 
@@ -457,17 +481,21 @@ def cmd_task_create(args):
         fail(f"Task already exists: {tid}")
     status = require_status(args.status or "backlog")
     priority = require_priority(args.priority or "medium")
+    kind = require_kind(getattr(args, "kind", None) or "oneshot")
+    expected = getattr(args, "expected_sec", None)
     ts = now_iso()
     conn.execute(
         """INSERT INTO tasks (id, project_id, title, description, status, priority,
                               agent_id, agent_name, session_id, model_id, model_provider_id,
-                              startup_phase, startup_error,
+                              startup_phase, startup_error, kind, heartbeat_at,
+                              expected_sec, progress,
                               created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (tid, args.project, args.title, args.description or "", status, priority,
          args.agent_id, args.agent_name, args.session_id,
          args.model_id, args.model_provider,
-         args.startup_phase, args.startup_error, ts, ts),
+         args.startup_phase, args.startup_error, kind, ts if status == "running" else None,
+         expected, getattr(args, "progress", None) or "", ts, ts),
     )
     log_event(conn, tid, args.actor, "task.created",
               {"projectId": args.project, "title": args.title, "status": status})
@@ -519,9 +547,13 @@ def cmd_task_update(args):
         ("session_id", args.session_id), ("model_id", args.model_id),
         ("model_provider_id", args.model_provider),
         ("startup_phase", args.startup_phase), ("startup_error", args.startup_error),
+        ("kind", getattr(args, "kind", None)),
+        ("progress", getattr(args, "progress", None)),
     ]
     for col, val in mapping:
         if val is not None:
+            if col == "kind":
+                val = require_kind(val)
             sets.append(f"{col} = ?")
             params.append(val)
             changes[col] = val
@@ -533,6 +565,13 @@ def cmd_task_update(args):
         sets.append("status = ?")
         params.append(require_status(args.status))
         changes["status"] = args.status
+    if getattr(args, "expected_sec", None) is not None:
+        try:
+            sets.append("expected_sec = ?")
+            params.append(int(args.expected_sec))
+            changes["expected_sec"] = int(args.expected_sec)
+        except (TypeError, ValueError):
+            fail(f"Invalid --expected-sec '{args.expected_sec}'. Must be an integer (seconds).")
     if not sets:
         fail("Nothing to update. Pass --title/--description/--status/--priority/...")
     sets.append("updated_at = ?")
@@ -553,8 +592,8 @@ def cmd_task_move(args):
         fail(f"Task not found: {args.task_id}")
     status = require_status(args.status)
     old = row["status"]
-    conn.execute("UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
-                 (status, now_iso(), args.task_id))
+    conn.execute("UPDATE tasks SET status = ?, heartbeat_at = ?, updated_at = ? WHERE id = ?",
+                 (status, now_iso() if status == "running" else row["heartbeat_at"] if "heartbeat_at" in row.keys() else None, now_iso(), args.task_id))
     log_event(conn, args.task_id, args.actor, "task.moved",
               {"from": old, "to": status, "comment": args.comment})
     conn.commit()
@@ -573,6 +612,74 @@ def cmd_task_delete(args):
               {"id": args.task_id, "title": row["title"]})
     conn.commit()
     print(json.dumps({"ok": True, "deleted": args.task_id}))
+    conn.close()
+
+
+def cmd_task_heartbeat(args):
+    """Liveness ping: refreshes heartbeat_at (+progress) without touching status."""
+    conn = get_conn(args.db)
+    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (args.task_id,)).fetchone()
+    if not row:
+        fail(f"Task not found: {args.task_id}")
+    ts = now_iso()
+    sets = ["heartbeat_at = ?", "updated_at = ?"]
+    params = [ts, ts]
+    changes = {"heartbeat_at": ts}
+    if getattr(args, "progress", None) is not None:
+        sets.append("progress = ?")
+        params.append(args.progress)
+        changes["progress"] = args.progress
+    params.append(args.task_id)
+    conn.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", params)
+    log_event(conn, args.task_id, args.actor, "task.heartbeat", changes)
+    conn.commit()
+    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (args.task_id,)).fetchone()
+    print(json.dumps(row_to_task(row), indent=2))
+    conn.close()
+
+
+def cmd_task_watch(args):
+    """Stall watchdog: oneshot+running with stale heartbeat -> blocked(stalled).
+
+    Services (kind=service, e.g. npm run dev) are exempt — running IS success.
+    Prints JSON {checked, stalled[]} and logs task.stalled events.
+    """
+    import datetime as _dt
+    conn = get_conn(args.db)
+    rows = conn.execute(
+        "SELECT * FROM tasks WHERE status = 'running' AND (kind IS NULL OR kind = 'oneshot')"
+    ).fetchall()
+    now = _dt.datetime.now(_dt.timezone.utc)
+    stalled = []
+    for r in rows:
+        keys = r.keys()
+        hb = r["heartbeat_at"] if "heartbeat_at" in keys and r["heartbeat_at"] else (r["updated_at"] or r["created_at"])
+        try:
+            last = _dt.datetime.fromisoformat(str(hb).replace("Z", "+00:00"))
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=_dt.timezone.utc)
+            age = (now - last).total_seconds()
+        except Exception:
+            age = float("inf")
+        limit = r["expected_sec"] if "expected_sec" in keys and r["expected_sec"] else None
+        try:
+            limit = int(limit) if limit is not None else args.default_timeout
+        except (TypeError, ValueError):
+            limit = args.default_timeout
+        if age > limit:
+            msg = f"stalled: no heartbeat for {int(age)}s (limit {limit}s)"
+            ts = now_iso()
+            conn.execute(
+                "UPDATE tasks SET status = 'blocked', startup_phase = 'error', startup_error = ?, updated_at = ? WHERE id = ?",
+                (msg, ts, r["id"]),
+            )
+            log_event(conn, r["id"], args.actor, "task.stalled",
+                      {"ageSec": int(age), "limitSec": limit, "lastHeartbeat": hb})
+            keys2 = r.keys()
+            stalled.append({"id": r["id"], "title": r["title"], "ageSec": int(age), "limitSec": limit,
+                            "sessionId": r["session_id"] if "session_id" in keys2 else None})
+    conn.commit()
+    print(json.dumps({"checked": len(rows), "stalled": stalled}, indent=2))
     conn.close()
 
 
@@ -664,6 +771,9 @@ def main(argv=None):
     tc.add_argument("--model-provider", default=None)
     tc.add_argument("--startup-phase", default=None)
     tc.add_argument("--startup-error", default=None)
+    tc.add_argument("--kind", default=None, choices=("oneshot", "service"), help="Task kind: oneshot (must reach done, default) or service (npm run dev — running IS success)")
+    tc.add_argument("--expected-sec", type=int, default=None, help="Stall timeout in seconds for oneshot (default 600). Ignored for service.")
+    tc.add_argument("--progress", default=None, help="Free-text progress, e.g. 'step 3/10' or 'vite :5173 pid 1234'")
     tc.add_argument("--actor", default="cli")
     tc.set_defaults(func=cmd_task_create)
 
@@ -691,6 +801,9 @@ def main(argv=None):
     tu.add_argument("--model-provider", default=None)
     tu.add_argument("--startup-phase", default=None)
     tu.add_argument("--startup-error", default=None)
+    tu.add_argument("--kind", default=None, choices=("oneshot", "service"))
+    tu.add_argument("--expected-sec", type=int, default=None)
+    tu.add_argument("--progress", default=None)
     tu.add_argument("--actor", default="cli")
     tu.set_defaults(func=cmd_task_update)
 
@@ -705,6 +818,17 @@ def main(argv=None):
     td.add_argument("task_id")
     td.add_argument("--actor", default="cli")
     td.set_defaults(func=cmd_task_delete)
+
+    th = tsub.add_parser("heartbeat", help="Liveness ping: refresh heartbeat_at (+progress).")
+    th.add_argument("task_id")
+    th.add_argument("--progress", default=None)
+    th.add_argument("--actor", default="agent")
+    th.set_defaults(func=cmd_task_heartbeat)
+
+    tw = tsub.add_parser("watch", help="Stall watchdog: oneshot+running with stale heartbeat -> blocked.")
+    tw.add_argument("--default-timeout", type=int, default=600, help="Default stall limit in seconds when task has no --expected-sec.")
+    tw.add_argument("--actor", default="watchdog")
+    tw.set_defaults(func=cmd_task_watch)
 
     ep = sub.add_parser("events", help="Event log.")
     esub = ep.add_subparsers(dest="ecmd", required=True)

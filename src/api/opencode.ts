@@ -1,15 +1,15 @@
 import { OpenCodeAgentInfo, OpenCodeModelInfo, OpenCodeSessionInfo } from '../types';
-import { getServerConfig, getAuthHeader } from '../store/serverConfig';
 
+// Browser never holds the OpenCode password. All OpenCode traffic goes
+// through Vite's /api/kanban/oc/* proxy, which injects Basic auth server-side
+// from .kanban-data/opencode.json (or env). So baseUrl is fixed and headers
+// carry no secret.
 function baseUrl(): string {
-  const { url } = getServerConfig();
-  // Normalize: strip trailing slash, ensure /api suffix for v2
-  const clean = url.replace(/\/+$/, '');
-  return clean.endsWith('/api') ? clean : `${clean}/api`;
+  return '/api/kanban/oc';
 }
 
 function headers(extra: Record<string, string> = {}): Record<string, string> {
-  return { ...getAuthHeader(), ...extra };
+  return { ...extra };
 }
 
 function unwrapData<T>(json: unknown): T {
@@ -299,19 +299,32 @@ export async function getServerInfo(): Promise<any> {
   }
 }
 
-/** Test the connection with a given url/password. Returns agent count or -1 on failure. */
+/** Test the connection via the server-side proxy (password never stored in browser). */
 export async function testConnection(url: string, password: string): Promise<{ ok: boolean; agentCount: number; status?: number }> {
   try {
-    const clean = url.replace(/\/+$/, '');
-    const base = clean.endsWith('/api') ? clean : `${clean}/api`;
-    const h: Record<string, string> = {};
-    if (password) h.Authorization = `Basic ${btoa(`opencode:${password}`)}`;
-    const response = await fetch(`${base}/agent`, { headers: h });
-    if (!response.ok) return { ok: false, agentCount: 0, status: response.status };
-    const json = await response.json();
-    const list = Array.isArray(json) ? json : json.data;
-    return { ok: true, agentCount: Array.isArray(list) ? list.length : 0 };
+    const res = await fetch('/api/kanban/server/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, password }),
+    });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      return { ok: false, agentCount: 0, status: j?.status ?? res.status };
+    }
+    const j = await res.json();
+    return { ok: true, agentCount: j.agentCount ?? 0 };
   } catch {
     return { ok: false, agentCount: 0 };
+  }
+}
+
+/** Does the server have OpenCode creds stored? (password never leaves the server) */
+export async function getServerCredsState(): Promise<{ url: string; hasPassword: boolean }> {
+  try {
+    const res = await fetch('/api/kanban/server');
+    if (!res.ok) return { url: '', hasPassword: false };
+    return await res.json();
+  } catch {
+    return { url: '', hasPassword: false };
   }
 }

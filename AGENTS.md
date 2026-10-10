@@ -1,16 +1,10 @@
 # Project Instructions
 
-## Tool Transparency (write/edit)
-After every `write` or `edit` tool call, always show in chat by default:
+## Change Summary (ASD-STE100)
+After every `write` or `edit` tool call, show in chat by default:
 - file path
-- lines changed / created
-- changes as `diff` code block — same style as OpenCode:
-  ```diff
-  + added line (green)
-  - removed line (red)
-  ```
-
-For `edit`: show unified diff (removed red `-`, added green `+`).
-For `write` (new file): show full content as `diff` with `+` prefix on each line.
-
-Never rely on the tool's `Wrote file successfully` message alone — it hides content.
+- one sentence per change, Simplified Technical English (ASD-STE100):
+  - Use approved, simple verbs: add, remove, update, move, rename, fix, replace.
+  - One instruction per sentence. Maximum 20 words per sentence.
+  - No `diff` blocks. No `+`/`-` line dumps. No code quotes unless the user asks.
+  - Example: "Add message_to endpoint to vite.config.js."

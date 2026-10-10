@@ -200,6 +200,29 @@ export async function getTasksByStatus(projectId: string, status: TaskStatus): P
   return (await getTasks(projectId)).filter((t) => t.status === status);
 }
 
+// ---- message_to: follow-up in the SAME session (no new task) ----
+export interface MessageToResult {
+  sessionId: string;
+  taskId: string | null;
+  resultText: string;
+  resultTruncated: boolean;
+  messageId?: string | null;
+  waited?: boolean;
+}
+
+export async function messageToSession(opts: {
+  sessionId?: string;
+  taskId?: string;
+  text: string;
+  timeoutSec?: number;
+  pollMs?: number;
+}): Promise<MessageToResult> {
+  return api<MessageToResult>('/api/kanban/message_to', {
+    method: 'POST',
+    body: JSON.stringify(opts),
+  });
+}
+
 // ---- active project pointer (still local; per-browser UI state) ----
 export function getActiveProjectId(): string | null {
   try {

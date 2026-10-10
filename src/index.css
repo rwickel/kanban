@@ -91,7 +91,7 @@ html, body {
   border: 1px solid var(--border); background: var(--surface-2); color: var(--text-2);
   font-family: var(--font-mono); white-space: nowrap;
 }
-.pill-id { font-family: var(--font-mono); color: var(--muted); background: transparent; border-color: var(--border); }
+.pill-id { font-family: var(--font-mono); color: var(--muted); background: transparent; border-color: var(--border); max-width: 100%; overflow: hidden; text-overflow: ellipsis; font-size: 10px; }
 .dot { width: 6px; height: 6px; border-radius: 9999px; display: inline-block; }
 .p-red { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, transparent); background: color-mix(in srgb, var(--danger) 8%, transparent); }
 .p-amber { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 35%, transparent); background: color-mix(in srgb, var(--amber) 10%, transparent); }

@@ -33,6 +33,7 @@ const FALLBACK_ROUTES: DocRoute[] = [
   { method: 'POST', path: '/api/kanban/clone', body: 'url*, folder*, branch?', returns: '{ok:true,folder,path}' },
   { method: 'GET', path: '/api/kanban/events', query: 'task?, limit=50', returns: 'Event[]' },
   { method: 'POST', path: '/api/kanban/delegate', body: 'projectId*, title*, description?, priority?, agentId?, agentName?, modelId?, modelProviderID?, timeoutSec?, pollMs?, wait?', returns: '{task, sessionId, waited} — sync: create + run + WAIT' },
+  { method: 'POST', path: '/api/kanban/message_to', body: 'sessionId?|taskId?*, text*, timeoutSec?=120, pollMs?=1500 — follow-up in SAME session (no new task)', returns: '{sessionId, taskId, resultText, resultTruncated, waited}' },
   { method: 'GET', path: '/api/kanban/docs', returns: 'route catalogue' },
   { method: 'GET', path: '/api/kanban/openapi.json', returns: 'OpenAPI 3.0 spec' },
 ];
@@ -239,7 +240,7 @@ export default function ApiExplorer({ projectId }: { projectId: string | null })
     { title: 'Tasks', match: (r) => r.path.startsWith('/api/kanban/tasks') },
     { title: 'Projects', match: (r) => r.path.startsWith('/api/kanban/projects') },
     { title: 'Folders / Clone', match: (r) => r.path.includes('/folders') || r.path.includes('/roots') || r.path.includes('/clone') },
-    { title: 'Delegate (sync)', match: (r) => r.path.includes('/delegate') },
+    { title: 'Delegate (sync)', match: (r) => r.path.includes('/delegate') || r.path.includes('/message_to') },
   { title: 'Events & Docs', match: (r) => r.path.includes('/events') || r.path.includes('/docs') || r.path.includes('/openapi') },
   ];
 

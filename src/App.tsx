@@ -33,7 +33,7 @@ import {
   migrateLocalStorageToServer,
 } from './store/kanban';
 import { fetchAgents, createSession, sendPrompt, getServerInfo } from './api/opencode';
-import { getServerConfig, getTaskModelPref } from './store/serverConfig';
+import { getTaskModelPref } from './store/serverConfig';
 import KanbanColumn, { columnIcons } from './components/KanbanColumn';
 import TaskModal from './components/TaskModal';
 import SessionChatWindow from './components/SessionChatWindow';
@@ -162,12 +162,19 @@ export default function App() {
           { id: 'debugger', name: 'Debugger', description: 'Debugging agent', color: '#ef4444' },
         ]);
         setIsConnected(false);
-        // No agents + no saved password → prompt to configure the server
-        if (!getServerConfig().password) setShowServerModal(true);
+        // No real agents → is the server still disconnected? Only prompt
+        // when /api/kanban/server has no password stored (server-side).
+        try {
+          const r = await fetch('/api/kanban/server');
+          const j = await r.json().catch(() => ({}));
+          if (!j?.hasPassword) setShowServerModal(true);
+        } catch {
+          setShowServerModal(true);
+        }
       }
     } catch {
       setAgents([
-        { id: 'coder', name: 'Coder', description: 'General coding agent', color: '#8b5cf6' },
+        { id: 'coder', name: 'Coder', description: 'Coding agent', color: '#8b5cf6' },
         { id: 'reviewer', name: 'Reviewer', description: 'Code review agent', color: '#3b82f6' },
         { id: 'tester', name: 'Tester', description: 'Testing agent', color: '#10b981' },
         { id: 'architect', name: 'Architect', description: 'Architecture agent', color: '#f59e0b' },
@@ -224,18 +231,22 @@ export default function App() {
     optimisticRef.current[id] = { status: newStatus, at: Date.now() };
     setTasks((prev) => {
       let found: Task | null = null;
-      const next = { ...prev };
+      const next = { ...prev } as Record<TaskStatus, Task[]>;
       for (const key of Object.keys(next) as TaskStatus[]) {
         const idx = next[key].findIndex((t) => t.id === id);
         if (idx !== -1) {
-          const [t] = next[key].splice(idx, 1);
+          const arr = [...next[key]];
+          const [t] = arr.splice(idx, 1);
           found = { ...t, status: newStatus };
-          next[key] = [...next[key]];
+          next[key] = arr;
         }
       }
       if (!found) return prev;
       return { ...next, [newStatus]: [...next[newStatus], found] };
     });
+  };
+  const clearOptimisticStamp = (id: string) => {
+    delete optimisticRef.current[id];
   };
   const upsertTaskInState = (task: Task) => {
     // Same stamp as moveTaskInState — see comment there.
@@ -317,6 +328,7 @@ export default function App() {
       ` with body { "status": "done" } when complete, or { "status": "blocked" } if stuck.\n` +
       `To break off follow-up work, POST to http://localhost:3001/api/kanban/tasks with { "projectId": "${task.projectId}", "title": "...", "description": "...", "priority": "medium" }.\n` +
       `To delegate to a teammate and WAIT for the result (sync, like read/write): POST to http://localhost:3001/api/kanban/delegate with { "projectId": "${task.projectId}", "title": "...", "description": "...", "agentId": "<teammate-id from the team list above>" } — it creates the subtask, runs it immediately, and returns the finished Task (give the client a generous timeout).\n` +
+      `To ask a follow-up in the SAME subtask session (no new task): POST to http://localhost:3001/api/kanban/message_to with { "sessionId": "<sessionId from a delegate return>", "text": "your question" } — or { "taskId": "<subtask-id>", "text": "..." }. It waits for the next assistant message and returns { sessionId, resultText } — only the last message is relevant.\n` +
       `To list/search work, GET http://localhost:3001/api/kanban/tasks?projectId=${task.projectId}.\n` +
       `Do the status update as the last step — after all code changes are complete. The board refreshes from the store automatically.`;
     return `${headerLines}\n\nTask: ${title}\n\nDescription: ${desc}${footer}`;
