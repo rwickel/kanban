@@ -225,7 +225,7 @@ async function delegateTask(opts) {
   const {
     projectId, title, description = "", priority = "medium",
     agentId, agentName, modelId, modelProviderID,
-    serverUrl, serverPassword, timeoutSec = 600, pollMs = 3000, wait = true,
+    serverUrl, serverPassword, timeoutSec = 600, pollMs = 3000, wait = false,
   } = opts || {};
   if (!projectId || !title) {
     throw { status: 400, message: "projectId and title required" };
@@ -280,7 +280,7 @@ async function delegateTask(opts) {
       `You are ${agentName || agentId || "a teammate"} executing a delegated subtask. Complete it end-to-end in ${project.path || project.name}.\n` +
       `Task id: ${tid}\nProject id: ${projectId}\nTask: ${title}\nDescription: ${description || "(none)"}\n\n` +
       `When finished, PATCH http://localhost:3001/api/kanban/tasks/${tid} with {"status":"done"} (or {"status":"blocked"} if stuck). ` +
-      `That status flip is your return value — the delegating agent is blocked waiting for it.`;
+      `Fire-and-forget: the delegator already returned and will poll your status. Call the heartbeat endpoint on your task id every couple of minutes with progress so the watchdog sees you alive.`;
     const pRes = await fetch(`${apiBase}/session/${session.id}/prompt`, {
       method: "POST", headers: H, body: JSON.stringify({ text: prompt }),
     });
@@ -289,7 +289,7 @@ async function delegateTask(opts) {
       throw new Error(`send prompt failed (HTTP ${pRes.status}) — ${t.slice(0, 300)}`);
     }
 
-    if (wait === false || wait === "false") {
+    if (!(wait === true || wait === "true")) {
       return { task: await cli(["task", "show", tid]), sessionId: session.id, waited: false };
     }
 
@@ -444,7 +444,7 @@ function kanbanDocs() {
       { method: "POST", path: "/api/kanban/clone", body: "url*, folder*, branch?", returns: "{ok:true,folder,path}" },
       { method: "GET", path: "/api/kanban/events", query: "task?, limit=50", returns: "Event[]" },
       { method: "GET|PUT", path: "/api/kanban/server", body: "PUT: url?, password? — stores OpenCode creds once so delegate needs no per-call password", returns: "{url, hasPassword}" },
-      { method: "POST", path: "/api/kanban/delegate", body: "projectId*, title*, description?, priority?, agentId?, agentName?, modelId?, modelProviderID?, serverUrl?, serverPassword?, timeoutSec?=600, pollMs?=3000, wait?=true — creates a subtask for a teammate, runs it NOW, WAITS until done/blocked and returns the finished Task (like read/write). Long-poll; send timeoutSec generously.", returns: "{task, sessionId, waited}" },
+      { method: "POST", path: "/api/kanban/delegate", body: "projectId*, title*, description?, priority?, agentId?, agentName?, modelId?, modelProviderID?, serverUrl?, serverPassword?, timeoutSec?=600, pollMs?=3000, wait?=false — creates a subtask for a teammate and starts it NOW. Fire-and-forget by default (returns {task, sessionId, waited:false} immediately). Pass wait:true to block until done/blocked.", returns: "{task, sessionId, waited}" },
       { method: "POST", path: "/api/kanban/message_to", body: "sessionId?|taskId?*, text*, timeoutSec?=120, pollMs?=1500 — follow-up in SAME subtask session (no new task). Waits for the next assistant message and returns {sessionId, taskId, resultText, resultTruncated}. Use after delegate.", returns: "{sessionId, taskId, resultText, resultTruncated, messageId, waited}" },
       { method: "GET", path: "/api/kanban/docs", returns: "try-it-out HTML page (?format=json → catalogue)" },
       { method: "GET", path: "/api/kanban/openapi.json", returns: "OpenAPI 3.0 spec" },
@@ -620,8 +620,8 @@ function kanbanOpenApi() {
       },
       "/api/kanban/delegate": {
         post: {
-          summary: "Delegate to a teammate NOW and wait for the result (sync, like read/write)",
-          requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["projectId", "title"], properties: { projectId: { type: "string" }, title: { type: "string" }, description: { type: "string" }, priority: { type: "string" }, agentId: { type: "string" }, agentName: { type: "string" }, modelId: { type: "string" }, modelProviderID: { type: "string" }, serverUrl: { type: "string" }, serverPassword: { type: "string" }, timeoutSec: { type: "integer", default: 600 }, pollMs: { type: "integer", default: 3000 }, wait: { type: "boolean", default: true } } } } } },
+          summary: "Create + start a subtask for a teammate (fire-and-forget by default; wait:true blocks until done)",
+          requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["projectId", "title"], properties: { projectId: { type: "string" }, title: { type: "string" }, description: { type: "string" }, priority: { type: "string" }, agentId: { type: "string" }, agentName: { type: "string" }, modelId: { type: "string" }, modelProviderID: { type: "string" }, serverUrl: { type: "string" }, serverPassword: { type: "string" }, timeoutSec: { type: "integer", default: 600 }, pollMs: { type: "integer", default: 3000 }, wait: { type: "boolean", default: false } } } } } },
           responses: { 200: { description: "{task, sessionId, waited}", content: { "application/json": { schema: { type: "object" } } } } },
         },
       },

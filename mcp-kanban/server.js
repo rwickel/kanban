@@ -162,9 +162,9 @@ function ocHeaders(pw) {
 server.registerTool(
   "kanban_delegate",
   {
-    title: "Delegate task to a teammate (sync)",
+    title: "Delegate task to a teammate",
     description:
-      "Create a task for another agent on the team, execute it immediately, and WAIT until it finishes — returns the finished Task like a normal read/write tool call. Uses the project's agent team and shared kanban store; the subtask flips to done/blocked when the teammate is done. Prefer this over fire-and-forget create when you need the result.",
+      "Create a task for another agent on the team and start it immediately. Fire-and-forget by default — returns { task, sessionId, waited:false } right away so the caller can fan out. Pass wait:true to block until done/blocked (like a sync read). Uses the project's agent team and shared kanban store; the subtask flips to done/blocked when the teammate is done.",
     inputSchema: {
       projectId: z.string().describe("Project uuid the subtask belongs to"),
       title: z.string().describe("Subtask title"),
@@ -174,9 +174,9 @@ server.registerTool(
       agentName: z.string().optional(),
       modelId: z.string().optional(),
       modelProviderID: z.string().optional(),
-      timeoutSec: z.number().optional().describe("Max seconds to wait for done/blocked (default 600, cap 1800)"),
-      pollMs: z.number().optional().describe("Poll interval in ms (default 3000)"),
-      wait: z.boolean().optional().describe("When false, fire-and-forget: return after creating/starting, don't wait"),
+      timeoutSec: z.number().optional().describe("Max seconds to wait for done/blocked when wait:true (default 600, cap 1800)"),
+      pollMs: z.number().optional().describe("Poll interval in ms when wait:true (default 3000)"),
+      wait: z.boolean().optional().describe("When true, WAIT until done/blocked before returning. Default false (fire-and-forget)."),
     },
   },
   async (args) => {
@@ -186,7 +186,7 @@ server.registerTool(
     const priority = args.priority || "medium";
     const timeout = Math.min(Math.max(Number(args.timeoutSec) || 600, 30), 1800);
     const interval = Math.min(Math.max(Number(args.pollMs) || 3000, 1000), 15000);
-    const shouldWait = args.wait !== false;
+    const shouldWait = args.wait === true;
 
     const created = runCli(["task", "create", "--project", projectId, "--title", title, "--actor", "delegate",
       "--description", description, "--priority", priority,
@@ -237,7 +237,7 @@ server.registerTool(
       const prompt =
         `You are ${args.agentName || args.agentId || "a teammate"} executing a delegated subtask. Complete it end-to-end in ${projectPath || "the project"}.\n` +
         `Task id: ${tid}\nProject id: ${projectId}\nTask: ${title}\nDescription: ${description || "(none)"}\n\n` +
-        `When finished, call kanban_update_status with { taskId: "${tid}", status: "done" } (or "blocked" if stuck). That flip is your return value — the delegating agent is waiting for it.`;
+        `When finished, call kanban_update_status with { taskId: "${tid}", status: "done" } (or "blocked" if stuck). Fire-and-forget: the delegator already returned and will poll your status. Call kanban_task_heartbeat on your task id every couple of minutes with --progress so the watchdog sees you alive.`;
       const pRes = await fetch(`${apiBase}/session/${session.id}/prompt`, { method: "POST", headers: H, body: JSON.stringify({ text: prompt }) });
       if (!pRes.ok) throw new Error(`send prompt failed (HTTP ${pRes.status}) — ${(await pRes.text().catch(() => "")).slice(0, 300)}`);
 
