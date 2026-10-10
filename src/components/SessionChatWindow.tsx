@@ -3,11 +3,11 @@
 import { useEffect, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import {
-  X, Send, Loader2, ExternalLink, Copy, Check, Download,
+  X, Send, Loader2, ExternalLink, Copy, Check, Download, Square,
   Bot, User, ChevronDown, Wrench, AlertTriangle,
 } from 'lucide-react';
 import { Task } from '../types';
-import { sendPrompt } from '../api/opencode';
+import { sendPrompt, interruptSession } from '../api/opencode';
 import { useSessionStream, type ChatStatus } from '../hooks/useSessionStream';
 import type { ChatMessage } from './chatEvents';
 import { chatToMarkdown } from './chatEvents';
@@ -224,6 +224,7 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [stopping, setStopping] = useState(false);
   const [copied, setCopied] = useState(false);
   const [exported, setExported] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -267,6 +268,22 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
 
   if (!task) return null;
   const st = STATUS_DOT[status];
+
+  // A session is "busy" while the SSE/poll feed says live or the last
+  // assistant row still carries a non-completed tool (shell stuck, etc.).
+  const busy = status === 'live' || status === 'connecting' || messages.some(
+    (m) => m.kind === 'tool' && m.tool && !['executed', 'completed', 'error'].includes((m.tool.status || '').toLowerCase())
+  );
+
+  const handleStop = async () => {
+    if (!sessionId || stopping) return;
+    setStopping(true);
+    setSendError(null);
+    const ok = await interruptSession(sessionId);
+    setStopping(false);
+    if (ok) retry();
+    else setSendError('Stop failed — session may already be idle.');
+  };
 
   const handleSend = async (e?: React.FormEvent) => {
     e?.preventDefault();
@@ -373,13 +390,19 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
       </div>
 
       {sendError && <div className="px-3.5 pt-2 text-[11px]" style={{ color: 'var(--danger)' }}>{sendError}</div>}
-      <form onSubmit={handleSend} className="p-3 border-t hairline" style={{ borderTopWidth: 1, borderTopStyle: 'solid', background: 'var(--surface)' }}>
+      <form onSubmit={busy ? (e) => { e.preventDefault(); handleStop(); } : handleSend} className="p-3 border-t hairline" style={{ borderTopWidth: 1, borderTopStyle: 'solid', background: 'var(--surface)' }}>
         <div className="flex gap-1.5 items-end">
           <input type="text" value={input} onChange={(e) => setInput(e.target.value)}
-            placeholder="Reply to agent…  (↵ send)" className="input" />
-          <button type="submit" disabled={!input.trim() || sending} className="btn btn-primary p-2 shrink-0" title="Send">
-            {sending ? <Loader2 className="w-4 h-4 animate-spin" strokeWidth={1.75} /> : <Send className="w-4 h-4" strokeWidth={1.75} />}
-          </button>
+            placeholder={busy ? 'Session running — Stop to interrupt…' : 'Reply to agent…  (↵ send)'} className="input" disabled={busy} />
+          {busy ? (
+            <button type="submit" disabled={stopping || !sessionId} className="btn p-2 shrink-0" title="Stop running session" style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }}>
+              {stopping ? <Loader2 className="w-4 h-4 animate-spin" strokeWidth={1.75} /> : <Square className="w-4 h-4" strokeWidth={1.75} />}
+            </button>
+          ) : (
+            <button type="submit" disabled={!input.trim() || sending} className="btn btn-primary p-2 shrink-0" title="Send">
+              {sending ? <Loader2 className="w-4 h-4 animate-spin" strokeWidth={1.75} /> : <Send className="w-4 h-4" strokeWidth={1.75} />}
+            </button>
+          )}
         </div>
       </form>
     </>

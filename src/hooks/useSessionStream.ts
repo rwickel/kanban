@@ -62,7 +62,15 @@ export function useSessionStream(sessionId: string | null) {
         if (stopped) return;
         if (list) {
           merge(list);
-          setStatus((s) => (s === 'connecting' ? 'live' : s));
+          // Idle detection: last raw message type "idle" (or outcome
+          // interrupted/completed) means the agent parked — show closed,
+          // not live, so the Stop button swaps back to Send.
+          const arr = Array.isArray(list) ? list : [];
+          const last = arr.length > 0 ? (arr[arr.length - 1] as Record<string, unknown>) : null;
+          const ltype = typeof last?.type === 'string' ? (last.type as string).toLowerCase() : '';
+          const outcome = typeof last?.outcome === 'string' ? (last.outcome as string).toLowerCase() : '';
+          const idleLike = ltype === 'idle' || ['interrupted', 'completed', 'aborted', 'done'].includes(outcome);
+          setStatus(idleLike ? 'closed' : 'live');
         }
       } catch {
         if (!stopped) setStatus('error');
@@ -85,7 +93,12 @@ export function useSessionStream(sessionId: string | null) {
             fetchSessionMessages(sessionId).then((list) => {
               if (list && !stopped) {
                 merge(list);
-                setStatus((s) => (s === 'connecting' ? 'live' : s));
+                const arr = Array.isArray(list) ? list : [];
+                const last = arr.length > 0 ? (arr[arr.length - 1] as Record<string, unknown>) : null;
+                const ltype = typeof last?.type === 'string' ? (last.type as string).toLowerCase() : '';
+                const outcome = typeof last?.outcome === 'string' ? (last.outcome as string).toLowerCase() : '';
+                const idleLike = ltype === 'idle' || ['interrupted', 'completed', 'aborted', 'done'].includes(outcome);
+                setStatus(idleLike ? 'closed' : 'live');
               }
             }).catch(() => {});
           }
