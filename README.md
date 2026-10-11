@@ -76,6 +76,11 @@ kanban_create_task {projectId, ...} . task create ....... split / follow-up work
 kanban_update_task {taskId, ...} .... task update ....... patch title/desc/priority
 kanban_list_tasks {projectId?, ...} . task list ......... search before creating
 kanban_task_status {taskId?} ........ task show|events .. inspect
+kanban_create_board {name, ...} ..... project create .... new board
+kanban_list_boards {} ............... project list ...... all boards
+kanban_get_board {projectId} ........ project list ...... one board
+kanban_update_board {projectId, ...}  project update .... patch board
+kanban_delete_board {projectId} ..... project delete .... remove board
 ```
 
 ### 4. Browser reads (vite.config.js + store/kanban.ts)

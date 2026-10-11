@@ -12,13 +12,23 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, "..");
 const CLI = join(REPO, "server", "kanban.py");
+
+// Customizable agent style: prompts/final-message-style.md is injected into
+// every delegate prompt. Edit the file, restart the MCP server.
+function loadStyleGuide() {
+  try {
+    const p = join(REPO, "prompts", "final-message-style.md");
+    if (!existsSync(p)) return "";
+    return readFileSync(p, "utf8").trim();
+  } catch { return ""; }
+}
 
 const DB =
   process.env.KANBAN_DB ||
@@ -281,10 +291,13 @@ server.registerTool(
         ...(resolvedAgentName ? ["--agent-name", resolvedAgentName] : []),
         "--startup-phase", "ready"]);
       void upd;
+      const styleGuide = loadStyleGuide();
       const prompt =
         `You are ${resolvedAgentName || resolvedAgentId || "a teammate"} executing a delegated subtask. Complete it end-to-end in ${projectPath || "the project"}.\n` +
         `Task id: ${tid}\nProject id: ${projectId}\nTask: ${title}\nDescription: ${description || "(none)"}\nSession id: ${session.id} (pass as parentSessionId when you create/delegate follow-up tasks).\n\n` +
-        `When finished, just write your final answer as the last assistant message — the board captures it as the task result automatically and follows the session outcome (completed→done, failed→blocked). Do NOT call kanban_update_status or PATCH the task status yourself. Never write your answer into the description. Fire-and-forget: the delegator already returned. Call kanban_task_heartbeat on your task id every couple of minutes with --progress so the watchdog sees you alive.`;
+        `When finished, just write your final answer as the last assistant message — the board captures it as the task result automatically and follows the session outcome (completed→done, failed→blocked). Do NOT call kanban_update_status or PATCH the task status yourself. Never write your answer into the description.` +
+        (styleGuide ? `\n${styleGuide}\n` : "") +
+        ` Fire-and-forget: the delegator already returned. Call kanban_task_heartbeat on your task id every couple of minutes with --progress so the watchdog sees you alive.`;
       const pRes = await fetch(`${apiBase}/session/${session.id}/prompt`, { method: "POST", headers: H, body: JSON.stringify({ text: prompt }) });
       if (!pRes.ok) throw new Error(`send prompt failed (HTTP ${pRes.status}) — ${(await pRes.text().catch(() => "")).slice(0, 300)}`);
 
@@ -481,6 +494,135 @@ server.registerTool(
     } catch (e) {
       return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: String(e?.message || e), sessionId, taskId }, null, 2) }], isError: true };
     }
+  }
+);
+
+server.registerTool(
+  "kanban_create_board",
+  {
+    title: "Create kanban board",
+    description:
+      "Create a new kanban board (project). Returns the created board JSON including its uuid. Pass folder (name inside KANBAN_PROJECTS_ROOT) or path (must be inside KANBAN_PROJECTS_ROOT).",
+    inputSchema: {
+      name: z.string().describe("Board name"),
+      folder: z.string().optional().describe("Folder name inside KANBAN_PROJECTS_ROOT"),
+      path: z.string().optional().describe("Full project path (must be inside KANBAN_PROJECTS_ROOT)"),
+      description: z.string().optional().describe("Board description"),
+      gitUrl: z.string().optional().describe("Git remote URL"),
+      gitBranch: z.string().optional().describe("Pinned git branch (default main)"),
+      agentIds: z.array(z.string()).optional().describe("Teammate agent ids for this board"),
+      id: z.string().optional().describe("Explicit board uuid (default random)"),
+    },
+  },
+  async ({ name, folder, path, description, gitUrl, gitBranch, agentIds, id }) => {
+    if (!name?.trim()) {
+      return { content: [{ type: "text", text: "name required" }], isError: true };
+    }
+    const argv = ["project", "create", "--name", name, "--actor", "agent"];
+    if (folder) argv.push("--folder", folder);
+    if (path) argv.push("--path", path);
+    if (description) argv.push("--description", description);
+    if (gitUrl) argv.push("--git-url", gitUrl);
+    if (gitBranch) argv.push("--git-branch", gitBranch);
+    if (id) argv.push("--id", id);
+    for (const a of agentIds ?? []) {
+      if (a) argv.push("--agent-id", a);
+    }
+    return toolResult(runCli(argv));
+  }
+);
+
+server.registerTool(
+  "kanban_list_boards",
+  {
+    title: "List kanban boards",
+    description: "List all kanban boards (projects) from the shared store.",
+    inputSchema: {},
+  },
+  async () => {
+    return toolResult(runCli(["project", "list", "--json"]));
+  }
+);
+
+server.registerTool(
+  "kanban_get_board",
+  {
+    title: "Show kanban board",
+    description: "Show one kanban board by id with its task counts.",
+    inputSchema: {
+      projectId: z.string().describe("Board uuid (project id)"),
+    },
+  },
+  async ({ projectId }) => {
+    if (!projectId?.trim()) {
+      return { content: [{ type: "text", text: "projectId required" }], isError: true };
+    }
+    const r = runCli(["project", "list", "--json"]);
+    if (!r.ok) return toolResult(r);
+    try {
+      const list = JSON.parse(r.text);
+      const row = Array.isArray(list) ? list.find((p) => p.id === projectId) : null;
+      if (!row) return { content: [{ type: "text", text: `board not found: ${projectId}` }], isError: true };
+      return { content: [{ type: "text", text: JSON.stringify(row, null, 2) }] };
+    } catch {
+      return toolResult(r);
+    }
+  }
+);
+
+server.registerTool(
+  "kanban_update_board",
+  {
+    title: "Update kanban board",
+    description: "Patch a kanban board's name, folder/path, description, git settings, or agent team. Returns updated board JSON.",
+    inputSchema: {
+      projectId: z.string().describe("Board uuid (project id)"),
+      name: z.string().optional().describe("New board name"),
+      folder: z.string().optional().describe("New folder name inside KANBAN_PROJECTS_ROOT"),
+      path: z.string().optional().describe("New full path (must be inside KANBAN_PROJECTS_ROOT)"),
+      description: z.string().optional().describe("New description"),
+      gitUrl: z.string().optional().describe("New git remote URL"),
+      gitBranch: z.string().optional().describe("New pinned git branch"),
+      agentIds: z.array(z.string()).optional().describe("Replace agent team list"),
+    },
+  },
+  async ({ projectId, name, folder, path, description, gitUrl, gitBranch, agentIds }) => {
+    if (!projectId?.trim()) {
+      return { content: [{ type: "text", text: "projectId required" }], isError: true };
+    }
+    const argv = ["project", "update", projectId, "--actor", "agent"];
+    if (name !== undefined) argv.push("--name", name);
+    if (folder !== undefined) argv.push("--folder", folder);
+    if (path !== undefined) argv.push("--path", path);
+    if (description !== undefined) argv.push("--description", description);
+    if (gitUrl !== undefined) argv.push("--git-url", gitUrl);
+    if (gitBranch !== undefined) argv.push("--git-branch", gitBranch);
+    if (agentIds !== undefined) {
+      for (const a of agentIds) {
+        if (a) argv.push("--agent-id", a);
+      }
+    }
+    if (argv.length <= 4) {
+      return { content: [{ type: "text", text: "nothing to update" }], isError: true };
+    }
+    return toolResult(runCli(argv));
+  }
+);
+
+server.registerTool(
+  "kanban_delete_board",
+  {
+    title: "Delete kanban board",
+    description: "Delete a kanban board and all its tasks. This cannot be undone.",
+    inputSchema: {
+      projectId: z.string().describe("Board uuid (project id) to delete"),
+    },
+  },
+  async ({ projectId }) => {
+    if (!projectId?.trim()) {
+      return { content: [{ type: "text", text: "projectId required" }], isError: true };
+    }
+    return toolResult(runCli(["project", "delete", projectId, "--actor", "agent"]));
   }
 );
 

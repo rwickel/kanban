@@ -4,6 +4,7 @@ import {
   Plus,
   FolderKanban,
   Users,
+  MessageSquare,
   Settings,
   Trash2,
   ChevronDown,
@@ -37,6 +38,7 @@ import { getTaskModelPref } from './store/serverConfig';
 import KanbanColumn, { columnIcons } from './components/KanbanColumn';
 import TaskModal from './components/TaskModal';
 import SessionChatWindow from './components/SessionChatWindow';
+import AssistantChatWindow from './components/AssistantChatWindow';
 import ProjectModal from './components/ProjectModal';
 import AgentTeamModal from './components/AgentTeamModal';
 import ServerConfigModal from './components/ServerConfigModal';
@@ -51,6 +53,19 @@ const COLUMNS: { status: TaskStatus; title: string }[] = [
 ];
 
 type View = 'board' | 'api';
+
+// Customizable agent style (prompts/final-message-style.md), loaded once.
+// Edit the file + refresh the page to change what agents are told.
+let styleGuideCache: string | null = null;
+async function loadStyleGuide(): Promise<string> {
+  if (styleGuideCache !== null) return styleGuideCache;
+  try {
+    const r = await fetch('/api/kanban/prompts/final-message-style.md');
+    styleGuideCache = r.ok ? (await r.text()).trim() : '';
+  } catch { styleGuideCache = ''; }
+  return styleGuideCache;
+}
+void loadStyleGuide();
 
 export default function App() {
   // State
@@ -80,6 +95,7 @@ export default function App() {
 
   // Chat window state
   const [chatTask, setChatTask] = useState<Task | null>(null);
+  const [showAssistant, setShowAssistant] = useState(false);
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -288,6 +304,7 @@ export default function App() {
   };
 
   const buildTaskPrompt = (task: Task): string => {
+    const styleSnippet = styleGuideCache?.trim() || '- Use Simplified Technical English (ASD-STE100) in your final message: approved simple verbs (add, remove, update, move, rename, fix, replace), one instruction per sentence, maximum 20 words per sentence, no jargon.';
     const title = task.title?.trim() || 'Untitled task';
     const desc = task.description?.trim() || '(no description provided)';
     const prio = task.priority ? task.priority.charAt(0).toUpperCase() + task.priority.slice(1) : 'Medium';
@@ -332,6 +349,7 @@ export default function App() {
       `- Execute autonomously end-to-end: read the project, plan if needed, make the changes, leave it in a working state.`,
       `- Ask the user only if blocked; keep the final message concise — it becomes the stored task result automatically.`,
       `- No status update needed: the board follows your session outcome by itself (end → done, failure → blocked) and captures your last message as the result.`,
+      styleSnippet,
       '',
       `## Working with other tasks (optional)`,
       '',
@@ -361,6 +379,29 @@ export default function App() {
   };
 
   const startTaskExecution = async (task: Task) => {
+    // Temp optimistic cards (temp-*) are local-only until createTask resolves
+    // with the server row. Never send them to the server — the watcher may
+    // pick them up mid-create and PATCH would 404 + flip them to error.
+    if (task.id.startsWith('temp-')) return;
+    // Infra self-healing: startup failures (session create, prompt send,
+    // branch mismatch) auto-create a fix task in backlog so the issue is
+    // tracked. Fix tasks themselves never spawn follow-ups (no recursion).
+    const isFixTask = task.title.startsWith('Fix (infra):');
+    const ensureFixTask = async (title: string, description: string) => {
+      if (isFixTask) return;
+      try {
+        const existing = await getTasks(task.projectId);
+        const dup = existing.some((t) =>
+          (t.status === 'backlog' || t.status === 'running') &&
+          t.title === title
+        );
+        if (dup) return;
+        const fix = await createTask(task.projectId, title, description, 'high', task.agentId, task.agentName);
+        upsertTaskInState(fix);
+      } catch (e) {
+        console.error('ensureFixTask failed', e);
+      }
+    };
     const fail = async (msg: string, taskId: string) => {
       await updateTask(taskId, { startupPhase: 'error', startupError: msg } as unknown as Partial<Task>).catch(() => {});
       upsertTaskInState({ ...task, startupPhase: 'error', startupError: msg, status: 'running' as const } as Task);
@@ -391,6 +432,10 @@ export default function App() {
           );
           if (!go) {
             moveTaskInState(task.id, task.status === 'running' ? 'backlog' : task.status);
+            await ensureFixTask(
+              `Fix (infra): branch mismatch in ${project.folder || project.name}`,
+              `Branch mismatch in ${project.folder || project.name}: checkout is "${bc.current}", pinned is "${bc.pinned}".\nOrigin task: ${task.title} (${task.id}).\nAlign the pinned branch in Project settings with the checkout, or switch the checkout.`
+            );
             await loadData().catch(() => {});
             return;
           }
@@ -422,6 +467,10 @@ export default function App() {
           !isConnected ? 'Server is offline (DEMO mode). Open Server settings, Save & test the connection.' : undefined,
         ].filter(Boolean).join(' ');
         await fail(msg, task.id);
+        await ensureFixTask(
+          `Fix (infra): session create failed for ${task.title}`,
+          `Session create failed for task "${task.title}" (${task.id}): ${msg}\nCheck OpenCode server, Server password, and project path.`
+        );
         await loadData().catch(() => {});
         return;
       }
@@ -441,6 +490,10 @@ export default function App() {
     const sent = await sendPrompt(sessionId, prompt, resolved.id);
     if (!sent.ok) {
       await fail(`Failed to send prompt: ${sent.error ?? 'unknown error'}`, task.id);
+      await ensureFixTask(
+        `Fix (infra): prompt send failed for ${task.title}`,
+        `Prompt send failed for task "${task.title}" (${task.id}): ${sent.error ?? 'unknown error'}\nCheck OpenCode server, session ${sessionId}, and proxy /api/kanban/oc.`
+      );
       await loadData().catch(() => {});
       return;
     }
@@ -538,6 +591,9 @@ export default function App() {
       }
     } else {
       // Optimistic: insert a temp card instantly, swap in server row after.
+      // The temp row is keyed temp-<ts> and dropped on refresh — but a stale
+      // row (e.g. create threw after the card rendered) must never reach the
+      // server: PATCH /tasks/temp-* would 404 and mark it error. Guard by id.
       const tempId = `temp-${Date.now()}`;
       const tempTask: Task = {
         id: tempId,
@@ -573,6 +629,7 @@ export default function App() {
           ...prev,
           backlog: prev.backlog.filter((t) => t.id !== tempId),
         }));
+        delete optimisticRef.current[tempId];
       } finally {
         loadData().catch(() => {});
       }
@@ -732,6 +789,9 @@ export default function App() {
       if (e.key.toLowerCase() === 'n') {
         e.preventDefault();
         handleAddTask();
+      } else if (e.key.toLowerCase() === 'c') {
+        e.preventDefault();
+        if (activeProjectId) setShowAssistant(true);
       } else if (e.key === 'Escape') {
         setShowProjectDropdown(false);
       }
@@ -924,6 +984,14 @@ export default function App() {
                     )}
                   </button>
                   <button
+                    onClick={() => setShowAssistant(true)}
+                    className="btn flex items-center gap-1.5 px-3 py-2 text-[13px]"
+                    title="Chat with board assistant — create tasks by telling it what to build"
+                  >
+                    <MessageSquare className="w-3.5 h-3.5" strokeWidth={1.75} />
+                    <span className="hidden lg:inline">Chat</span>
+                  </button>
+                  <button
                     onClick={handleAddTask}
                     className="btn btn-primary flex items-center gap-1.5 px-4 py-2 text-[14px] font-medium"
                   >
@@ -1050,6 +1118,13 @@ export default function App() {
 
       {/* Session chat — in-app side panel + deep-linkable pop-out window */}
       <SessionChatWindow task={chatTask} onClose={() => setChatTask(null)} />
+      {showAssistant && (
+        <AssistantChatWindow
+          project={activeProject}
+          availableAgents={availableAgents}
+          onClose={() => setShowAssistant(false)}
+        />
+      )}
     </div>
   );
 }

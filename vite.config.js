@@ -146,6 +146,23 @@ async function reconcileRunning() {
   }
 }
 
+// Infra self-healing: auto-create a backlog fix task when a startup/OC
+// failure happens. Exported for use by the kanban middleware (proxy 502,
+// session fetch failures, etc.) and by vite HMR (no double import needed).
+const FIX_TITLE_RE = /^Fix \(infra\)/;
+async function ensureInfraFixTask(projectId, title, description) {
+  if (FIX_TITLE_RE.test(title)) return;
+  try {
+    const tasks = await cli(["task", "list", "--project", projectId]).catch(() => []);
+    const dup = Array.isArray(tasks) && tasks.some((t) =>
+      (t.status === "backlog" || t.status === "running") && t.title === title
+    );
+    if (dup) return;
+    await cli(["task", "create", "--project", projectId, "--title", title,
+      "--description", description, "--priority", "high", "--actor", "infra-heal"]);
+  } catch { /* best-effort only */ }
+}
+
 function opencodeAuthHeaders(password) {
   if (!password) return {};
   return { Authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}` };
@@ -167,6 +184,16 @@ function loadServerCreds() {
     url: fromFile.url || process.env.OPENCODE_SERVER_URL || "http://127.0.0.1:4099",
     password: fromFile.password ?? process.env.OPENCODE_SERVER_PASSWORD ?? process.env.KANBAN_OPENCODE_PASSWORD ?? "",
   };
+}
+
+// Customizable agent style: prompts/final-message-style.md is injected into
+// every agent prompt. Edit the file, restart the dev server + MCP server.
+function loadStyleGuide() {
+  try {
+    const p = join(HERE, "prompts", "final-message-style.md");
+    if (!existsSync(p)) return "";
+    return readFileSync(p, "utf8").trim();
+  } catch { return ""; }
 }
 
 // ---- message_to helpers: follow-up in the SAME subtask session ----
@@ -358,10 +385,12 @@ async function delegateTask(opts) {
       "--startup-phase", "ready"]);
 
     // 4. Send the work prompt — board follows session outcome; last assistant message is captured as result automatically.
+    const styleGuide = loadStyleGuide();
     const prompt =
       `You are ${resolvedAgentName || resolvedAgentId || agentName || agentId || "a teammate"} executing a delegated subtask. Complete it end-to-end in ${project.path || project.name}.\n` +
       `Task id: ${tid}\nProject id: ${projectId}\nTask: ${title}\nDescription: ${description || "(none)"}\nSession id: ${session.id} (pass as parentSessionId when you create/delegate follow-up tasks).\n\n` +
       `When finished, just write your final answer as the last assistant message — the board captures it as the task result automatically and follows the session outcome (completed→done, failed→blocked). Do NOT call kanban_update_status or PATCH the task status yourself. ` +
+      (styleGuide ? `\n${styleGuide}\n` : "") +
       `Fire-and-forget: the delegator already returned. Call kanban_task_heartbeat on your task id every couple of minutes with --progress so the watchdog sees you alive.`;
     const pRes = await fetch(`${apiBase}/session/${session.id}/prompt`, {
       method: "POST", headers: H, body: JSON.stringify({ text: prompt }),
@@ -952,6 +981,26 @@ function kanbanApi() {
               else if (hasBody) init.body = JSON.stringify(b || {});
               const up = await fetch(target, init);
               const text = await up.text().catch(() => "");
+              if (!up.ok && up.status >= 500) {
+                // Infra self-healing: upstream 5xx (OpenCode down/pruned) →
+                // backlog fix task. Best-effort; projectId from referrer is not
+                // available here, so attach to the first project that owns a
+                // task with this sessionId (session path match).
+                (async () => {
+                  try {
+                    const m = ocPath.match(/\/session\/([\w-]+)/);
+                    if (!m) return;
+                    const sid = m[1];
+                    const tasks = await cli(["task", "list"]).catch(() => []);
+                    const owner = Array.isArray(tasks) && tasks.find((t) =>
+                      (t.sessionId || t.session_id) === sid && !/^Fix \(infra\)/.test(t.title || ""));
+                    if (!owner) return;
+                    await ensureInfraFixTask(owner.projectId || owner.project_id,
+                      `Fix (infra): OpenCode ${up.status} on session ${sid}`,
+                      `Upstream ${req.method} ${ocPath} returned HTTP ${up.status}: ${(text || "").slice(0, 300)}\nOrigin task: ${owner.title} (${owner.id}). Check OpenCode server on :4099 and password in Server settings.`);
+                  } catch { /* best-effort */ }
+                })();
+              }
               res.statusCode = up.status;
               const ct = up.headers.get("content-type");
               res.setHeader("Content-Type", ct || "application/json");
@@ -1077,6 +1126,17 @@ function kanbanApi() {
           // GET /api/kanban/openapi.json → OpenAPI 3.0 spec for the local store
           if (req.method === "GET" && parts[0] === "openapi.json" && parts.length === 1) {
             return json(res, 200, kanbanOpenApi());
+          }
+          // GET /api/kanban/prompts/final-message-style → editable style guide (markdown).
+          if (req.method === "GET" && parts[0] === "prompts" && parts.length === 2) {
+            try {
+              const text = await fsp.readFile(join(HERE, "prompts", parts[1]), "utf8");
+              res.statusCode = 200;
+              res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+              return res.end(text);
+            } catch {
+              return json(res, 404, { ok: false, error: "prompt not found" });
+            }
           }
           return json(res, 404, { ok: false, error: "unknown kanban route" });
         } catch (err) {

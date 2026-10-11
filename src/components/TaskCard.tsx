@@ -21,9 +21,11 @@ const priorityConfig: Record<TaskPriority, { label: string; cls: string; dot: st
 };
 
 export default function TaskCard({ task, onEdit, onDelete, onOpenChat, isDeleting }: TaskCardProps) {
+  const isTemp = task.id.startsWith('temp-');
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: task.id,
     data: { task },
+    disabled: isTemp,
   });
 
   const style = transform
