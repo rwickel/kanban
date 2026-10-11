@@ -544,15 +544,14 @@ export default function App() {
       setChatTask(task);
       return;
     }
-    // No session yet (e.g. creation failed, or task never went through running):
-    // wire it up now so the icon has something to open.
-    if (task.agentId) {
-      startTaskExecution(task).then(async () => {
-        const all = await getTasks(task.projectId);
-        const fresh = all.find(t => t.id === task.id);
-        if (fresh?.sessionId) setChatTask(fresh);
-      });
-    }
+    // No session yet (e.g. creation failed, task never went through running,
+    // or delegated by another agent session): wire it up now so the icon
+    // always opens something. startTaskExecution resolves the agent itself.
+    startTaskExecution(task).then(async () => {
+      const all = await getTasks(task.projectId);
+      const fresh = all.find(t => t.id === task.id);
+      if (fresh?.sessionId) setChatTask(fresh);
+    });
   };
 
   const handleSaveTask = async (data: {

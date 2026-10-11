@@ -34,6 +34,7 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat, isDeletin
 
   const priority = priorityConfig[task.priority];
   const [copied, setCopied] = useState(false);
+  const [copiedParent, setCopiedParent] = useState(false);
 
   const copyId = async () => {
     try {
@@ -48,6 +49,22 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat, isDeletin
     }
     setCopied(true);
     setTimeout(() => setCopied(false), 1200);
+  };
+
+  const copyParent = async () => {
+    if (!task.parentSessionId) return;
+    try {
+      await navigator.clipboard.writeText(task.parentSessionId);
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = task.parentSessionId;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    setCopiedParent(true);
+    setTimeout(() => setCopiedParent(false), 1200);
   };
 
   return (
@@ -104,8 +121,11 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat, isDeletin
         </div>
       )}
       {task.parentSessionId && (
-        <p className="text-[11px] muted mt-1 mono truncate" title={`Created by session ${task.parentSessionId}`}>
-          ↳ from {task.parentSessionId.slice(0, 12)}…
+        <p className="text-[11px] muted mt-1 mono flex items-center gap-1 min-w-0" title={`Created by session ${task.parentSessionId}`}>
+          <span className="truncate">↳ from {task.parentSessionId.slice(0, 12)}…</span>
+          <button onClick={(e) => { e.stopPropagation(); copyParent(); }} onPointerDown={(e) => e.stopPropagation()} className="p-0.5 rounded hoverable shrink-0" title={copiedParent ? 'Copied!' : `Copy parent session ${task.parentSessionId}`} aria-label="Copy parent session id">
+            {copiedParent ? <Check className="w-3 h-3" style={{ color: 'var(--emerald)' }} /> : <Copy className="w-3 h-3 muted" />}
+          </button>
         </p>
       )}
 
@@ -162,7 +182,13 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat, isDeletin
           <button onClick={(e) => { e.stopPropagation(); onOpenChat(task); }} onPointerDown={(e) => e.stopPropagation()} className="btn p-1" title={task.startupPhase ? 'Starting session…' : 'Start session & open chat'}>
             {task.startupPhase ? <Loader2 className="w-3 h-3 animate-spin" /> : <MessageSquare className="w-3 h-3" />}
           </button>
-        ) : null}
+        ) : (
+          // Delegated tasks created by another agent session have no own
+          // session/agent yet — still offer chat: it wires a session on open.
+          <button onClick={(e) => { e.stopPropagation(); onOpenChat(task); }} onPointerDown={(e) => e.stopPropagation()} className="btn p-1" title={task.parentSessionId ? 'Start session & open chat (created by another agent)' : 'Start session & open chat'}>
+            <MessageSquare className="w-3 h-3" />
+          </button>
+        )}
       </div>
     </div>
   );
