@@ -1,5 +1,7 @@
 import { Task, TaskPriority } from '../types';
-import { MessageSquare, Pencil, Trash2, GripVertical, Loader2, AlertTriangle, Copy, Check } from 'lucide-react';
+import Markdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { MessageSquare, Pencil, Trash2, Loader2, AlertTriangle, Copy, Check } from 'lucide-react';
 import { useDraggable } from '@dnd-kit/core';
 import { useState } from 'react';
 
@@ -49,8 +51,10 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat, isDeletin
   return (
     <div
       ref={setNodeRef}
+      {...attributes}
+      {...listeners}
       style={style}
-      className={`task-card group relative mb-2 ${isDragging ? 'is-dragging z-50' : ''}`}
+      className={`task-card group relative mb-2 cursor-grab active:cursor-grabbing ${isDragging ? 'is-dragging z-50' : ''}`}
       aria-busy={isDeleting || undefined}
     >
       {/* deleting overlay: spinner — the Python CLI write can take seconds */}
@@ -61,19 +65,12 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat, isDeletin
           <span className="text-[12px] t-soft mono">Deleting…</span>
         </div>
       )}
-      <div
-        {...attributes}
-        {...listeners}
-        className="absolute left-0.5 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 cursor-grab active:cursor-grabbing transition-opacity"
-      >
-        <GripVertical className="w-3 h-3 muted" />
-      </div>
 
       {/* top meta row: mono ID + priority pill */}
       <div className="flex items-center justify-between gap-2 mb-1">
         <span className="inline-flex items-center gap-1 min-w-0">
           <span className="pill pill-id" title={task.id}>{task.id.slice(0, 8)}</span>
-          <button onClick={copyId} className="p-1 rounded hoverable shrink-0" title={copied ? 'Copied!' : `Copy full id ${task.id}`} aria-label="Copy task id">
+          <button onClick={(e) => { e.stopPropagation(); copyId(); }} onPointerDown={(e) => e.stopPropagation()} className="p-1 rounded hoverable shrink-0" title={copied ? 'Copied!' : `Copy full id ${task.id}`} aria-label="Copy task id">
             {copied ? <Check className="w-3 h-3" style={{ color: 'var(--emerald)' }} /> : <Copy className="w-3 h-3 muted" />}
           </button>
         </span>
@@ -83,10 +80,10 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat, isDeletin
             {priority.label}
           </span>
           <span className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-            <button onClick={() => onEdit(task)} className="p-1 rounded hoverable" title="Edit task">
+            <button onClick={(e) => { e.stopPropagation(); onEdit(task); }} onPointerDown={(e) => e.stopPropagation()} className="p-1 rounded hoverable" title="Edit task">
               <Pencil className="w-3 h-3 muted" />
             </button>
-            <button onClick={() => onDelete(task.id)} disabled={isDeleting} className="p-1 rounded hoverable disabled:opacity-50" title={isDeleting ? 'Deleting…' : 'Delete task'}>
+            <button onClick={(e) => { e.stopPropagation(); onDelete(task.id); }} onPointerDown={(e) => e.stopPropagation()} disabled={isDeleting} className="p-1 rounded hoverable disabled:opacity-50" title={isDeleting ? 'Deleting…' : 'Delete task'}>
               {isDeleting
                 ? <Loader2 className="w-3 h-3 animate-spin" />
                 : <Trash2 className="w-3 h-3 muted" />}
@@ -98,6 +95,16 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat, isDeletin
       <h4 className="text-[15px] font-medium t-strong leading-snug line-clamp-2">{task.title}</h4>
       {task.description && (
         <p className="text-[13px] muted mt-1 line-clamp-2 leading-snug">{task.description}</p>
+      )}
+      {task.result && (
+        <div className="text-[12px] t-soft mt-1.5 leading-snug line-clamp-4 md-body overflow-hidden" title={task.resultContext ? `${task.result}\n\nContext: ${task.resultContext}` : task.result}>
+          <Markdown remarkPlugins={[remarkGfm]}>{`✓ ${task.result}`}</Markdown>
+        </div>
+      )}
+      {task.parentSessionId && (
+        <p className="text-[11px] muted mt-1 mono truncate" title={`Created by session ${task.parentSessionId}`}>
+          ↳ from {task.parentSessionId.slice(0, 12)}…
+        </p>
       )}
 
       {/* startup state: visible progress / error for running tasks */}
@@ -126,13 +133,13 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat, isDeletin
       )}
 
       <div className="flex items-center justify-between mt-3 pt-2 border-t hairline" style={{ borderTopStyle: 'solid', borderTopWidth: 1 }}>
-        {task.agentName ? (
+        {(task.agentName || task.agentId) ? (
           <span className="flex items-center gap-1.5 min-w-0">
             <span className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text-2)' }}>
-              {task.agentName.charAt(0).toUpperCase()}
+              {(task.agentName || task.agentId || '?').charAt(0).toUpperCase()}
             </span>
             <span className="text-[13px] t-soft truncate" title={task.modelProviderID && task.modelId ? `model: ${task.modelProviderID}/${task.modelId}` : undefined}>
-              {task.agentName}
+              {task.agentName || task.agentId}
               {task.modelProviderID && task.modelId && (
                 <span className="muted mono"> · {task.modelProviderID}/{task.modelId}</span>
               )}
@@ -142,15 +149,15 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat, isDeletin
           <span className="text-[13px] muted">Unassigned</span>
         )}
         {task.sessionId ? (
-          <button onClick={() => onOpenChat(task)} className="btn p-1" title="Open agent chat">
+          <button onClick={(e) => { e.stopPropagation(); onOpenChat(task); }} onPointerDown={(e) => e.stopPropagation()} className="btn p-1" title="Open agent chat">
             <MessageSquare className="w-3 h-3" />
           </button>
         ) : task.startupPhase === 'error' ? (
-          <button onClick={() => onOpenChat(task)} className="btn p-1" title={task.startupError || 'Open — startup failed'} style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }}>
+          <button onClick={(e) => { e.stopPropagation(); onOpenChat(task); }} onPointerDown={(e) => e.stopPropagation()} className="btn p-1" title={task.startupError || 'Open — startup failed'} style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }}>
             <AlertTriangle className="w-3 h-3" />
           </button>
         ) : task.agentId ? (
-          <button onClick={() => onOpenChat(task)} className="btn p-1" title={task.startupPhase ? 'Starting session…' : 'Start session & open chat'}>
+          <button onClick={(e) => { e.stopPropagation(); onOpenChat(task); }} onPointerDown={(e) => e.stopPropagation()} className="btn p-1" title={task.startupPhase ? 'Starting session…' : 'Start session & open chat'}>
             {task.startupPhase ? <Loader2 className="w-3 h-3 animate-spin" /> : <MessageSquare className="w-3 h-3" />}
           </button>
         ) : null}

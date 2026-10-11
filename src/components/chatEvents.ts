@@ -28,6 +28,18 @@ export interface ToolCallInfo {
   todos?: TodoItem[];
 }
 
+export interface MessageMeta {
+  agent?: string;
+  model?: string;
+  /** Wall time for this message in ms (duration or timestamp delta). */
+  elapsedMs?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  totalTokens?: number;
+  cost?: number;
+}
+
 export interface ChatMessage {
   /** message id (msg_...) — stable across polls */
   id: string;
@@ -35,6 +47,8 @@ export interface ChatMessage {
   /** Markdown body for user/assistant/reasoning/error messages. */
   markdown: string;
   tool?: ToolCallInfo;
+  /** Per-message provenance: agent/model/timing/tokens when the server reports them. */
+  meta?: MessageMeta;
 }
 
 type Payload = Record<string, unknown>;
@@ -45,8 +59,15 @@ function str(value: unknown): string {
 
 /** One-line summary of a nested Code Mode subcall input — never raw JSON. */
 function summarizeCallInput(tool: string, input: Payload, full = false): string {
+  const name = tool || 'call';
   const keys = Object.keys(input);
-  if (keys.length === 0) return `${tool}()`;
+  if (keys.length === 0) return `${name}()`;
+  // Compact fetch rows: "GET <url>" instead of "fetch(method: GET · url: …)".
+  if (name.toLowerCase() === 'fetch') {
+    const url = typeof input.url === 'string' ? input.url : '';
+    const method = typeof input.method === 'string' ? input.method.toUpperCase() : 'GET';
+    if (url) return full ? `${method} ${url}` : `${method} ${url.length > 100 ? `${url.slice(0, 100)}…` : url}`;
+  }
   const lines = keys.map((k) => {
     let v: string;
     try {
@@ -56,14 +77,19 @@ function summarizeCallInput(tool: string, input: Payload, full = false): string 
     if (v.length > cap) v = `${v.slice(0, cap)}…`;
     return `${k}: ${v}`;
   });
-  return `${tool}(${lines.join(full ? '\n' : ' · ')})`;
+  return `${name}(${lines.join(full ? '\n' : ' · ')})`;
+}
+
+/** Tool display name: v2 puts it in part.name, older shapes in part.tool. */
+function partToolName(part: Payload): string {
+  return str(part.tool) || str(part.name) || 'tool';
 }
 
 /** "action → output" one-liner, never raw JSON. */
 function toolSummary(part: Payload): string {
   const input = toolInput(part);
-  const action = input.action || str(part.tool) || 'call';
-  return input.brief;
+  const action = input.action || partToolName(part);
+  return input.brief || action;
 }
 
 interface ToolDetail { action: string; brief: string; input: string; output: string; render?: 'diff' | 'question' | 'todo' | 'generic'; diff?: DiffLine[]; filePath?: string; questions?: QuestionItem[]; todos?: TodoItem[] }
@@ -96,7 +122,7 @@ function toolInput(part: Payload): ToolDetail {
   }
 
   // Rich render detection
-  const toolName = (str(part.tool) || str(part.name) || '').toLowerCase();
+  const toolName = partToolName(part).toLowerCase();
 
   // Pick the most informative input field per tool
   const pick = (...keys: string[]): string => {
@@ -110,8 +136,14 @@ function toolInput(part: Payload): ToolDetail {
   const path = pick('path', 'file', 'filePath', 'filename', 'url');
   const pattern = pick('pattern', 'query');
   const text = pick('text', 'content');
+  const tName = partToolName(part);
+  // Plain-tool rows stay minimal: just the name (+ URL), never the output dump.
+  if (['webfetch', 'websearch', 'fetch', 'search'].includes(toolName)) {
+    const brief = command || (path ? `${tName} ${path}` : '') || pattern || tName;
+    return { action: brief.slice(0, 200), brief: brief.slice(0, 200), input: '', output: '', render: 'generic' as const, diff: undefined, filePath: path || undefined, questions: undefined, todos: undefined };
+  }
   const action =
-    command || (path ? `${str(part.tool) || 'tool'} ${path}` : '') || pattern || str(part.tool) || 'call';
+    command || (path ? `${tName} ${path}` : '') || pattern || tName;
 
   // Brief one-liner: action → output, capped
   const briefOut = output.replace(/\s+/g, ' ').trim().slice(0, 120);
@@ -177,18 +209,18 @@ function toolInput(part: Payload): ToolDetail {
   return { action, brief, input, output: output.length > 4000 ? `${output.slice(0, 4000)}\n… (truncated)` : output, render, diff, filePath, questions, todos };
 }
 
-function contentToMessages(id: string, kind: 'user' | 'assistant', part: Payload): ChatMessage[] {
+function contentToMessages(id: string, kind: 'user' | 'assistant', part: Payload, meta?: MessageMeta): ChatMessage[] {
   const type = str(part.type);
   switch (type) {
     case 'text': {
       const text = str(part.text).trim();
       if (!text) return [];
-      return [{ id, kind, markdown: text }];
+      return [{ id, kind, markdown: text, ...(meta ? { meta } : {}) }];
     }
     case 'reasoning': {
       const text = str(part.text).trim();
       if (!text) return [];
-      return [{ id: `${id}-reasoning`, kind: 'reasoning', markdown: text }];
+      return [{ id: `${id}-reasoning`, kind: 'reasoning', markdown: text, ...(meta ? { meta } : {}) }];
     }
     case 'tool': {
       const state = (part.state as Payload | undefined) ?? {};
@@ -237,7 +269,7 @@ function contentToMessages(id: string, kind: 'user' | 'assistant', part: Payload
         kind: 'tool',
         markdown: '',
         tool: {
-          tool: str(part.name) || str(part.tool) || 'tool',
+          tool: partToolName(part),
           status: st,
           summary: detail.brief,
           input: (detail as any).input || (detail as any).action,
@@ -252,7 +284,7 @@ function contentToMessages(id: string, kind: 'user' | 'assistant', part: Payload
     }
     case 'file': {
       const name = str(part.filename) || str(part.url) || 'file';
-      return [{ id: `${id}-file`, kind: 'assistant', markdown: `📎 ${name}` }];
+      return [{ id: `${id}-file`, kind: 'assistant', markdown: `📎 ${name}`, ...(meta ? { meta } : {}) }];
     }
     // step-start, step-finish, snapshot, patch, compaction etc.: protocol noise
     default:
@@ -264,6 +296,119 @@ function contentToMessages(id: string, kind: 'user' | 'assistant', part: Payload
  * Convert one raw v2 message item into 0..n chat messages. Returns [] for
  * protocol noise (idle, system markers, empty content).
  */
+function extractMeta(raw: Payload): MessageMeta | undefined {
+  // OpenCode v2 per-message provenance may live on m.model / m.agent /
+  // m.time / m.tokens / m.cost or nested under m.info. Probe broadly but
+  // defensively — never throw. Unimplemented fields stay undefined.
+  const get = (obj: Payload, ...keys: string[]): unknown => {
+    for (const k of keys) {
+      if (obj[k] != null) return obj[k];
+    }
+    return undefined;
+  };
+  const toNum = (v: unknown): number | undefined => {
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v);
+    return undefined;
+  };
+  const toModelStr = (v: unknown): string | undefined => {
+    if (typeof v === 'string' && v.trim()) return v.trim();
+    if (v && typeof v === 'object') {
+      const o = v as Payload;
+      const prov = typeof o.providerID === 'string' ? o.providerID : '';
+      const mid = (typeof o.modelID === 'string' ? o.modelID : '') || (typeof o.id === 'string' ? o.id : '');
+      if (prov && mid) return `${prov}/${mid}`;
+      if (mid) return mid;
+    }
+    return undefined;
+  };
+  const toMs = (v: unknown): number | undefined => {
+    if (typeof v === 'number' && Number.isFinite(v)) return v < 1e11 ? v * 1000 : v;
+    if (typeof v === 'string') {
+      const n = Date.parse(v);
+      if (Number.isFinite(n)) return n;
+      const asNum = Number(v);
+      if (Number.isFinite(asNum)) return asNum;
+    }
+    return undefined;
+  };
+
+  const pools: Payload[] = [];
+  if (raw.agent || raw.model || raw.time || raw.tokens || raw.cost || raw.usage || raw.elapsed) pools.push(raw);
+  if (raw.info && typeof raw.info === 'object') pools.push(raw.info as Payload);
+  if (raw.metadata && typeof raw.metadata === 'object') pools.push(raw.metadata as Payload);
+  // message may carry `participants` / `agents` array — grab first name
+  const agentsPool = get(raw, 'agents', 'participants');
+  if (Array.isArray(agentsPool) && agentsPool.length > 0) {
+    const first = agentsPool[0] as Payload;
+    pools.push({ __agentName: typeof first?.name === 'string' ? first.name : typeof first === 'string' ? first : undefined });
+  }
+
+  let agent: string | undefined;
+  let model: string | undefined;
+  let elapsedMs: number | undefined;
+  let inputTokens: number | undefined;
+  let outputTokens: number | undefined;
+  let reasoningTokens: number | undefined;
+  let totalTokens: number | undefined;
+  let cost: number | undefined;
+
+  for (const p of pools) {
+    if (!agent) agent = (p.__agentName as string) || (typeof p.agent === 'string' ? p.agent.trim() : undefined);
+    if (!agent && typeof p.agent === 'object' && p.agent) {
+      const a = p.agent as Payload;
+      agent = (a.name as string) || (a.id as string) || undefined;
+    }
+    if (!model) model = toModelStr(p.model) ?? toModelStr(p.variant) ?? toModelStr(get(p, 'modelRef', 'modelInfo'));
+    // elapsed: durationMs / elapsed / duration / time.*
+    if (elapsedMs == null) {
+      const cand = get(p, 'durationMs', 'duration', 'elapsedMs', 'elapsed', 'timeMs');
+      if (cand != null) elapsedMs = toNum(cand) ?? (typeof cand === 'string' ? toNum(cand) : undefined);
+      if (elapsedMs == null && p.time && typeof p.time === 'object') {
+        const t = p.time as Payload;
+        const s = toMs(t.start ?? t.created ?? t.started);
+        const e = toMs(t.end ?? t.finished ?? t.completed ?? t.updated);
+        if (s != null && e != null && e >= s) elapsedMs = e - s;
+        else if (typeof t.duration === 'number') elapsedMs = t.duration;
+      }
+      if (elapsedMs == null && typeof get(p, 'timestamp', 'created', 'updated') === 'number') {
+        // bare timestamp — not elapsed, skip
+      }
+    }
+    // tokens: tokens / usage / tokenUsage — check nested first
+    const tkPools: Payload[] = [];
+    if (p.tokens && typeof p.tokens === 'object') tkPools.push(p.tokens as Payload);
+    if (p.usage && typeof p.usage === 'object') tkPools.push(p.usage as Payload);
+    if ((p as Record<string, unknown>).tokenUsage && typeof (p as Record<string, unknown>).tokenUsage === 'object') tkPools.push((p as Record<string, unknown>).tokenUsage as Payload);
+    if (tkPools.length === 0 && (get(p, 'inputTokens', 'outputTokens', 'totalTokens', 'promptTokens', 'completionTokens') != null)) tkPools.push(p);
+    for (const tp of tkPools) {
+      if (inputTokens == null) inputTokens = toNum(get(tp, 'input', 'inputTokens', 'promptTokens', 'prompt_tokens'));
+      if (outputTokens == null) outputTokens = toNum(get(tp, 'output', 'outputTokens', 'completionTokens', 'completion_tokens'));
+      if (reasoningTokens == null) reasoningTokens = toNum(get(tp, 'reasoning', 'reasoningTokens', 'thinkingTokens'));
+      if (totalTokens == null) totalTokens = toNum(get(tp, 'total', 'totalTokens', 'total_tokens'));
+      if (cost == null) cost = toNum(get(tp, 'cost', 'totalCost', 'price'));
+    }
+    if (cost == null) cost = toNum(get(p, 'cost', 'totalCost', 'price'));
+  }
+
+  if (totalTokens == null && (inputTokens != null || outputTokens != null || reasoningTokens != null)) {
+    totalTokens = (inputTokens ?? 0) + (outputTokens ?? 0) + (reasoningTokens ?? 0);
+  }
+
+  const hasAny = agent || model || elapsedMs != null || inputTokens != null || outputTokens != null || totalTokens != null || cost != null;
+  if (!hasAny) return undefined;
+  return {
+    ...(agent ? { agent } : {}),
+    ...(model ? { model } : {}),
+    ...(elapsedMs != null ? { elapsedMs } : {}),
+    ...(inputTokens != null ? { inputTokens } : {}),
+    ...(outputTokens != null ? { outputTokens } : {}),
+    ...(reasoningTokens != null ? { reasoningTokens } : {}),
+    ...(totalTokens != null ? { totalTokens } : {}),
+    ...(cost != null ? { cost } : {}),
+  };
+}
+
 export function toChatMessage(raw: unknown): ChatMessage[] {
   if (!raw || typeof raw !== 'object') return [];
   const m = raw as Payload;
@@ -278,13 +423,38 @@ export function toChatMessage(raw: unknown): ChatMessage[] {
     return [{ id, kind: type === 'user' ? 'user' : 'assistant', markdown: text }];
   }
 
+  // compaction: silent when ok, visible error row when failed so the
+  // chat never looks empty (e.g. provider 404 before any reply).
+  if (type === 'compaction') {
+    const status = str(m.status).toLowerCase();
+    if (status === 'failed' || m.error) {
+      const err = m.error as Payload | undefined;
+      const msg = str((err as Payload)?.message) || str(m.reason) || 'Compaction failed.';
+      return [{ id, kind: 'error', markdown: `Compaction failed (${status || 'error'}): ${msg}`.slice(0, 2000) }];
+    }
+    return [];
+  }
+
+  // idle with a failure outcome (e.g. provider 404): surface it instead
+  // of dropping it — otherwise a dead session renders only the prompt.
+  // Benign outcomes (completed/done/succeeded/…) stay silent; the stream
+  // status still flips to closed. Anything else is a real failure.
+  if (type === 'idle') {
+    const outcome = str(m.outcome).toLowerCase();
+    if (outcome && !['completed', 'done', 'succeeded', 'success', 'interrupted', 'aborted'].includes(outcome)) {
+      return [{ id: `${id}-outcome`, kind: 'error', markdown: `Session ended: ${outcome}.` }];
+    }
+    return [];
+  }
+
   // idle / compaction / agent-switched / ... without content: noise
   const content = Array.isArray(m.content) ? (m.content as Payload[]) : [];
   if (content.length === 0) return [];
 
   const out: ChatMessage[] = [];
+  const meta = extractMeta(m);
   for (const part of content) {
-    if (part && typeof part === 'object') out.push(...contentToMessages(id, 'assistant', part));
+    if (part && typeof part === 'object') out.push(...contentToMessages(id, 'assistant', part, meta));
   }
   // Keep server content order (reasoning / text / tools as they arrived).
   return out;
@@ -314,10 +484,26 @@ export function chatToMarkdown(messages: ChatMessage[], opts?: { title?: string;
   if (opts?.sessionId) meta.push(`session: ${opts.sessionId}`);
   if (meta.length) lines.push(`_${meta.join(' · ')}_`, '');
   for (const m of messages) {
+    const mBits: string[] = [];
+    if (m.kind !== 'user' && m.meta) {
+      if (m.meta.agent) mBits.push(`agent: ${m.meta.agent}`);
+      if (m.meta.model) mBits.push(`model: ${m.meta.model}`);
+      const mIn = m.meta.inputTokens ?? 0;
+      const mOut = m.meta.outputTokens ?? 0;
+      const mReas = m.meta.reasoningTokens ?? 0;
+      const tot = m.meta.totalTokens ?? (mIn + mOut + mReas);
+      if (tot > 0 || mIn > 0 || mOut > 0) mBits.push(`input: ${Math.round(mIn).toLocaleString('en-US')} · output: ${Math.round(mOut).toLocaleString('en-US')}${mReas > 0 ? ` · reasoning: ${Math.round(mReas).toLocaleString('en-US')}` : ''} · total: ${Math.round(tot).toLocaleString('en-US')}`);
+      if (m.meta.elapsedMs != null) {
+        const es = Math.floor(m.meta.elapsedMs / 1000);
+        mBits.push(`elapsed: ${es < 60 ? `${es}s` : `${Math.floor(es / 60)}m ${String(es % 60).padStart(2, '0')}s`}`);
+      }
+      if (m.meta.cost != null && m.meta.cost > 0) mBits.push(`cost: $${m.meta.cost.toFixed(4)}`);
+    }
+    const mSuffix = mBits.length > 0 ? ` _(${mBits.join(' · ')})_` : '';
     if (m.kind === 'user') {
       lines.push(`## 🧑 User`, '', m.markdown.trim(), '');
     } else if (m.kind === 'assistant') {
-      lines.push(`## 🤖 Assistant`, '', m.markdown.trim(), '');
+      lines.push(`## 🤖 Assistant${mSuffix}`, '', m.markdown.trim(), '');
     } else if (m.kind === 'reasoning') {
       lines.push(`<details><summary>💭 Thinking</summary>`, '', m.markdown.trim(), '', `</details>`, '');
     } else if (m.kind === 'tool' && m.tool) {

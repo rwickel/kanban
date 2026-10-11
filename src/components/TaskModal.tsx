@@ -15,6 +15,8 @@ interface TaskModalProps {
     agentName?: string;
     modelId?: string;
     modelProviderID?: string;
+    result?: string;
+    resultContext?: string;
   }) => void;
   task?: Task | null;
   availableAgents: Agent[];
@@ -28,6 +30,8 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
   const [models, setModels] = useState<OpenCodeModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [selectedModel, setSelectedModel] = useState<string>('');
+  const [result, setResult] = useState('');
+  const [resultContext, setResultContext] = useState('');
 
   useEffect(() => {
     if (!isOpen) return;
@@ -36,6 +40,8 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
       setDescription(task.description);
       setPriority(task.priority);
       setSelectedAgentId(task.agentId || '');
+      setResult(task.result || '');
+      setResultContext(task.resultContext || '');
       setSelectedModel(
         task.modelId && task.modelProviderID
           ? `${task.modelProviderID}/${task.modelId}`
@@ -46,6 +52,8 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
       setDescription('');
       setPriority('medium');
       setSelectedAgentId('');
+      setResult('');
+      setResultContext('');
       const pref = getTaskModelPref();
       setSelectedModel(pref ? `${pref.providerID}/${pref.modelID}` : '');
     }
@@ -78,6 +86,8 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
       agentName: selectedAgent?.name || undefined,
       modelId: modelID || undefined,
       modelProviderID: providerID || undefined,
+      result: result.trim() || undefined,
+      resultContext: resultContext.trim() || undefined,
     });
     onClose();
   };
@@ -151,6 +161,16 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
             <p className="text-[11px] muted mt-1">
               Passed as <span className="mono">model: {"{ providerID, modelID }"}</span> when the session is created — so the build worker stops falling back to the global default.
             </p>
+          </div>
+          <div>
+            <label className="block text-[12px] font-medium t-soft mb-1">Result <span className="muted font-normal">(last message + context, on done/blocked)</span></label>
+            <textarea value={result} onChange={(e) => setResult(e.target.value)}
+              placeholder="Result — filled by the agent on done/blocked…" rows={2} className="input resize-none mono" />
+          </div>
+          <div>
+            <label className="block text-[12px] font-medium t-soft mb-1">Result context</label>
+            <input type="text" value={resultContext} onChange={(e) => setResultContext(e.target.value)}
+              placeholder="Optional extra context…" className="input mono" />
           </div>
           <div className="flex items-center justify-end gap-2 pt-1">
             <button type="button" onClick={onClose} className="btn px-3 py-1.5 text-[12px] font-medium">Cancel <span className="kbd ml-1">esc</span></button>

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   X, Send, Loader2, ExternalLink, Copy, Check, Download, Square,
   Bot, User, ChevronDown, Wrench, AlertTriangle,
@@ -30,8 +31,28 @@ const STATUS_DOT: Record<ChatStatus, { bg: string; label: string; pulse: boolean
   'no-run': { bg: 'var(--muted)', label: 'no session', pulse: false },
 };
 
-function ThinkingBlock({ msg, showAvatar, agentName, onFileClick }: { msg: ChatMessage; showAvatar?: boolean; agentName?: string; onFileClick: (absPath: string) => void }) {
+function ThinkingBlock({ msg, showAvatar, agentName, modelName, onFileClick }: { msg: ChatMessage; showAvatar?: boolean; agentName?: string; modelName?: string; onFileClick: (absPath: string) => void }) {
   const [open, setOpen] = useState(false);
+  const fmtFull = (n: number) => Number.isFinite(n) ? Math.round(n).toLocaleString('en-US') : '0';
+  const footerBits: string[] = [];
+  const fAgent = msg.meta?.agent ?? agentName;
+  const fModel = msg.meta?.model ?? modelName;
+  const fElapsed = formatElapsed(msg.meta?.elapsedMs);
+  const fInTok = msg.meta?.inputTokens ?? 0;
+  const fOutTok = msg.meta?.outputTokens ?? 0;
+  const fReasTok = msg.meta?.reasoningTokens ?? 0;
+  const fTotal = msg.meta?.totalTokens ?? (fInTok + fOutTok + fReasTok);
+  const fHasTokens = fTotal > 0 || fInTok > 0 || fOutTok > 0;
+  if (fAgent) footerBits.push(fAgent);
+  if (fModel) footerBits.push(fModel);
+  if (fElapsed) footerBits.push(`⏱ ${fElapsed}`);
+  if (fHasTokens) {
+    if (fInTok > 0 || fOutTok > 0) footerBits.push(`in ${fmtFull(fInTok)} · out ${fmtFull(fOutTok)}`);
+    else footerBits.push(`⬡ ${fmtFull(fTotal)}`);
+    if (fReasTok > 0) footerBits.push(`reasoning ${fmtFull(fReasTok)}`);
+    if ((fInTok > 0 || fOutTok > 0) && fTotal > 0) footerBits.push(`total ${fmtFull(fTotal)}`);
+  }
+  if (msg.meta?.cost != null && msg.meta.cost > 0) footerBits.push(msg.meta.cost < 0.01 ? `$${msg.meta.cost.toFixed(4)}` : `$${msg.meta.cost.toFixed(2)}`);
   return (
     <div className="flex gap-2 justify-start animate-fadeIn">
       {showAvatar ? (
@@ -50,8 +71,9 @@ function ThinkingBlock({ msg, showAvatar, agentName, onFileClick }: { msg: ChatM
           <span className="font-medium mono uppercase tracking-wide">Thinking</span>
         </button>
         {open && (
-          <div className="mt-1 panel p-2.5 text-[11.5px] leading-relaxed t-soft whitespace-pre-wrap break-words md-body">
+          <div className="mt-1 panel p-2.5 text-[11.5px] leading-relaxed t-soft break-words md-body">
             <Markdown
+              remarkPlugins={[remarkGfm]}
               components={{
                 a: ({ href, children, ...props }) => {
                   const abs = parsePreviewHref(href);
@@ -62,6 +84,11 @@ function ThinkingBlock({ msg, showAvatar, agentName, onFileClick }: { msg: ChatM
                 },
               }}
             >{linkifyFilePaths(msg.markdown)}</Markdown>
+            {footerBits.length > 0 && (
+              <p className="text-[10px] muted mono mt-2 pt-1.5 border-t hairline" style={{ borderTopWidth: 1, borderTopStyle: 'solid' }}>
+                {footerBits.join(' · ')}
+              </p>
+            )}
           </div>
         )}
       </div>
@@ -71,7 +98,6 @@ function ThinkingBlock({ msg, showAvatar, agentName, onFileClick }: { msg: ChatM
 
 function ToolRow({ msg, onFileClick }: { msg: ChatMessage; onFileClick: (absPath: string) => void }) {
   const t = msg.tool;
-  const isErr = msg.kind === 'error';
   const executed = (t?.status ?? '').toLowerCase() === 'executed';
   const hasDiff = !!t?.diff && t.diff.length > 0;
   // Only edit/write (diff render) starts expanded — everything else collapsed.
@@ -80,18 +106,15 @@ function ToolRow({ msg, onFileClick }: { msg: ChatMessage; onFileClick: (absPath
   return (
     <div className="flex gap-2 justify-start animate-fadeIn">
       <div className="w-6 h-6 flex items-center justify-center shrink-0" style={{ border: '1px solid var(--border)', borderRadius: 6, background: 'var(--surface)' }}>
-        {isErr
-          ? <AlertTriangle className="w-3.5 h-3.5" style={{ color: 'var(--danger)' }} strokeWidth={1.75} />
-          : executed
+        {executed
             ? <Check className="w-3.5 h-3.5" style={{ color: 'var(--emerald)' }} strokeWidth={1.75} />
             : <Wrench className="w-3.5 h-3.5 muted" strokeWidth={1.75} />}
       </div>
       <div className="flex-1 min-w-0 max-w-[88%]">
         <button onClick={() => setOpen((v) => !v)}
           className="btn w-full flex items-center gap-2 px-2.5 py-1.5 mono text-[11px] text-left">
-          <span className="font-semibold shrink-0 t-strong">{isErr ? 'tool' : t?.tool ?? 'tool'}</span>
+          <span className="font-semibold shrink-0 t-strong">{t?.tool ?? 'tool'}</span>
           {t?.summary && <span className="muted truncate font-sans">{t.summary}</span>}
-          {t?.status && <span className={`ml-auto shrink-0 pill ${executed ? 'p-green' : isErr ? 'p-red' : 'p-neutral'}`}>{t.status}</span>}
           <ChevronDown className={`w-3 h-3 shrink-0 muted transition-transform ${open ? 'rotate-180' : ''}`} strokeWidth={1.75} />
         </button>
         {open && (
@@ -156,10 +179,6 @@ function ToolRow({ msg, onFileClick }: { msg: ChatMessage; onFileClick: (absPath
                 <p className="text-[10px] uppercase tracking-widest muted mono mb-1">Result</p>
                 <pre className="mono text-[11px] leading-relaxed muted whitespace-pre-wrap break-words">{t.output}</pre>
               </div>
-            ) : isErr && msg.markdown ? (
-              <div className="px-2.5 py-2">
-                <pre className="mono text-[11px] leading-relaxed whitespace-pre-wrap break-words" style={{ color: 'var(--danger)' }}>{msg.markdown}</pre>
-              </div>
             ) : null}
           </div>
         )}
@@ -168,8 +187,40 @@ function ToolRow({ msg, onFileClick }: { msg: ChatMessage; onFileClick: (absPath
   );
 }
 
-function Bubble({ msg, agentName, showAvatar = true, onFileClick }: { msg: ChatMessage; agentName?: string; showAvatar?: boolean; onFileClick: (absPath: string) => void }) {
+function Bubble({ msg, agentName, modelName, showAvatar = true, onFileClick }: { msg: ChatMessage; agentName?: string; modelName?: string; showAvatar?: boolean; onFileClick: (absPath: string) => void }) {
   const isUser = msg.kind === 'user';
+  const metaAgent = msg.meta?.agent ?? agentName;
+  const metaModel = msg.meta?.model ?? modelName;
+  const elapsed = formatElapsed(msg.meta?.elapsedMs);
+  const inTok = msg.meta?.inputTokens ?? 0;
+  const outTok = msg.meta?.outputTokens ?? 0;
+  const reasTok = msg.meta?.reasoningTokens ?? 0;
+  const total = msg.meta?.totalTokens ?? (inTok + outTok + reasTok);
+  const hasTokens = total > 0 || inTok > 0 || outTok > 0;
+  const cost = msg.meta?.cost;
+  const hasCost = cost != null && Number.isFinite(cost) && cost > 0;
+  const fmtFull = (n: number) => Number.isFinite(n) ? Math.round(n).toLocaleString('en-US') : '0';
+  const metaBits: string[] = [];
+  if (metaAgent) metaBits.push(metaAgent);
+  if (metaModel) metaBits.push(metaModel);
+  if (elapsed) metaBits.push(`⏱ ${elapsed}`);
+  // Complete counts — no abbreviation: in / out / total + reasoning when present.
+  if (hasTokens) {
+    if (inTok > 0 || outTok > 0) metaBits.push(`in ${fmtFull(inTok)} · out ${fmtFull(outTok)}`);
+    else metaBits.push(`⬡ ${fmtFull(total)}`);
+    if (reasTok > 0) metaBits.push(`reasoning ${fmtFull(reasTok)}`);
+    if ((inTok > 0 || outTok > 0) && total > 0) metaBits.push(`total ${fmtFull(total)}`);
+  }
+  if (hasCost) metaBits.push(cost! < 0.01 ? `$${cost!.toFixed(4)}` : `$${cost!.toFixed(2)}`);
+  const metaTitle = [
+    metaAgent ? `agent: ${metaAgent}` : null,
+    metaModel ? `model: ${metaModel}` : null,
+    hasTokens
+      ? `input: ${fmtFull(inTok)} · output: ${fmtFull(outTok)}${reasTok > 0 ? ` · reasoning: ${fmtFull(reasTok)}` : ''} · total: ${fmtFull(total)}`
+      : null,
+    elapsed ? `elapsed: ${elapsed}` : null,
+    hasCost ? `cost: $${cost!.toFixed(4)}` : null,
+  ].filter(Boolean).join('\n');
   return (
     <div className={`flex gap-2 animate-fadeIn ${isUser ? 'justify-end' : 'justify-start'}`}>
       {!isUser && (showAvatar ? (
@@ -186,6 +237,7 @@ function Bubble({ msg, agentName, showAvatar = true, onFileClick }: { msg: ChatM
             ? { background: 'var(--accent)', color: 'var(--accent-text)', border: '1px solid var(--accent)', borderRadius: 6, padding: '8px 10px' }
             : { background: 'var(--surface)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 6, padding: '8px 10px' }}>
           <Markdown
+            remarkPlugins={[remarkGfm]}
             components={{
               a: ({ href, children, ...props }) => {
                 const abs = parsePreviewHref(href);
@@ -207,6 +259,11 @@ function Bubble({ msg, agentName, showAvatar = true, onFileClick }: { msg: ChatM
             }}
           >{linkifyFilePaths(msg.markdown)}</Markdown>
         </div>
+        {!isUser && metaBits.length > 0 && (
+          <p className="text-[10px] muted mono mt-1 ml-1 truncate" title={metaTitle}>
+            {metaBits.join(' · ')}
+          </p>
+        )}
       </div>
       {isUser && (
         <div className="w-6 h-6 flex items-center justify-center shrink-0" style={{ border: '1px solid var(--border)', borderRadius: 6 }}>
@@ -217,9 +274,52 @@ function Bubble({ msg, agentName, showAvatar = true, onFileClick }: { msg: ChatM
   );
 }
 
+function formatElapsed(ms?: number): string | null {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return null;
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${String(s % 60).padStart(2, '0')}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${String(m % 60).padStart(2, '0')}m`;
+}
+
+function formatTokens(n: number): string {
+  if (!Number.isFinite(n)) return '0';
+  if (n < 1000) return String(Math.round(n));
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+  return `${(n / 1_000_000).toFixed(2).replace(/\.?0+$/, '')}M`;
+}
+
 export default function SessionChatWindow({ task, onClose, standalone }: SessionChatWindowProps) {
   const sessionId = task?.sessionId ?? null;
-  const { messages, status, retry } = useSessionStream(sessionId);
+  const { messages, status, outcome, retry } = useSessionStream(sessionId, {
+    taskAgentName: task?.agentName ?? null,
+  });
+  const autoMovedRef = useRef(false);
+  // Capture last assistant text for task result auto-fill on done/blocked.
+  const lastResultRef = useRef('');
+  useEffect(() => {
+    const last = [...messages].reverse().find((m) => m.kind === 'assistant' && m.markdown.trim());
+    if (last) lastResultRef.current = last.markdown.trim().slice(0, 4000);
+  }, [messages]);
+  // Session ended -> board column follows: failed/error -> blocked, completed/done -> done.
+  // Also writes result (last assistant message) if the agent didn't already.
+  useEffect(() => {
+    if (!task || autoMovedRef.current || task.status !== 'running' || status !== 'closed' || !outcome) return;
+    const o = outcome.toLowerCase();
+    const next: 'blocked' | 'done' | null =
+      ['failed', 'error'].includes(o) ? 'blocked'
+      : ['completed', 'done'].includes(o) ? 'done'
+      : null;
+    if (!next) return;
+    autoMovedRef.current = true;
+    const patch: Partial<Task> = { status: next };
+    if (!task.result && lastResultRef.current) (patch as Record<string, unknown>).result = lastResultRef.current;
+    if (!task.resultContext && next === 'blocked' && outcome) (patch as Record<string, unknown>).resultContext = `session outcome: ${outcome}`;
+    import('../store/kanban').then(({ updateTask }) => updateTask(task.id, patch)).catch(() => { autoMovedRef.current = false; });
+  }, [task?.id, task?.status, status, outcome]);
+  useEffect(() => { autoMovedRef.current = false; }, [task?.id]);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -339,7 +439,7 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5 mb-1">
-              <span className="dot" style={{ background: st.bg }} />
+              <span className={`dot ${st.pulse ? 'animate-pulse' : ''}`} style={{ background: st.bg }} />
               <p className="text-[11px] uppercase tracking-widest font-semibold t-strong mono truncate">{task.agentName ?? 'Agent'}</p>
               <span className="text-[10px] muted mono">· {st.label}{msgCount > 0 ? ` · ${msgCount}` : ''}</span>
             </div>
@@ -382,11 +482,30 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
         {messages.map((msg, idx) => {
           const prev = idx > 0 ? messages[idx - 1] : undefined;
           const startsTurn = msg.kind !== 'user' && (!prev || prev.kind === 'user');
-          if (msg.kind === 'tool' || msg.kind === 'error') return <ToolRow key={msg.id} msg={msg} onFileClick={(p) => setPreviewPath(p)} />;
-          if (msg.kind === 'reasoning') return <ThinkingBlock key={msg.id} msg={msg} showAvatar={startsTurn} agentName={task.agentName} onFileClick={(p) => setPreviewPath(p)} />;
-          return <Bubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : task.agentName} showAvatar={msg.kind === 'user' ? true : startsTurn} onFileClick={(p) => setPreviewPath(p)} />;
+          const modelHint = task.modelProviderID && task.modelId ? `${task.modelProviderID}/${task.modelId}` : task.modelId ?? undefined;
+          if (msg.kind === 'tool') return <ToolRow key={msg.id} msg={msg} onFileClick={(p) => setPreviewPath(p)} />;
+          if (msg.kind === 'error') return (
+            <div key={msg.id} className="flex gap-2 justify-start animate-fadeIn">
+              <div className="w-6 h-6 flex items-center justify-center shrink-0" style={{ border: '1px solid var(--border)', borderRadius: 6, background: 'var(--surface)' }}>
+                <AlertTriangle className="w-3.5 h-3.5" style={{ color: 'var(--danger)' }} strokeWidth={1.75} />
+              </div>
+              <div className="min-w-0 max-w-[88%] panel px-2.5 py-2 text-[12px] leading-relaxed whitespace-pre-wrap break-words" style={{ color: 'var(--danger)' }}>
+                {msg.markdown}
+              </div>
+            </div>
+          );
+          if (msg.kind === 'reasoning') return <ThinkingBlock key={msg.id} msg={msg} showAvatar={startsTurn} agentName={task.agentName} modelName={modelHint} onFileClick={(p) => setPreviewPath(p)} />;
+          return <Bubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : task.agentName} modelName={msg.kind === 'user' ? undefined : modelHint} showAvatar={msg.kind === 'user' ? true : startsTurn} onFileClick={(p) => setPreviewPath(p)} />;
         })}
         <div ref={bottomRef} />
+        {busy && msgCount > 0 && (
+          <div className="flex gap-2 justify-start items-center animate-fadeIn">
+            <div className="w-6 h-6 flex items-center justify-center shrink-0" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 6 }}>
+              <Loader2 className="w-3.5 h-3.5 animate-spin muted" strokeWidth={1.75} />
+            </div>
+            <p className="text-[11px] muted mono">Agent running…</p>
+          </div>
+        )}
       </div>
 
       {sendError && <div className="px-3.5 pt-2 text-[11px]" style={{ color: 'var(--danger)' }}>{sendError}</div>}
@@ -418,9 +537,8 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end">
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
-      <div data-chat-width className="relative h-full flex flex-col shrink-0" style={{ width, maxWidth: '90vw', background: 'var(--surface)', borderLeft: '1px solid var(--border)' }}>
+    <div className="fixed top-3 right-3 bottom-3 z-50 flex justify-end pointer-events-none">
+      <div data-chat-width className="relative h-full flex flex-col shrink-0 pointer-events-auto panel overflow-hidden" style={{ width, maxWidth: '90vw', borderRadius: 10, boxShadow: '0 12px 40px rgba(0,0,0,0.25)', background: 'var(--surface)', border: '1px solid var(--border)' }}>
         <div onPointerDown={onHandlePointerDown} title="Drag to resize"
           className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-violet-500/40 transition-colors z-10"
           style={{ touchAction: 'none' }} />

@@ -16,6 +16,11 @@ export interface Task {
   /** "providerID/modelID" e.g. "ollama/gemma4:e2b" — passed to createSession */
   modelId?: string;
   modelProviderID?: string;
+  /** Session that created this task (delegation chain) — empty when created by user/board */
+  parentSessionId?: string | null;
+  /** Last assistant message + context written on done/blocked (or at any time) */
+  result?: string | null;
+  resultContext?: string | null;
   projectId: string;
   createdAt: string;
   updatedAt: string;
@@ -90,16 +95,31 @@ export interface OpenCodeSessionInfo {
   id: string;
   title?: string;
   agent?: string;
-  model?: string;
+  model?: string | { providerID?: string; modelID?: string; id?: string; [k: string]: unknown };
   time?: {
-    created?: string;
-    updated?: string;
+    created?: string | number;
+    updated?: string | number;
+    [k: string]: unknown;
   };
-  messages?: Array<{
-    id: string;
-    role: string;
-    content?: string;
-  }>;
+  tokens?: unknown;
+  cost?: unknown;
+  [k: string]: unknown;
+}
+
+export interface SessionUsage {
+  /** Effective agent id/name (session.agent wins, task.agentName fallback). */
+  agent?: string;
+  /** "provider/model" display string. */
+  model?: string;
+  /** Elapsed wall time in ms (session created → updated, fallback first→last message). */
+  elapsedMs?: number;
+  inputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+  /** Total cost in USD when the server reports it. */
+  cost?: number;
+  messageCount: number;
 }
 
 // Raw v2 message item from GET /api/session/{id}/message:

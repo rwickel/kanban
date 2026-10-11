@@ -75,6 +75,77 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// ---- Server-side session reconciler: board follows session outcome, no client needed ----
+// Delegated sessions have no open chat window, so SessionChatWindow's auto-move
+// never fires. This poller runs in the dev server: for every task in `running`
+// with a sessionId + startupPhase=ready, fetch the session's last message.
+// idle/completed/succeeded/done/success → done (capture last assistant text as result).
+// idle/failed/error → blocked. interrupted/aborted stays running. Runs every 15s,
+// skips tasks touched in the last 20s to avoid racing an agent's own writes.
+let reconcileTimer = null;
+let reconcileBusy = false;
+function startReconciler() {
+  if (reconcileTimer) return;
+  reconcileTimer = setInterval(() => {
+    reconcileRunning().catch(() => {});
+  }, 15000);
+  // First pass shortly after boot.
+  setTimeout(() => reconcileRunning().catch(() => {}), 8000);
+}
+async function reconcileRunning() {
+  if (reconcileBusy) return;
+  reconcileBusy = true;
+  try {
+    const running = await cli(["task", "list", "--status", "running"]).catch(() => []);
+    const rows = Array.isArray(running) ? running : [];
+    const apiBase = ocApiBase();
+    const H = ocAuthHeaders();
+    for (const t of rows) {
+      try {
+        const sid = t.sessionId || t.session_id;
+        if (!sid) continue;
+        if ((t.startupPhase || t.startup_phase) !== "ready") continue;
+        const updatedAt = Date.parse(t.updatedAt || t.updated_at || "") || 0;
+        if (Date.now() - updatedAt < 20000) continue;
+        const msgs = await ocFetchMessages(apiBase, H, sid, 30).catch(() => null);
+        if (!msgs || msgs.length === 0) continue;
+        const last = msgs[msgs.length - 1];
+        const ltype = String(last?.type || "").toLowerCase();
+        // Session-level outcome (getSession shape) or last-message outcome.
+        let outcome = "";
+        try {
+          const sRes = await fetch(`${apiBase}/session/${encodeURIComponent(sid)}`, { headers: H });
+          if (sRes.ok) {
+            const sJson = await sRes.json();
+            const sess = sJson?.data ?? sJson;
+            if (typeof sess?.outcome === "string") outcome = sess.outcome.toLowerCase();
+          }
+        } catch { /* fall back to message outcome */ }
+        if (!outcome && typeof last?.outcome === "string") outcome = last.outcome.toLowerCase();
+        const doneLike = ltype === "idle" && ["completed", "done", "succeeded", "success"].includes(outcome);
+        const failLike = ltype === "idle" && ["failed", "error"].includes(outcome);
+        if (!doneLike && !failLike) continue;
+        const next = doneLike ? "done" : "blocked";
+        // Last assistant text (skip user/system) → result, unless already set.
+        let resultText = "";
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          const m = msgs[i];
+          const role = msgRoleOf(m);
+          if (role === "user" || role === "system") continue;
+          const text = msgTextOf(m);
+          if (text) { resultText = text.slice(0, 4000); break; }
+        }
+        const argv = ["task", "update", t.id, "--actor", "reconciler", "--status", next];
+        if (resultText && !(t.result || t.result_text)) argv.push("--result", resultText);
+        if (next === "blocked") argv.push("--result-context", `session outcome: ${outcome}`);
+        await cli(argv).catch(() => null);
+      } catch { /* per-task errors never stop the loop */ }
+    }
+  } finally {
+    reconcileBusy = false;
+  }
+}
+
 function opencodeAuthHeaders(password) {
   if (!password) return {};
   return { Authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}` };
@@ -110,7 +181,7 @@ function ocAuthHeaders(password) {
   return { "Content-Type": "application/json", ...opencodeAuthHeaders(pw) };
 }
 async function ocFetchMessages(apiBase, H, sessionId, limit = 30) {
-  const r = await fetch(`${apiBase}/session/${encodeURIComponent(sessionId)}/message?limit=${limit}&order=desc`, { headers: H });
+  const r = await fetch(`${apiBase}/session/${encodeURIComponent(sessionId)}/message?limit=${limit}&order=asc`, { headers: H });
   if (!r.ok) throw new Error(`fetch messages failed (HTTP ${r.status}) — ${(await r.text().catch(() => "")).slice(0, 200)}`);
   const j = await r.json();
   const list = Array.isArray(j) ? j : (j?.data ?? []);
@@ -183,6 +254,7 @@ async function messageToSession(opts) {
   const H = ocAuthHeaders(serverPassword);
 
   // Baseline: newest assistant message id before we send (so we wait for a NEW one).
+  // ocFetchMessages returns asc order; extractLastAssistant walks from the end.
   let beforeId = null;
   try {
     const before = await ocFetchMessages(apiBase, H, sessionId, 20);
@@ -225,27 +297,37 @@ async function delegateTask(opts) {
   const {
     projectId, title, description = "", priority = "medium",
     agentId, agentName, modelId, modelProviderID,
+    parentSessionId, result, resultContext,
     serverUrl, serverPassword, timeoutSec = 600, pollMs = 3000, wait = false,
   } = opts || {};
   if (!projectId || !title) {
     throw { status: 400, message: "projectId and title required" };
   }
+  if (!agentId) throw { status: 400, message: "agentId required — pass a teammate agent id from the project's team (see project.agentIds)" };
   const timeout = Math.min(Math.max(Number(timeoutSec) || 600, 30), 1800);
   const interval = Math.min(Math.max(Number(pollMs) || 3000, 1000), 15000);
 
-  // 1. Project row → session working directory.
+  // 1. Project row → session working directory + validate agent is on the team.
   const projects = await cli(["project", "list", "--json"]);
   const project = (Array.isArray(projects) ? projects : []).find((p) => p.id === projectId);
   if (!project) throw { status: 404, message: `Project not found: ${projectId}` };
+  if (Array.isArray(project.agentIds) && project.agentIds.length > 0 && !project.agentIds.includes(agentId)) {
+    throw { status: 400, message: `agentId "${agentId}" is not on this project's team [${project.agentIds.join(", ")}]` };
+  }
+  let resolvedAgentId = agentId || null;
+  let resolvedAgentName = agentName || null;
 
   // 2. Create the subtask (backlog), then flip to running.
   const created = await cli([
     "task", "create", "--project", projectId, "--title", title, "--actor", "delegate",
     "--description", description, "--priority", priority,
-    ...(agentId ? ["--agent-id", agentId] : []),
-    ...(agentName ? ["--agent-name", agentName] : []),
+    ...(resolvedAgentId ? ["--agent-id", resolvedAgentId] : []),
+    ...(resolvedAgentName ? ["--agent-name", resolvedAgentName] : []),
     ...(modelId ? ["--model-id", modelId] : []),
     ...(modelProviderID ? ["--model-provider", modelProviderID] : []),
+    ...(parentSessionId ? ["--parent-session-id", parentSessionId] : []),
+    ...(result ? ["--result", result] : []),
+    ...(resultContext ? ["--result-context", resultContext] : []),
   ]);
   const tid = created.id;
   await cli(["task", "move", tid, "running", "--actor", "delegate"]);
@@ -259,7 +341,7 @@ async function delegateTask(opts) {
   try {
     // 3. Spawn the teammate session in the project directory.
     const sessBody = {};
-    if (agentId || agentName) sessBody.agent = agentId || agentName;
+    if (resolvedAgentId || resolvedAgentName) sessBody.agent = resolvedAgentId || resolvedAgentName;
     if (modelId && modelProviderID) sessBody.model = { providerID: modelProviderID, id: modelId };
     if (project.path) sessBody.location = { directory: project.path };
     const sessRes = await fetch(`${apiBase}/session`, { method: "POST", headers: H, body: JSON.stringify(sessBody) });
@@ -271,16 +353,16 @@ async function delegateTask(opts) {
     const session = sessJson?.data ?? sessJson;
     if (!session?.id) throw new Error("session create returned no id");
     await cli(["task", "update", tid, "--actor", "delegate", "--session-id", session.id,
-      ...(agentId ? ["--agent-id", agentId] : []),
-      ...(agentName ? ["--agent-name", agentName] : []),
+      ...(resolvedAgentId ? ["--agent-id", resolvedAgentId] : []),
+      ...(resolvedAgentName ? ["--agent-name", resolvedAgentName] : []),
       "--startup-phase", "ready"]);
 
-    // 4. Send the work prompt — subtask finishes via PATCH …/tasks/:id {status:"done"}.
+    // 4. Send the work prompt — board follows session outcome; last assistant message is captured as result automatically.
     const prompt =
-      `You are ${agentName || agentId || "a teammate"} executing a delegated subtask. Complete it end-to-end in ${project.path || project.name}.\n` +
-      `Task id: ${tid}\nProject id: ${projectId}\nTask: ${title}\nDescription: ${description || "(none)"}\n\n` +
-      `When finished, PATCH http://localhost:3001/api/kanban/tasks/${tid} with {"status":"done"} (or {"status":"blocked"} if stuck). ` +
-      `Fire-and-forget: the delegator already returned and will poll your status. Call the heartbeat endpoint on your task id every couple of minutes with progress so the watchdog sees you alive.`;
+      `You are ${resolvedAgentName || resolvedAgentId || agentName || agentId || "a teammate"} executing a delegated subtask. Complete it end-to-end in ${project.path || project.name}.\n` +
+      `Task id: ${tid}\nProject id: ${projectId}\nTask: ${title}\nDescription: ${description || "(none)"}\nSession id: ${session.id} (pass as parentSessionId when you create/delegate follow-up tasks).\n\n` +
+      `When finished, just write your final answer as the last assistant message — the board captures it as the task result automatically and follows the session outcome (completed→done, failed→blocked). Do NOT call kanban_update_status or PATCH the task status yourself. ` +
+      `Fire-and-forget: the delegator already returned. Call kanban_task_heartbeat on your task id every couple of minutes with --progress so the watchdog sees you alive.`;
     const pRes = await fetch(`${apiBase}/session/${session.id}/prompt`, {
       method: "POST", headers: H, body: JSON.stringify({ text: prompt }),
     });
@@ -430,8 +512,8 @@ function kanbanDocs() {
     routes: [
       { method: "GET", path: "/api/kanban/tasks", query: "projectId?, status=backlog|running|done|blocked?", returns: "Task[]" },
       { method: "GET", path: "/api/kanban/tasks/:id", returns: "Task (404 when missing)" },
-      { method: "POST", path: "/api/kanban/tasks", body: "projectId*, title*, description?, status?, priority?, id?, agentId?, agentName?, sessionId?, modelId?, modelProviderID?, startupPhase?, startupError?", returns: "Task" },
-      { method: "PATCH", path: "/api/kanban/tasks/:id", body: "title?, description?, status?, priority?, agentId?, agentName?, sessionId?, modelId?, modelProviderID?, startupPhase?, startupError?", returns: "Task" },
+      { method: "POST", path: "/api/kanban/tasks", body: "projectId*, title*, description?, status?, priority?, id?, agentId?, agentName?, sessionId?, modelId?, modelProviderID?, startupPhase?, startupError?, parentSessionId?, result?, resultContext?", returns: "Task" },
+      { method: "PATCH", path: "/api/kanban/tasks/:id", body: "title?, description?, status?, priority?, agentId?, agentName?, sessionId?, modelId?, modelProviderID?, startupPhase?, startupError?, parentSessionId?, result?, resultContext?", returns: "Task" },
       { method: "DELETE", path: "/api/kanban/tasks/:id", returns: "{ok:true,deleted}" },
       { method: "GET", path: "/api/kanban/projects", returns: "Project[]" },
       { method: "POST", path: "/api/kanban/projects", body: "name*, folder?|path?, gitUrl?, gitBranch?, noMkdir?, description?, id?, agentIds[]?", returns: "Project" },
@@ -444,7 +526,7 @@ function kanbanDocs() {
       { method: "POST", path: "/api/kanban/clone", body: "url*, folder*, branch?", returns: "{ok:true,folder,path}" },
       { method: "GET", path: "/api/kanban/events", query: "task?, limit=50", returns: "Event[]" },
       { method: "GET|PUT", path: "/api/kanban/server", body: "PUT: url?, password? — stores OpenCode creds once so delegate needs no per-call password", returns: "{url, hasPassword}" },
-      { method: "POST", path: "/api/kanban/delegate", body: "projectId*, title*, description?, priority?, agentId?, agentName?, modelId?, modelProviderID?, serverUrl?, serverPassword?, timeoutSec?=600, pollMs?=3000, wait?=false — creates a subtask for a teammate and starts it NOW. Fire-and-forget by default (returns {task, sessionId, waited:false} immediately). Pass wait:true to block until done/blocked.", returns: "{task, sessionId, waited}" },
+      { method: "POST", path: "/api/kanban/delegate", body: "projectId*, title*, agentId*, description?, priority?, agentName?, modelId?, modelProviderID?, parentSessionId?, serverUrl?, serverPassword?, timeoutSec?=600, pollMs?=3000, wait?=false — creates a subtask for a teammate and starts it NOW. Fire-and-forget by default (returns {task, sessionId, waited:false} immediately). Pass wait:true to block until done/blocked.", returns: "{task, sessionId, waited}" },
       { method: "POST", path: "/api/kanban/message_to", body: "sessionId?|taskId?*, text*, timeoutSec?=120, pollMs?=1500 — follow-up in SAME subtask session (no new task). Waits for the next assistant message and returns {sessionId, taskId, resultText, resultTruncated}. Use after delegate.", returns: "{sessionId, taskId, resultText, resultTruncated, messageId, waited}" },
       { method: "GET", path: "/api/kanban/docs", returns: "try-it-out HTML page (?format=json → catalogue)" },
       { method: "GET", path: "/api/kanban/openapi.json", returns: "OpenAPI 3.0 spec" },
@@ -475,6 +557,9 @@ function kanbanOpenApi() {
       modelProviderID: { type: ["string", "null"] },
       startupPhase: { type: ["string", "null"] },
       startupError: { type: ["string", "null"] },
+      parentSessionId: { type: ["string", "null"] },
+      result: { type: ["string", "null"] },
+      resultContext: { type: ["string", "null"] },
       createdAt: { type: "string", format: "date-time" },
       updatedAt: { type: "string", format: "date-time" },
     },
@@ -529,7 +614,7 @@ function kanbanOpenApi() {
         },
         post: {
           summary: "Create task",
-          requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["projectId", "title"], properties: { projectId: { type: "string" }, title: { type: "string" }, description: { type: "string" }, status: { type: "string" }, priority: { type: "string" }, id: { type: "string" }, agentId: { type: "string" }, agentName: { type: "string" }, sessionId: { type: "string" }, modelId: { type: "string" }, modelProviderID: { type: "string" }, startupPhase: { type: "string" }, startupError: { type: "string" } } } } } },
+          requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["projectId", "title"], properties: { projectId: { type: "string" }, title: { type: "string" }, description: { type: "string" }, status: { type: "string" }, priority: { type: "string" }, id: { type: "string" }, agentId: { type: "string" }, agentName: { type: "string" }, sessionId: { type: "string" }, modelId: { type: "string" }, modelProviderID: { type: "string" }, startupPhase: { type: "string" }, startupError: { type: "string" }, parentSessionId: { type: "string" }, result: { type: "string" }, resultContext: { type: "string" } } } } } },
           responses: { 200: { description: "Task", content: { "application/json": { schema: taskSchema } } }, 400: { description: "projectId and title required", content: { "application/json": { schema: errSchema } } } },
         },
       },
@@ -542,7 +627,7 @@ function kanbanOpenApi() {
         patch: {
           summary: "Update task",
           parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-          requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: { title: { type: "string" }, description: { type: "string" }, status: { type: "string" }, priority: { type: "string" }, agentId: { type: "string" }, agentName: { type: "string" }, sessionId: { type: "string" }, modelId: { type: "string" }, modelProviderID: { type: "string" }, startupPhase: { type: "string" }, startupError: { type: "string" } } } } } },
+          requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: { title: { type: "string" }, description: { type: "string" }, status: { type: "string" }, priority: { type: "string" }, agentId: { type: "string" }, agentName: { type: "string" }, sessionId: { type: "string" }, modelId: { type: "string" }, modelProviderID: { type: "string" }, startupPhase: { type: "string" }, startupError: { type: "string" }, parentSessionId: { type: "string" }, result: { type: "string" }, resultContext: { type: "string" } } } } } },
           responses: { 200: { description: "Task", content: { "application/json": { schema: taskSchema } } }, 404: { description: "not found", content: { "application/json": { schema: errSchema } } } },
         },
         delete: {
@@ -621,7 +706,7 @@ function kanbanOpenApi() {
       "/api/kanban/delegate": {
         post: {
           summary: "Create + start a subtask for a teammate (fire-and-forget by default; wait:true blocks until done)",
-          requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["projectId", "title"], properties: { projectId: { type: "string" }, title: { type: "string" }, description: { type: "string" }, priority: { type: "string" }, agentId: { type: "string" }, agentName: { type: "string" }, modelId: { type: "string" }, modelProviderID: { type: "string" }, serverUrl: { type: "string" }, serverPassword: { type: "string" }, timeoutSec: { type: "integer", default: 600 }, pollMs: { type: "integer", default: 3000 }, wait: { type: "boolean", default: false } } } } } },
+          requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["projectId", "title", "agentId"], properties: { projectId: { type: "string" }, title: { type: "string" }, agentId: { type: "string" }, description: { type: "string" }, priority: { type: "string" }, agentName: { type: "string" }, modelId: { type: "string" }, modelProviderID: { type: "string" }, parentSessionId: { type: "string" }, result: { type: "string" }, resultContext: { type: "string" }, serverUrl: { type: "string" }, serverPassword: { type: "string" }, timeoutSec: { type: "integer", default: 600 }, pollMs: { type: "integer", default: 3000 }, wait: { type: "boolean", default: false } } } } } },
           responses: { 200: { description: "{task, sessionId, waited}", content: { "application/json": { schema: { type: "object" } } } } },
         },
       },
@@ -669,6 +754,7 @@ function kanbanApi() {
   return {
     name: "kanban-api",
     configureServer(server) {
+      startReconciler();
       // Before the "/api" proxy: /api/kanban/* is the local store,
       // everything else under /api still forwards to OpenCode :4096.
       server.middlewares.use("/api/kanban", async (req, res) => {
@@ -708,6 +794,9 @@ function kanbanApi() {
             if (b.modelProviderID) argv.push("--model-provider", b.modelProviderID);
             if (b.startupPhase) argv.push("--startup-phase", b.startupPhase);
             if (b.startupError !== undefined) argv.push("--startup-error", b.startupError || "");
+            if (b.parentSessionId !== undefined && b.parentSessionId !== null) argv.push("--parent-session-id", String(b.parentSessionId));
+            if (b.result !== undefined && b.result !== null) argv.push("--result", String(b.result));
+            if (b.resultContext !== undefined && b.resultContext !== null) argv.push("--result-context", String(b.resultContext));
             return json(res, 200, await cli(argv));
           }
           // PATCH /api/kanban/tasks/:id {title?,status?,...} → Task
@@ -721,6 +810,8 @@ function kanbanApi() {
               ["--session-id", "sessionId"], ["--model-id", "modelId"],
               ["--model-provider", "modelProviderID"],
               ["--startup-phase", "startupPhase"], ["--startup-error", "startupError"],
+              ["--parent-session-id", "parentSessionId"],
+              ["--result", "result"], ["--result-context", "resultContext"],
             ]) {
               if (b[key] !== undefined && b[key] !== null) argv.push(flag, String(b[key]));
             }
@@ -803,6 +894,14 @@ function kanbanApi() {
                 ...(err && err.sessionId ? { sessionId: err.sessionId } : {}),
               });
             }
+          }
+          // POST /api/kanban/tasks/:id/result {result*, resultContext?} → Task (dedicated result endpoint, does not touch description)
+          if (req.method === "POST" && parts[0] === "tasks" && parts.length === 3 && parts[2] === "result") {
+            const b = await readBody(req);
+            if (b.result == null) return json(res, 400, { ok: false, error: "result required" });
+            const argv = ["task", "update", parts[1], "--actor", "board", "--result", String(b.result)];
+            if (b.resultContext !== undefined && b.resultContext !== null) argv.push("--result-context", String(b.resultContext));
+            return json(res, 200, await cli(argv));
           }
           // POST /api/kanban/message_to {sessionId?|taskId?, text} → SYNC follow-up in SAME session
           if (req.method === "POST" && parts[0] === "message_to" && parts.length === 1) {

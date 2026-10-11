@@ -260,6 +260,9 @@ export default function App() {
     });
   };
 
+  // Auto-start guard: task ids with execution currently in flight.
+  const startingRef = useRef<Set<string>>(new Set());
+
   const handleDragEnd = async (event: DragEndEvent) => {
     setActiveTask(null);
     const { active, over } = event;
@@ -269,19 +272,11 @@ export default function App() {
     const newStatus = over.data.current?.status as TaskStatus;
 
     if (task && newStatus && task.status !== newStatus) {
-      // 1. Move instantly in UI, flag startup so the card shows progress.
-      if (newStatus === 'running') {
-        upsertTaskInState({ ...task, status: 'running', startupPhase: 'creating-session', startupError: undefined });
-      } else {
-        moveTaskInState(task.id, newStatus);
-      }
+      // Move instantly in UI; the auto-start watcher above picks up
+      // running and wires execution (single path for drag + external moves).
+      moveTaskInState(task.id, newStatus);
       try {
-        const movedTask = await moveTask(task.id, newStatus);
-
-        // If moving to running, wire task execution to the agent.
-        if (newStatus === 'running') {
-          startTaskExecution(movedTask ?? { ...task, status: newStatus });
-        }
+        await moveTask(task.id, newStatus);
       } catch (e) {
         console.error('move failed, reverting', e);
         moveTaskInState(task.id, task.status);
@@ -313,25 +308,40 @@ export default function App() {
         ? teamIds.map((id) => `- (id: ${id})`).join('\n')
         : '(no project team configured — all agents available)';
     const headerLines = [
-      'You are now executing this task autonomously. Complete it end-to-end — read the project, plan if needed, make the changes, and leave it in a working state. Ask the user only if blocked.',
-      projectName ? `Project: ${projectName}${projectPath ? ` (${projectPath})` : ''}` : undefined,
-      `Priority: ${prio}`,
-      `Task id: ${task.id}`,
-      `Project id: ${task.projectId}`,
-      assigned ? `Assigned agent: ${assigned.name} (id: ${assigned.id})` : undefined,
-      `Agent team for this project:\n${teamLines}`,
+      `# ${title}`,
+      '',
+      `**Project:** ${projectName ? `${projectName}${projectPath ? ` (${projectPath})` : ''}` : '(unknown)'}`,
+      `**Priority:** ${prio}`,
+      `**Task id:** ${task.id}`,
+      `**Project id:** ${task.projectId}`,
+      task.sessionId ? `**Your session id:** ${task.sessionId}` : undefined,
+      task.parentSessionId
+        ? `**Parent session:** ${task.parentSessionId} (the session that created this task — report back there if needed)`
+        : `**Parent session:** — (created directly by user/board)`,
+      assigned ? `**Assigned agent:** ${assigned.name} (id: ${assigned.id})` : undefined,
+      '',
+      `**Team for this project:**`,
+      teamLines,
+      '',
+      `## What to do`,
+      '',
+      desc,
+      '',
+      `## How to work`,
+      '',
+      `- Execute autonomously end-to-end: read the project, plan if needed, make the changes, leave it in a working state.`,
+      `- Ask the user only if blocked; keep the final message concise — it becomes the stored task result automatically.`,
+      `- No status update needed: the board follows your session outcome by itself (end → done, failure → blocked) and captures your last message as the result.`,
+      '',
+      `## Working with other tasks (optional)`,
+      '',
+      `- API base: http://localhost:3001/api (full spec: http://localhost:3001/api/kanban/docs).`,
+      `- Follow-up work: POST /api/kanban/tasks { "projectId": "${task.projectId}", "title": "...", "description": "...", "priority": "medium", "parentSessionId": "${task.sessionId ?? '<your session id>'}" }.`,
+      `- Delegate + WAIT for result (sync): POST /api/kanban/delegate { "projectId": "${task.projectId}", "title": "...", "description": "...", "agentId": "<teammate-id>", "parentSessionId": "${task.sessionId ?? '<your session id>'}" } → returns the finished Task.`,
+      `- Follow-up in the SAME subtask session: POST /api/kanban/message_to { "sessionId": "<from delegate>", "text": "..." } (or { "taskId": "<subtask-id>", "text": "..." }) → { sessionId, resultText }.`,
+      `- List work: GET /api/kanban/tasks?projectId=${task.projectId}.`,
     ].filter(Boolean).join('\n');
-    const footer =
-      `\n---\nAssume an agent system which uses tasks for sharing.\n` +
-      `There is http://localhost:3001/api (all available endpoints are described at http://localhost:3001/api/kanban/docs).\n` +
-      `When you are finished, call the HTTP endpoint PATCH http://localhost:3001/api/kanban/tasks/${task.id}` +
-      ` with body { "status": "done" } when complete, or { "status": "blocked" } if stuck.\n` +
-      `To break off follow-up work, POST to http://localhost:3001/api/kanban/tasks with { "projectId": "${task.projectId}", "title": "...", "description": "...", "priority": "medium" }.\n` +
-      `To delegate to a teammate and WAIT for the result (sync, like read/write): POST to http://localhost:3001/api/kanban/delegate with { "projectId": "${task.projectId}", "title": "...", "description": "...", "agentId": "<teammate-id from the team list above>" } — it creates the subtask, runs it immediately, and returns the finished Task (give the client a generous timeout).\n` +
-      `To ask a follow-up in the SAME subtask session (no new task): POST to http://localhost:3001/api/kanban/message_to with { "sessionId": "<sessionId from a delegate return>", "text": "your question" } — or { "taskId": "<subtask-id>", "text": "..." }. It waits for the next assistant message and returns { sessionId, resultText } — only the last message is relevant.\n` +
-      `To list/search work, GET http://localhost:3001/api/kanban/tasks?projectId=${task.projectId}.\n` +
-      `Do the status update as the last step — after all code changes are complete. The board refreshes from the store automatically.`;
-    return `${headerLines}\n\nTask: ${title}\n\nDescription: ${desc}${footer}`;
+    return headerLines;
   };
 
   const resolveAgentForTask = (task: Task): { id?: string; name?: string } => {
@@ -445,6 +455,37 @@ export default function App() {
       : cur));
   };
 
+  // Auto-start: ANY task sitting in running without an active startup
+  // gets executed — whether the user dragged it there or an agent flipped
+  // it via kanban_update_status/MCP/PATCH. Covers external moves the drag
+  // handler never sees (5s poll picks them up). In-flight guard prevents doubles.
+  // Skips error-phase cards so a failed start doesn't loop; chat icon retries.
+  // Belt-and-braces with the server: cmd_task_move/update reset startupPhase
+  // on every transition to running, so re-runs (done → backlog → running)
+  // look fresh here too — but a stale 'ready' row (server not restarted yet)
+  // is still picked up by also accepting ready-with-session below.
+  useEffect(() => {
+    const candidates = tasks.running.filter((t) => {
+      if (startingRef.current.has(t.id)) return false;
+      if (['creating-session', 'sending-prompt', 'error'].includes(t.startupPhase as string)) return false;
+      // Fresh (never started, or server reset on move): start.
+      if (!t.startupPhase) return true;
+      // Stale 'ready' re-run (pre-fix row): its updatedAt moved on the drag
+      // but no prompt was ever sent for this run. startTaskExecution resends
+      // the prompt into the existing session — safe, no duplicate session.
+      if (t.startupPhase === 'ready' && t.sessionId) return true;
+      return false;
+    });
+    if (candidates.length === 0) return;
+    for (const t of candidates) {
+      startingRef.current.add(t.id);
+      startTaskExecution(t).finally(() => {
+        startingRef.current.delete(t.id);
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tasks.running]);
+
   const handleOpenChat = (task: Task) => {
     if (task.sessionId) {
       setChatTask(task);
@@ -469,6 +510,8 @@ export default function App() {
     agentName?: string;
     modelId?: string;
     modelProviderID?: string;
+    result?: string;
+    resultContext?: string;
   }) => {
     if (!activeProjectId) return;
 
@@ -485,6 +528,8 @@ export default function App() {
           agentName: data.agentName,
           modelId: data.modelId,
           modelProviderID: data.modelProviderID,
+          result: data.result,
+          resultContext: data.resultContext,
         });
       } catch (e) {
         console.error('update failed', e);
@@ -576,6 +621,21 @@ export default function App() {
       const found = all.find((t) => t.sessionId === popoutSessionId);
       if (found) setChatTask(found);
     }).catch(() => { /* ignore */ });
+  }, [popoutSessionId]);
+
+  // Deep-link ?session=<id>: open that session's chat docked top-right.
+  useEffect(() => {
+    if (popoutSessionId || chatTask) return;
+    const sid = new URLSearchParams(window.location.search).get('session');
+    if (!sid) return;
+    getTasks().then((all) => {
+      const found = all.find((t) => t.sessionId === sid);
+      if (found) {
+        if (found.projectId !== activeProjectId) setActiveProjectId(found.projectId);
+        setChatTask(found);
+      }
+    }).catch(() => { /* ignore */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [popoutSessionId]);
 
   const handleSaveProject = async (data: { name: string; folder: string; description: string; gitUrl?: string; gitBranch?: string; mkdir?: boolean }) => {

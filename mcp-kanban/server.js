@@ -65,31 +65,65 @@ server.registerTool(
   {
     title: "Update kanban task status",
     description:
-      "Move a kanban task to a new status. Call with status 'done' when complete, 'blocked' if stuck. Writes directly to the shared SQLite store.",
+      "Move a kanban task to a new status. Call with status 'done' when complete, 'blocked' if stuck. Writes directly to the shared SQLite store. Prefer kanban_task_result for the answer; result/resultContext here are stored alongside the move. Do NOT rewrite the description.",
     inputSchema: {
       taskId: z.string().describe("Kanban task id (uuid, from the Task id in your prompt)"),
       status: z.enum(["backlog", "running", "done", "blocked"]).describe("New status"),
+      result: z.string().optional().describe("Task result — last assistant message + context (stored when done/blocked)"),
+      resultContext: z.string().optional().describe("Extra context for the result"),
     },
   },
-  async ({ taskId, status }) => toolResult(runCli(["task", "move", taskId, status, "--actor", "agent"]))
+  async ({ taskId, status, result, resultContext }) => {
+    const r = runCli(["task", "move", taskId, status, "--actor", "agent"]);
+    if (!r.ok) return toolResult(r);
+    if (result !== undefined || resultContext !== undefined) {
+      const argv = ["task", "update", taskId, "--actor", "agent"];
+      if (result !== undefined) argv.push("--result", result);
+      if (resultContext !== undefined) argv.push("--result-context", resultContext);
+      const u = runCli(argv);
+      if (u.ok) return toolResult(u);
+    }
+    return toolResult(r);
+  }
+);
+
+server.registerTool(
+  "kanban_task_result",
+  {
+    title: "Set kanban task result",
+    description:
+      "Optional. Store or override the board's visible result for a task (shown under the card). Normally the last assistant message becomes the result automatically — use this only when you need to set a different, corrected, or richer result than that fallback. Never write your answer into the description.",
+    inputSchema: {
+      taskId: z.string().describe("Kanban task id (uuid)"),
+      result: z.string().describe("Final answer / outcome summary — stored in the result field and shown on the board card"),
+      resultContext: z.string().optional().describe("Extra context for the result (sources, links, notes)"),
+    },
+  },
+  async ({ taskId, result, resultContext }) => {
+    const argv = ["task", "update", taskId, "--actor", "agent", "--result", result];
+    if (resultContext !== undefined) argv.push("--result-context", resultContext);
+    return toolResult(runCli(argv));
+  }
 );
 
 server.registerTool(
   "kanban_create_task",
   {
     title: "Create kanban task",
-    description: "Create a new task in a project's backlog. Returns the created task JSON including its uuid.",
+    description: "Create a new task in a project's backlog. Returns the created task JSON including its uuid. Pass parentSessionId when an agent session creates it (empty = user/board).",
     inputSchema: {
       projectId: z.string().describe("Project uuid the task belongs to"),
       title: z.string().describe("Task title"),
       description: z.string().optional().describe("Task description"),
       priority: z.enum(["low", "medium", "high", "critical"]).optional().describe("Priority (default medium)"),
+      parentSessionId: z.string().optional().describe("Parent session that creates this task (empty = user)"),
     },
   },
-  async ({ projectId, title, description, priority }) => {
+  async ({ projectId, title, description, priority, parentSessionId }) => {
     const argv = ["task", "create", "--project", projectId, "--title", title, "--actor", "agent"];
     if (description) argv.push("--description", description);
     if (priority) argv.push("--priority", priority);
+    if (parentSessionId) argv.push("--parent-session-id", parentSessionId);
     return toolResult(runCli(argv));
   }
 );
@@ -98,19 +132,21 @@ server.registerTool(
   "kanban_update_task",
   {
     title: "Update kanban task",
-    description: "Patch title/description/priority/agent/session fields of a task. Returns updated task JSON.",
+    description: "Patch a task's metadata (title/description/priority/parent-session). The description is the original task brief — do NOT overwrite it with your answer. Write your answer with kanban_task_result instead. Returns updated task JSON.",
     inputSchema: {
       taskId: z.string().describe("Kanban task id (uuid)"),
-      title: z.string().optional(),
-      description: z.string().optional(),
+      title: z.string().optional().describe("New title (renames the task)"),
+      description: z.string().optional().describe("Original task brief/requirements — only change when the requirements themselves change, never to store your result"),
       priority: z.enum(["low", "medium", "high", "critical"]).optional(),
+      parentSessionId: z.string().optional().describe("Parent session that created this task"),
     },
   },
-  async ({ taskId, title, description, priority }) => {
+  async ({ taskId, title, description, priority, parentSessionId }) => {
     const argv = ["task", "update", taskId, "--actor", "agent"];
     if (title !== undefined) argv.push("--title", title);
     if (description !== undefined) argv.push("--description", description);
     if (priority !== undefined) argv.push("--priority", priority);
+    if (parentSessionId !== undefined) argv.push("--parent-session-id", parentSessionId);
     if (argv.length <= 3) {
       return { content: [{ type: "text", text: "nothing to update" }], isError: true };
     }
@@ -170,10 +206,11 @@ server.registerTool(
       title: z.string().describe("Subtask title"),
       description: z.string().optional().describe("Subtask description / instructions for the teammate"),
       priority: z.enum(["low", "medium", "high", "critical"]).optional().describe("Priority (default medium)"),
-      agentId: z.string().optional().describe("Teammate agent id (must be in the project's team). Omit to use the project's first team member."),
+      agentId: z.string().describe("Teammate agent id (must be in the project's team). Required."),
       agentName: z.string().optional(),
       modelId: z.string().optional(),
       modelProviderID: z.string().optional(),
+      parentSessionId: z.string().optional().describe("Parent session delegating (creator of the subtask)"),
       timeoutSec: z.number().optional().describe("Max seconds to wait for done/blocked when wait:true (default 600, cap 1800)"),
       pollMs: z.number().optional().describe("Poll interval in ms when wait:true (default 3000)"),
       wait: z.boolean().optional().describe("When true, WAIT until done/blocked before returning. Default false (fire-and-forget)."),
@@ -184,6 +221,9 @@ server.registerTool(
     const title = args.title;
     const description = args.description || "";
     const priority = args.priority || "medium";
+    if (!args.agentId) {
+      return { content: [{ type: "text", text: "agentId required — pass a teammate agent id from the project's team (see project.agentIds)" }], isError: true };
+    }
     const timeout = Math.min(Math.max(Number(args.timeoutSec) || 600, 30), 1800);
     const interval = Math.min(Math.max(Number(args.pollMs) || 3000, 1000), 15000);
     const shouldWait = args.wait === true;
@@ -194,6 +234,7 @@ server.registerTool(
       ...(args.agentName ? ["--agent-name", args.agentName] : []),
       ...(args.modelId ? ["--model-id", args.modelId] : []),
       ...(args.modelProviderID ? ["--model-provider", args.modelProviderID] : []),
+      ...(args.parentSessionId ? ["--parent-session-id", args.parentSessionId] : []),
     ]);
     if (!created.ok) return { content: [{ type: "text", text: created.text }], isError: true };
     let tid;
@@ -202,7 +243,7 @@ server.registerTool(
     const moved = runCli(["task", "move", tid, "running", "--actor", "delegate"]);
     if (!moved.ok) return { content: [{ type: "text", text: moved.text }], isError: true };
 
-    // Need the project's working directory for session.location.
+    // Need the project's working directory for session.location (+ validate agent is on the team).
     let projectPath = "";
     try {
       const pj = runCli(["project", "list", "--json"]);
@@ -210,8 +251,14 @@ server.registerTool(
         const list = JSON.parse(pj.text);
         const row = Array.isArray(list) ? list.find((p) => p.id === projectId) : null;
         projectPath = row?.path || "";
+        const team = Array.isArray(row?.agentIds) ? row.agentIds : [];
+        if (team.length > 0 && args.agentId && !team.includes(args.agentId)) {
+          return { content: [{ type: "text", text: `agentId "${args.agentId}" is not on this project's team [${team.join(", ")}]` }], isError: true };
+        }
       }
     } catch { /* best-effort */ }
+    const resolvedAgentId = args.agentId || "";
+    const resolvedAgentName = args.agentName || "";
 
     const creds = loadMcpCreds();
     const base = (creds.url || "http://127.0.0.1:4099").replace(/\/+$/, "");
@@ -221,7 +268,7 @@ server.registerTool(
 
     try {
       const sessBody = {};
-      if (args.agentId || args.agentName) sessBody.agent = args.agentId || args.agentName;
+      if (resolvedAgentId || resolvedAgentName) sessBody.agent = resolvedAgentId || resolvedAgentName;
       if (args.modelId && args.modelProviderID) sessBody.model = { providerID: args.modelProviderID, id: args.modelId };
       if (projectPath) sessBody.location = { directory: projectPath };
       const sRes = await fetch(`${apiBase}/session`, { method: "POST", headers: H, body: JSON.stringify(sessBody) });
@@ -230,14 +277,14 @@ server.registerTool(
       const session = sJson?.data ?? sJson;
       if (!session?.id) throw new Error("session create returned no id");
       const upd = runCli(["task", "update", tid, "--actor", "delegate", "--session-id", session.id,
-        ...(args.agentId ? ["--agent-id", args.agentId] : []),
-        ...(args.agentName ? ["--agent-name", args.agentName] : []),
+        ...(resolvedAgentId ? ["--agent-id", resolvedAgentId] : []),
+        ...(resolvedAgentName ? ["--agent-name", resolvedAgentName] : []),
         "--startup-phase", "ready"]);
       void upd;
       const prompt =
-        `You are ${args.agentName || args.agentId || "a teammate"} executing a delegated subtask. Complete it end-to-end in ${projectPath || "the project"}.\n` +
-        `Task id: ${tid}\nProject id: ${projectId}\nTask: ${title}\nDescription: ${description || "(none)"}\n\n` +
-        `When finished, call kanban_update_status with { taskId: "${tid}", status: "done" } (or "blocked" if stuck). Fire-and-forget: the delegator already returned and will poll your status. Call kanban_task_heartbeat on your task id every couple of minutes with --progress so the watchdog sees you alive.`;
+        `You are ${resolvedAgentName || resolvedAgentId || "a teammate"} executing a delegated subtask. Complete it end-to-end in ${projectPath || "the project"}.\n` +
+        `Task id: ${tid}\nProject id: ${projectId}\nTask: ${title}\nDescription: ${description || "(none)"}\nSession id: ${session.id} (pass as parentSessionId when you create/delegate follow-up tasks).\n\n` +
+        `When finished, just write your final answer as the last assistant message — the board captures it as the task result automatically and follows the session outcome (completed→done, failed→blocked). Do NOT call kanban_update_status or PATCH the task status yourself. Never write your answer into the description. Fire-and-forget: the delegator already returned. Call kanban_task_heartbeat on your task id every couple of minutes with --progress so the watchdog sees you alive.`;
       const pRes = await fetch(`${apiBase}/session/${session.id}/prompt`, { method: "POST", headers: H, body: JSON.stringify({ text: prompt }) });
       if (!pRes.ok) throw new Error(`send prompt failed (HTTP ${pRes.status}) — ${(await pRes.text().catch(() => "")).slice(0, 300)}`);
 

@@ -160,7 +160,9 @@ export async function createTask(
   agentName?: string,
   sessionId?: string,
   modelId?: string,
-  modelProviderID?: string
+  modelProviderID?: string,
+  result?: string,
+  resultContext?: string
 ): Promise<Task> {
   const task = await api<Task>('/api/kanban/tasks', {
     method: 'POST',
@@ -168,6 +170,7 @@ export async function createTask(
       id: uuidv4(), projectId, title, description,
       status: 'backlog', priority,
       agentId, agentName, sessionId, modelId, modelProviderID,
+      result, resultContext,
     }),
   });
   mergeTaskCache(task);

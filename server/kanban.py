@@ -99,6 +99,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     heartbeat_at TEXT,
     expected_sec INTEGER,
     progress TEXT NOT NULL DEFAULT '',
+    parent_session_id TEXT,
+    result TEXT,
+    result_context TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -142,6 +145,9 @@ def get_conn(db_path: Path) -> sqlite3.Connection:
         ("heartbeat_at", "TEXT"),
         ("expected_sec", "INTEGER"),
         ("progress", "TEXT NOT NULL DEFAULT ''"),
+        ("parent_session_id", "TEXT"),
+        ("result", "TEXT"),
+        ("result_context", "TEXT"),
     ):
         if col not in cols:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {ddl}")
@@ -238,6 +244,9 @@ def row_to_task(r: sqlite3.Row) -> dict:
         "heartbeatAt": r["heartbeat_at"] if "heartbeat_at" in keys else None,
         "expectedSec": r["expected_sec"] if "expected_sec" in keys else None,
         "progress": r["progress"] if "progress" in keys and r["progress"] else "",
+        "parentSessionId": r["parent_session_id"] if "parent_session_id" in keys else None,
+        "result": r["result"] if "result" in keys else None,
+        "resultContext": r["result_context"] if "result_context" in keys else None,
         "createdAt": r["created_at"],
         "updatedAt": r["updated_at"],
     }
@@ -488,14 +497,18 @@ def cmd_task_create(args):
         """INSERT INTO tasks (id, project_id, title, description, status, priority,
                               agent_id, agent_name, session_id, model_id, model_provider_id,
                               startup_phase, startup_error, kind, heartbeat_at,
-                              expected_sec, progress,
+                              expected_sec, progress, parent_session_id,
+                              result, result_context,
                               created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (tid, args.project, args.title, args.description or "", status, priority,
          args.agent_id, args.agent_name, args.session_id,
          args.model_id, args.model_provider,
          args.startup_phase, args.startup_error, kind, ts if status == "running" else None,
-         expected, getattr(args, "progress", None) or "", ts, ts),
+         expected, getattr(args, "progress", None) or "",
+         getattr(args, "parent_session_id", None),
+         getattr(args, "result", None), getattr(args, "result_context", None),
+         ts, ts),
     )
     log_event(conn, tid, args.actor, "task.created",
               {"projectId": args.project, "title": args.title, "status": status})
@@ -549,6 +562,9 @@ def cmd_task_update(args):
         ("startup_phase", args.startup_phase), ("startup_error", args.startup_error),
         ("kind", getattr(args, "kind", None)),
         ("progress", getattr(args, "progress", None)),
+        ("parent_session_id", getattr(args, "parent_session_id", None)),
+        ("result", getattr(args, "result", None)),
+        ("result_context", getattr(args, "result_context", None)),
     ]
     for col, val in mapping:
         if val is not None:
@@ -565,6 +581,15 @@ def cmd_task_update(args):
         sets.append("status = ?")
         params.append(require_status(args.status))
         changes["status"] = args.status
+        # Same arming as cmd_task_move: status flips via update (drag =
+        # PATCH, MCP = task update) must reset the runner handshake too.
+        if args.status == "running" and args.startup_phase is None:
+            sets.append("startup_phase = ?")
+            params.append(None)
+            changes["startup_phase"] = None
+            sets.append("startup_error = ?")
+            params.append(None)
+            changes["startup_error"] = None
     if getattr(args, "expected_sec", None) is not None:
         try:
             sets.append("expected_sec = ?")
@@ -592,8 +617,16 @@ def cmd_task_move(args):
         fail(f"Task not found: {args.task_id}")
     status = require_status(args.status)
     old = row["status"]
-    conn.execute("UPDATE tasks SET status = ?, heartbeat_at = ?, updated_at = ? WHERE id = ?",
-                 (status, now_iso() if status == "running" else row["heartbeat_at"] if "heartbeat_at" in row.keys() else None, now_iso(), args.task_id))
+    # Arming: any transition TO running resets the runner handshake so the
+    # frontend watcher and the server reconciler see a fresh start. Without
+    # this, a re-run of a finished task (done → backlog → running) keeps the
+    # stale `ready` phase and execution never fires again.
+    if status == "running":
+        conn.execute("UPDATE tasks SET status = ?, heartbeat_at = ?, startup_phase = ?, startup_error = ?, updated_at = ? WHERE id = ?",
+                     (status, now_iso(), None, None, now_iso(), args.task_id))
+    else:
+        conn.execute("UPDATE tasks SET status = ?, heartbeat_at = ?, updated_at = ? WHERE id = ?",
+                     (status, row["heartbeat_at"] if "heartbeat_at" in row.keys() else None, now_iso(), args.task_id))
     log_event(conn, args.task_id, args.actor, "task.moved",
               {"from": old, "to": status, "comment": args.comment})
     conn.commit()
@@ -774,6 +807,9 @@ def main(argv=None):
     tc.add_argument("--kind", default=None, choices=("oneshot", "service"), help="Task kind: oneshot (must reach done, default) or service (npm run dev — running IS success)")
     tc.add_argument("--expected-sec", type=int, default=None, help="Stall timeout in seconds for oneshot (default 600). Ignored for service.")
     tc.add_argument("--progress", default=None, help="Free-text progress, e.g. 'step 3/10' or 'vite :5173 pid 1234'")
+    tc.add_argument("--parent-session-id", default=None, help="Parent session that created this task (empty = user/board)")
+    tc.add_argument("--result", default=None, help="Task result: last message + context on done/blocked")
+    tc.add_argument("--result-context", default=None, help="Extra context for the task result")
     tc.add_argument("--actor", default="cli")
     tc.set_defaults(func=cmd_task_create)
 
@@ -804,6 +840,9 @@ def main(argv=None):
     tu.add_argument("--kind", default=None, choices=("oneshot", "service"))
     tu.add_argument("--expected-sec", type=int, default=None)
     tu.add_argument("--progress", default=None)
+    tu.add_argument("--parent-session-id", default=None, help="Parent session that created this task (empty when created by user/board)")
+    tu.add_argument("--result", default=None)
+    tu.add_argument("--result-context", default=None)
     tu.add_argument("--actor", default="cli")
     tu.set_defaults(func=cmd_task_update)
 
