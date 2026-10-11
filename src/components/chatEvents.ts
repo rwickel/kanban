@@ -57,6 +57,27 @@ function str(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
+function providerErrorMessage(value: unknown): string | null {
+  if (!value) return null;
+  const error = typeof value === 'object' ? value as Payload : {};
+  const rawMessage = typeof value === 'string' ? value : str(error.message);
+  const statusMatch = rawMessage.match(/^\[(\d{3})\]:\s*(.*)$/s);
+  const status = statusMatch?.[1] || (typeof error.status === 'number' ? String(error.status) : '');
+  const body = statusMatch?.[2] || rawMessage;
+  let message = body;
+
+  try {
+    const parsed = JSON.parse(body) as Payload;
+    const nestedError = parsed.error && typeof parsed.error === 'object' ? parsed.error as Payload : undefined;
+    message = str(nestedError?.message) || str(parsed.message) || body;
+  } catch {
+    // Keep the provider message when it is not JSON.
+  }
+
+  if (!message) message = str(error.type) || 'The provider request failed.';
+  return `Provider error${status ? ` [${status}]` : ''}: ${message}`.slice(0, 2000);
+}
+
 /** One-line summary of a nested Code Mode subcall input — never raw JSON. */
 function summarizeCallInput(tool: string, input: Payload, full = false): string {
   const name = tool || 'call';
@@ -445,6 +466,13 @@ export function toChatMessage(raw: unknown): ChatMessage[] {
       return [{ id: `${id}-outcome`, kind: 'error', markdown: `Session ended: ${outcome}.` }];
     }
     return [];
+  }
+
+  // Provider failures can finish without content parts. Preserve the error
+  // before the empty-content guard so the chat explains the missing reply.
+  if (type === 'assistant' && m.error) {
+    const message = providerErrorMessage(m.error);
+    if (message) return [{ id: `${id}-error`, kind: 'error', markdown: message }];
   }
 
   // idle / compaction / agent-switched / ... without content: noise
