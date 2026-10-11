@@ -231,23 +231,29 @@ export function useSessionStream(sessionId: string | null, opts?: { taskAgentNam
           getSession(sessionId),
         ]);
         if (stopped || seq !== seqRef.current) return;
+        let sessOutcome = '';
         if (sess) {
           setSession(sess);
-          const sessOutcome = typeof (sess as Record<string, unknown>)?.outcome === 'string'
+          const so = typeof (sess as Record<string, unknown>)?.outcome === 'string'
             ? ((sess as Record<string, unknown>).outcome as string).toLowerCase()
             : null;
-          if (sessOutcome) setOutcome(sessOutcome);
+          if (so) { sessOutcome = so; setOutcome(so); }
         }
         if (list) {
           merge(list as unknown[]);
-          // Idle detection: last raw message type "idle" (or outcome
-          // interrupted/completed) means the agent parked — show closed,
-          // not live, so the Stop button swaps back to Send.
+          // Idle detection: server does not guarantee asc order (idle marker
+          // can arrive first), so scan the whole list + session outcome.
+          // Any idle/completed marker means the agent parked — show closed.
           const arr = Array.isArray(list) ? list : [];
-          const last = arr.length > 0 ? (arr[arr.length - 1] as Record<string, unknown>) : null;
-          const ltype = typeof last?.type === 'string' ? (last.type as string).toLowerCase() : '';
-          const outcomeVal = typeof last?.outcome === 'string' ? (last.outcome as string).toLowerCase() : '';
-          if (outcomeVal) setOutcome(outcomeVal);
+          let ltype = '';
+          let outcomeVal = sessOutcome || '';
+          for (const m of arr) {
+            const r = m as Record<string, unknown>;
+            const t = typeof r?.type === 'string' ? (r.type as string).toLowerCase() : '';
+            if (t === 'idle') ltype = 'idle';
+            const o = typeof r?.outcome === 'string' ? (r.outcome as string).toLowerCase() : '';
+            if (o) { outcomeVal = o; setOutcome(o); }
+          }
           const idleLike = ltype === 'idle' || ['interrupted', 'completed', 'succeeded', 'done', 'success', 'aborted', 'failed', 'error'].includes(outcomeVal);
           setStatus(idleLike ? 'closed' : 'live');
         }
@@ -276,11 +282,15 @@ export function useSessionStream(sessionId: string | null, opts?: { taskAgentNam
               if (s2) setSession(s2);
               if (list) {
                 merge(list as unknown[]);
-                const arr = Array.isArray(list) ? list : [];
-                const last = arr.length > 0 ? (arr[arr.length - 1] as Record<string, unknown>) : null;
-                const ltype = typeof last?.type === 'string' ? (last.type as string).toLowerCase() : '';
-                const outcome = typeof last?.outcome === 'string' ? (last.outcome as string).toLowerCase() : '';
-                const idleLike = ltype === 'idle' || ['interrupted', 'completed', 'succeeded', 'success', 'aborted', 'done'].includes(outcome);
+                let ltype2 = '';
+                let outcome2 = '';
+                for (const m2 of Array.isArray(list) ? (list as unknown as Record<string, unknown>[]) : []) {
+                  const t2 = typeof (m2 as Record<string, unknown>)?.type === 'string' ? ((m2 as Record<string, unknown>).type as string).toLowerCase() : '';
+                  if (t2 === 'idle') ltype2 = 'idle';
+                  const o2 = typeof (m2 as Record<string, unknown>)?.outcome === 'string' ? ((m2 as Record<string, unknown>).outcome as string).toLowerCase() : '';
+                  if (o2) outcome2 = o2;
+                }
+                const idleLike = ltype2 === 'idle' || ['interrupted', 'completed', 'succeeded', 'success', 'aborted', 'done'].includes(outcome2);
                 setStatus(idleLike ? 'closed' : 'live');
               }
             }).catch(() => {});
