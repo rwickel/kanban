@@ -191,13 +191,8 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
   };
 
   const handleClose = async () => {
-    // Fully close: stop the agent if running and discard the stored session
-    // so the next open starts fresh — not just hidden in the background.
-    if (sessionId && (status === 'live' || status === 'connecting')) {
-      try { await interruptSession(sessionId); } catch {}
-    }
-    try { localStorage.removeItem(storageKey(project.id)); } catch {}
-    setSessionId(null);
+    // Hide only: keep the stored session id so reopen resumes the same
+    // chat. A fresh session starts only via "+" (handleNewChat).
     onClose();
   };
 
@@ -295,7 +290,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
               {sessionId && (
                 <button onClick={handleNewChat} className="btn p-1.5" title="New assistant chat"><Plus className="w-3.5 h-3.5" strokeWidth={1.75} /></button>
               )}
-              <button onClick={handleClose} className="btn p-1.5" title="Close — stop agent and end chat"><X className="w-3.5 h-3.5" strokeWidth={1.75} /></button>
+              <button onClick={handleClose} className="btn p-1.5" title="Close — chat stays, reopen resumes"><X className="w-3.5 h-3.5" strokeWidth={1.75} /></button>
             </div>
           </div>
           {/* Agent + model pickers — changing resets session so next send uses new picks */}

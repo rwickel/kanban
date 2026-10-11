@@ -5,7 +5,7 @@ import { testConnection } from '../api/opencode';
 interface ServerConfigModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onConnected: () => void;
+  onConnected: () => void | Promise<void>;
 }
 
 export default function ServerConfigModal({ isOpen, onClose, onConnected }: ServerConfigModalProps) {
@@ -42,51 +42,35 @@ export default function ServerConfigModal({ isOpen, onClose, onConnected }: Serv
   };
 
   const handleSave = async () => {
-    // Test first (server-side), then persist server-side + connect.
+    // Single save path: persist server-side, then test and reflect state.
     setTesting(true);
     setResult(null);
-    const r = await testConnection(url.trim(), password);
-    setResult(r);
-    setTesting(false);
-    if (r.ok) {
-      saveServerConfig({ url: url.trim() });
-      // Persist server-side only — the browser never keeps the password.
-      try {
-        await fetch('/api/kanban/server', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: url.trim(), password }),
-        });
-      } catch { /* offline — delegate falls back to env */ }
-      setPassword('');
-      onConnected();
-      onClose();
-    }
-  };
-
-  const handleSaveOnly = () => {
     saveServerConfig({ url: url.trim() });
+    // Persist server-side only — the browser never keeps the password.
     try {
-      fetch('/api/kanban/server', {
+      await fetch('/api/kanban/server', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: url.trim(), password }),
-      }).catch(() => {});
-    } catch { /* offline */ }
+      });
+    } catch { /* offline — delegate falls back to env */ }
+    const r = await testConnection(url.trim(), password);
+    setResult(r);
+    setTesting(false);
     setPassword('');
-    onConnected();
-    onClose();
+    await onConnected();
+    if (r.ok) onClose();
   };
 
-  const handleDisconnect = () => {
+  const handleDisconnect = async () => {
     try {
-      fetch('/api/kanban/server', {
+      await fetch('/api/kanban/server', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: '' }),
-      }).catch(() => {});
+      });
     } catch { /* offline */ }
-    onConnected();
+    await onConnected();
     onClose();
   };
 
@@ -102,6 +86,7 @@ export default function ServerConfigModal({ isOpen, onClose, onConnected }: Serv
           </div>
           <button
             onClick={onClose}
+            aria-label="Close"
             className="p-1.5 rounded-lg hover:bg-gray-700 text-gray-400 hover:text-white transition-colors"
           >
             <X className="w-5 h-5" />
@@ -143,6 +128,7 @@ export default function ServerConfigModal({ isOpen, onClose, onConnected }: Serv
               />
               <button
                 type="button"
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
                 onClick={() => setShowPassword(!showPassword)}
                 className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-700 transition-colors"
               >
@@ -197,16 +183,9 @@ export default function ServerConfigModal({ isOpen, onClose, onConnected }: Serv
               onClick={handleSave}
               disabled={testing || !url.trim()}
               className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-purple-600 text-white text-sm font-medium hover:from-violet-500 hover:to-purple-500 transition-all shadow-lg shadow-violet-500/20 disabled:opacity-50"
+              title="Save and test the connection"
             >
               {testing && <Loader2 className="w-4 h-4 animate-spin" />}
-              Save & Connect
-            </button>
-            <button
-              onClick={handleSaveOnly}
-              disabled={testing || !url.trim()}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-gray-700 text-gray-300 hover:bg-gray-800 text-sm font-medium transition-colors disabled:opacity-50"
-              title="Save without testing the connection"
-            >
               Save
             </button>
           </div>

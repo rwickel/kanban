@@ -25,16 +25,46 @@ function lsSet(key: string, value: unknown): void {
   } catch { /* ignore */ }
 }
 
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...init,
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err?.error || `kanban API ${res.status} on ${path}`);
+async function api<T>(path: string, init?: RequestInit, timeoutMs = 10000): Promise<T> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(path, {
+      headers: { 'Content-Type': 'application/json' },
+      ...init,
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(err?.error || `kanban API ${res.status} on ${path}`);
+    }
+    markServerUp();
+    return res.json() as Promise<T>;
+  } catch (e) {
+    // Network error or abort → server likely down. Track for backoff.
+    if (e instanceof TypeError || (e as Error)?.name === 'AbortError') markServerDown();
+    throw e;
+  } finally {
+    clearTimeout(timer);
   }
-  return res.json() as Promise<T>;
+}
+
+// ---- server health + poll backoff (stops console spam when Vite is down) ----
+let consecutiveFailures = 0;
+function markServerUp(): void {
+  consecutiveFailures = 0;
+}
+function markServerDown(): void {
+  consecutiveFailures++;
+}
+/** True after 2+ consecutive network failures. Resets on next success. */
+export function isServerDown(): boolean {
+  return consecutiveFailures >= 2;
+}
+/** Poll delay: 5s healthy, doubling per failure up to 60s. */
+export function pollDelayMs(baseMs = 5000, maxMs = 60000): number {
+  if (consecutiveFailures <= 0) return baseMs;
+  return Math.min(baseMs * 2 ** (consecutiveFailures - 1), maxMs);
 }
 
 // ---- cache helpers (offline fallback only) ----

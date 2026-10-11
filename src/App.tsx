@@ -32,6 +32,8 @@ import {
   deleteTask,
   moveTask,
   migrateLocalStorageToServer,
+  isServerDown,
+  pollDelayMs,
 } from './store/kanban';
 import { fetchAgents, createSession, sendPrompt, getServerInfo } from './api/opencode';
 import { getTaskModelPref } from './store/serverConfig';
@@ -214,11 +216,20 @@ export default function App() {
     });
 
     // Option B: MCP writes straight to SQLite — just refresh from the store.
-    // 5s covers agent-side create/move/update without hammering the CLI.
-    const refreshTimer = setInterval(() => {
-      loadData().catch(() => { /* server down — next tick retries */ });
-    }, 5000);
-    return () => clearInterval(refreshTimer);
+    // Backoff: 5s healthy, doubling per failure up to 60s so a dead
+    // server doesn't spam the console with ERR_CONNECTION_REFUSED.
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      if (stopped) return;
+      loadData()
+        .catch(() => { /* server down — backoff retries */ })
+        .finally(() => {
+          if (!stopped) timer = setTimeout(tick, pollDelayMs());
+        });
+    };
+    timer = setTimeout(tick, pollDelayMs());
+    return () => { stopped = true; clearTimeout(timer); };
   }, [loadData, loadAgents]);
 
   // Active project
