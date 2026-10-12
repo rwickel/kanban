@@ -6,12 +6,19 @@
 import { useEffect, useRef, useState } from 'react';
 import { X, Send, Loader2, Copy, Check, RefreshCw, Plus, Download, Square } from 'lucide-react';
 import { Agent, OpenCodeModelInfo, Project } from '../types';
-import { createSession, sendPrompt, interruptSession, fetchModels } from '../api/opencode';
+import { sendPrompt, interruptSession, fetchModels } from '../api/opencode';
 import { useSessionStream } from '../hooks/useSessionStream';
 import { STATUS_DOT, ThinkingBlock, ToolRow, ChatBubble, ChatErrorRow } from './ChatFeed';
 import { chatToMarkdown, ChatMessage } from './chatEvents';
 import FilePreviewModal from './FilePreviewModal';
-import { getTaskModelPref } from '../store/serverConfig';
+import {
+  clearAssistantSession,
+  ensureAssistantSession,
+  readAssistantAgentPref,
+  readAssistantModelPref,
+  readAssistantSessionId,
+  saveAssistantPrefs,
+} from '../store/assistantSession';
 
 interface AssistantChatWindowProps {
   project: Project | null;
@@ -19,31 +26,18 @@ interface AssistantChatWindowProps {
   onClose: () => void;
 }
 
-const STORAGE_PREFIX = 'kanban_assistant_session_';
-const AGENT_PREFIX = 'kanban_assistant_agent_';
-const MODEL_PREFIX = 'kanban_assistant_model_';
-
-function storageKey(projectId: string) {
-  return `${STORAGE_PREFIX}${projectId}`;
-}
-
 export default function AssistantChatWindow({ project, availableAgents, onClose }: AssistantChatWindowProps) {
   const [sessionId, setSessionId] = useState<string | null>(() => {
     if (!project) return null;
-    try { return localStorage.getItem(storageKey(project.id)); } catch { return null; }
+    return readAssistantSessionId(project.id);
   });
   const [selectedAgentId, setSelectedAgentId] = useState<string>(() => {
     if (!project) return '';
-    try { return localStorage.getItem(`${AGENT_PREFIX}${project.id}`) || ''; } catch { return ''; }
+    return readAssistantAgentPref(project.id);
   });
   const [selectedModel, setSelectedModel] = useState<string>(() => {
     if (!project) return '';
-    try {
-      const stored = localStorage.getItem(`${MODEL_PREFIX}${project.id}`);
-      if (stored) return stored;
-      const pref = getTaskModelPref();
-      return pref ? `${pref.providerID}/${pref.modelID}` : '';
-    } catch { return ''; }
+    return readAssistantModelPref(project.id);
   });
   const [models, setModels] = useState<OpenCodeModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -73,12 +67,9 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
 
   useEffect(() => {
     if (!project) return;
-    try {
-      setSessionId(localStorage.getItem(storageKey(project.id)));
-      setSelectedAgentId(localStorage.getItem(`${AGENT_PREFIX}${project.id}`) || '');
-      const storedModel = localStorage.getItem(`${MODEL_PREFIX}${project.id}`);
-      if (storedModel) setSelectedModel(storedModel);
-    } catch { setSessionId(null); }
+    setSessionId(readAssistantSessionId(project.id));
+    setSelectedAgentId(readAssistantAgentPref(project.id));
+    setSelectedModel(readAssistantModelPref(project.id));
     loadModels();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project?.id]);
@@ -101,8 +92,10 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
   if (!project) return null;
   const st = STATUS_DOT[status];
 
-  const busy = status === 'live' || status === 'connecting' || stopping || interrupted ||
-    messages.some((m) => m.kind === 'tool' && m.tool && !['executed', 'completed', 'error'].includes((m.tool.status || '').toLowerCase()));
+  // "Busy" means the composer is locked. Only a genuinely live stream
+  // should do that — a stale tool row must not lock the input forever.
+  const streamActive = status === 'live' || status === 'connecting';
+  const busy = streamActive || stopping || interrupted;
 
   const onHandlePointerDown = (e: React.PointerEvent) => {
     draggingRef.current = true;
@@ -130,24 +123,13 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
     window.addEventListener('pointerup', onUp);
   };
 
-  const persistPrefs = (agentId?: string, model?: string) => {
-    try {
-      const a = agentId !== undefined ? agentId : selectedAgentId;
-      const m = model !== undefined ? model : selectedModel;
-      if (a) localStorage.setItem(`${AGENT_PREFIX}${project.id}`, a);
-      else localStorage.removeItem(`${AGENT_PREFIX}${project.id}`);
-      if (m) localStorage.setItem(`${MODEL_PREFIX}${project.id}`, m);
-      else localStorage.removeItem(`${MODEL_PREFIX}${project.id}`);
-    } catch {}
-  };
-
   // Changing agent/model always works: with an active session it starts a
   // fresh chat so the next send uses the new picks (session pins them at create).
   const handleAgentChange = (v: string) => {
     setSelectedAgentId(v);
-    persistPrefs(v, undefined);
+    saveAssistantPrefs(project.id, v, selectedModel);
     if (sessionId) {
-      try { localStorage.removeItem(storageKey(project.id)); } catch {}
+      clearAssistantSession(project.id);
       setSessionId(null);
       setInterrupted(false);
       setSendError(null);
@@ -157,9 +139,9 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
 
   const handleModelChange = (v: string) => {
     setSelectedModel(v);
-    persistPrefs(undefined, v);
+    saveAssistantPrefs(project.id, selectedAgentId, v);
     if (sessionId) {
-      try { localStorage.removeItem(storageKey(project.id)); } catch {}
+      clearAssistantSession(project.id);
       setSessionId(null);
       setInterrupted(false);
       setSendError(null);
@@ -171,29 +153,30 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
     if (sessionId) return sessionId;
     setCreating(true);
     setCreateError(null);
-    const directory = project.path?.trim() || undefined;
-    const agent = selectedAgentId || undefined;
-    const [providerID, ...rest] = (selectedModel || '').split('/');
-    const modelID = rest.join('/');
-    const model = providerID && modelID ? { providerID, id: modelID } : undefined;
-    persistPrefs(selectedAgentId, selectedModel);
-    const res = await createSession({ title: `Board assistant — ${project.name}`, agent, model, directory });
+    saveAssistantPrefs(project.id, selectedAgentId, selectedModel);
+    const res = await ensureAssistantSession(project, { agentId: selectedAgentId, model: selectedModel });
     setCreating(false);
-    if (!res.session?.id) {
+    if (!res.id) {
       setCreateError(res.error ?? 'Failed to create assistant session.');
       return null;
     }
-    const id = res.session.id;
-    setSessionId(id);
-    try { localStorage.setItem(storageKey(project.id), id); } catch {}
-    return id;
+    setSessionId(res.id);
+    return res.id;
   };
+
+  // Open the chat → create the session right away so the id is visible in
+  // the header and can be passed as parentSessionId on the first message.
+  useEffect(() => {
+    if (!project || sessionId) return;
+    void ensureSession();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.id, sessionId, selectedAgentId, selectedModel]);
 
   const handleNewChat = async () => {
     if (sessionId && (status === 'live' || status === 'connecting')) {
       try { await interruptSession(sessionId); } catch {}
     }
-    try { localStorage.removeItem(storageKey(project.id)); } catch {}
+    clearAssistantSession(project.id);
     setSessionId(null);
     setInterrupted(false);
     setInput('');
@@ -268,10 +251,14 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
   const agentName = selectedAgent?.name || sessionAgent || 'Board assistant';
   const modelHint = selectedModel || undefined;
   const msgCount = messages.length;
+  // Welcome copy describes what the link-back actually does (Option B ledger):
+  // the board notifier queues a finished task's result into this chat on its
+  // own. The user never has to move a session id by hand.
+  const who = `${selectedAgent?.name || sessionAgent || 'assistant'} · ${selectedModel || 'server default'}`;
   const welcomeMsg: ChatMessage = {
     id: 'welcome',
     kind: 'assistant',
-    markdown: `Hi, I am your board assistant for ${project.name} (${selectedAgent?.name || sessionAgent || 'assistant'} · ${selectedModel || 'server default'}). Ask anything about this project. This chat stays in its own session — no task is created on the board.`,
+    markdown: `Board assistant for ${project.name} (${who}). Ask about the board or delegate work. Finished tasks report back here.`,
   };
 
   return (

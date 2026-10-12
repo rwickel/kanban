@@ -21,6 +21,9 @@ export interface Task {
   /** Last assistant message + context written on done/blocked (or at any time) */
   result?: string | null;
   resultContext?: string | null;
+  /** Delivery ledger: ISO timestamp when the finished result was queued back
+   *  into the parent session (null = not yet delivered, keep retrying). */
+  notifiedAt?: string | null;
   projectId: string;
   createdAt: string;
   updatedAt: string;

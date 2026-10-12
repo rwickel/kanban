@@ -121,11 +121,12 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
   if (!task) return null;
   const st = STATUS_DOT[status];
 
-  // A session is "busy" while the SSE/poll feed says live or the last
-  // assistant row still carries a non-completed tool (shell stuck, etc.).
-  const busy = status === 'live' || status === 'connecting' || stopping || interrupted || messages.some(
-    (m) => m.kind === 'tool' && m.tool && !['executed', 'completed', 'error'].includes((m.tool.status || '').toLowerCase())
-  );
+  // "Busy" means the composer is locked. Only a genuinely live stream
+  // should do that. A stale tool row (status never flipped to
+  // executed/completed) must NOT lock the input after the session
+  // closed — that is what makes a finished chat look running forever.
+  const streamActive = status === 'live' || status === 'connecting';
+  const busy = streamActive || stopping || interrupted;
 
   const handleStop = async () => {
     if (!sessionId || stopping) return;

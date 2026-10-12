@@ -8,6 +8,12 @@ import { fileURLToPath } from "node:url";
 import { readFileSync, existsSync, promises as fsp } from "node:fs";
 import { resolve as resolvePath, relative as relativePath, dirname as dirnamePath, sep as sepPath } from "node:path";
 import { loadEnvFile } from "./scripts/env.mjs";
+import {
+  LINKBACK_CAP_PER_PARENT,
+  linkbackEnabled,
+  groupPending,
+  planDeliveries,
+} from "./scripts/linkback.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -78,9 +84,11 @@ function startReconciler() {
   if (reconcileTimer) return;
   reconcileTimer = setInterval(() => {
     reconcileRunning().catch(() => {});
+    deliverResultsToParents().catch(() => {});
   }, 15000);
   // First pass shortly after boot.
   setTimeout(() => reconcileRunning().catch(() => {}), 8000);
+  setTimeout(() => deliverResultsToParents().catch(() => {}), 20000);
 }
 async function reconcileRunning() {
   if (reconcileBusy) return;
@@ -133,6 +141,67 @@ async function reconcileRunning() {
     }
   } finally {
     reconcileBusy = false;
+  }
+}
+
+// ---- Result link-back: push finished task results into the parent session ----
+// The reconciler above flips running → done/blocked. This second half of the
+// tick delivers the outcome to the parent that delegated the work, grouped by
+// parent, queued via the session inbox so a busy chat is NOT interrupted
+// mid-answer (verified live: POST /prompt { delivery:"queue" } → 200, item
+// shows as type:"user" in the message feed, cancel is a 204 no-op when gone).
+//
+// The data is the ledger: notify-pending finds done/blocked + parent + NULL
+// notified_at; notify-mark (batched ids, single subprocess) stamps delivered
+// ONLY after the queue POST 2xx'd, so a failed POST retries next pass and a
+// restart loses nothing. wait:true callers stamp at return time (see
+// delegateTask) so they never get the same result twice.
+//
+// Guards: self-parent (task's parent is its own session) and STATUS-only
+// (backlog/running don't deliver). Toggle: KANBAN_RESULT_LINKBACK=0 disables.
+//
+// Every finished run costs its parent one model pass — that's the documented
+// price of "results link back to this chat".
+let deliverBusy = false;
+
+async function deliverResultsToParents() {
+  // Pure rules live in scripts/linkback.mjs (unit tested) — here is only I/O.
+  if (!linkbackEnabled(process.env.KANBAN_RESULT_LINKBACK) || deliverBusy) return;
+  deliverBusy = true;
+  try {
+    const pending = await cli(["task", "notify-pending", "--limit", "50"]).catch(() => []);
+    const rows = Array.isArray(pending) ? pending : [];
+    if (rows.length === 0) return;
+    const { byParent, selfIds } = groupPending(rows);
+    if (selfIds.length) {
+      // Self-parented and parentless rows can never be delivered — stamp them
+      // every pass so the scan stays clean even when mixed with live rows.
+      await cli(["task", "notify-mark", ...selfIds, "--actor", "notifier"]).catch(() => null);
+    }
+    const plan = planDeliveries(byParent, LINKBACK_CAP_PER_PARENT);
+    const apiBase = ocApiBase();
+    const H = ocAuthHeaders();
+    for (const { parent, text, ids } of plan.values()) {
+      if (ids.length === 0) continue;
+      try {
+        const pRes = await fetch(`${apiBase}/session/${encodeURIComponent(parent)}/prompt`, {
+          method: "POST",
+          headers: H,
+          body: JSON.stringify({ text, delivery: "queue" }),
+        });
+        if (!pRes.ok) {
+          // 404 = parent session pruned: stamp so we stop retrying a dead id.
+          // Anything else (502, socket reset): leave NULL, retry next pass.
+          if (pRes.status === 404) {
+            await cli(["task", "notify-mark", ...ids, "--actor", "notifier"]).catch(() => null);
+          }
+          continue;
+        }
+        await cli(["task", "notify-mark", ...ids, "--actor", "notifier"]).catch(() => null);
+      } catch { /* network down — stays NULL, retries next pass */ }
+    }
+  } finally {
+    deliverBusy = false;
   }
 }
 
@@ -390,6 +459,12 @@ async function delegateTask(opts) {
       await sleep(interval);
       const cur = await cli(["task", "show", tid]);
       if (cur.status === "done" || cur.status === "blocked") {
+        // wait:true hands the result back to THIS caller as the tool return, so
+        // it is already in the parent's context — stamp it delivered or the
+        // notifier would push the same result into the parent a second time.
+        if (parentSessionId) {
+          await cli(["task", "notify-mark", tid, "--actor", "delegate"]).catch(() => null);
+        }
         return { task: cur, sessionId: session.id, waited: true };
       }
       if (Date.now() >= deadline) {

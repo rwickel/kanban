@@ -1,4 +1,4 @@
-import { OpenCodeAgentInfo, OpenCodeModelInfo, OpenCodeSessionInfo } from '../types';
+import type { OpenCodeAgentInfo, OpenCodeModelInfo, OpenCodeSessionInfo } from '../types';
 
 // Browser never holds the OpenCode password. All OpenCode traffic goes
 // through Vite's /api/kanban/oc/* proxy, which injects Basic auth server-side
@@ -185,6 +185,84 @@ export async function sendPrompt(
   } catch (error) {
     console.error('Error sending prompt:', error);
     return { ok: false, error: `network error — is the OpenCode server running at ${baseUrl()}?` };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Session instruction entries (board assistant preamble).
+//
+// Path + payload confirmed live against https://opencode.ai/v2/openapi.json
+// and a real `opencode serve` on 2026-10-13 (see plans/board-assistant-preamble-plan.md,
+// "Step 1 decision log"):
+//   PUT    /api/experimental/session/{id}/instructions/entries/{key}  → 204
+//          body { "value": <string> }   ← `value`, NOT `content`/`text` (those 400)
+//   GET    /api/experimental/session/{id}/instructions/entries        → { data: [{ key, value }] }
+//   DELETE /api/experimental/session/{id}/instructions/entries/{key}  → 204
+// The plain `/api/session/...` variant 404s. Errors: 400 / 401 / 404 /
+// 413 (InstructionEntryValueTooLargeError).
+// NOTE: the board result-capture cap (vite.config.js capResult, 4000 chars)
+// is deliberately NOT applied here — it would truncate the preamble itself.
+// ---------------------------------------------------------------------------
+
+function instructionsUrl(sessionId: string, key?: string): string {
+  const base = `${baseUrl()}/experimental/session/${encodeURIComponent(sessionId)}/instructions/entries`;
+  return key ? `${base}/${encodeURIComponent(key)}` : base;
+}
+
+/** Attach or replace one durable instruction entry. Never throws.
+ *  Bounded by a 5s timeout so a hung socket can't stall session creation. */
+export async function putSessionInstruction(
+  sessionId: string,
+  key: string,
+  value: string
+): Promise<{ ok: boolean; status?: number; error?: string }> {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    try {
+      const res = await fetch(instructionsUrl(sessionId, key), {
+        method: 'PUT',
+        headers: headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ value }),
+        signal: ctrl.signal,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        console.error(`putSessionInstruction(${key}) failed:`, res.status, text.slice(0, 200));
+        return { ok: false, status: res.status, error: `HTTP ${res.status} — ${text.slice(0, 200)}` };
+      }
+      return { ok: true, status: res.status };
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (error) {
+    console.error('Error writing session instruction:', error);
+    return { ok: false, error: String(error) };
+  }
+}
+
+/** Read one instruction entry by key. The spec has no single-key GET
+ *  (list path GETs, key path PUT/DELETEs), so list and find. Returns null
+ *  when absent or unreadable. */
+export async function getSessionInstruction(
+  sessionId: string,
+  key: string
+): Promise<string | null> {
+  try {
+    const res = await fetch(instructionsUrl(sessionId), { headers: headers() });
+    if (!res.ok) return null;
+    const json = await res.json();
+    // Envelope is { data: [{ key, value }] } — find our key.
+    const list = unwrapData<unknown>(json);
+    if (!Array.isArray(list)) return null;
+    const entry = list.find(
+      (e) => e && typeof e === 'object' && (e as { key?: string }).key === key
+    );
+    const value = (entry as { value?: unknown } | undefined)?.value;
+    return typeof value === 'string' ? value : null;
+  } catch (error) {
+    console.error('Error reading session instruction:', error);
+    return null;
   }
 }
 

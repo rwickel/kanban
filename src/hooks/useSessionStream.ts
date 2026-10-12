@@ -221,6 +221,10 @@ export function useSessionStream(sessionId: string | null, opts?: { taskAgentNam
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let unsub: (() => void) | undefined;
+    // Failures don't throw (the API helpers return null instead), so count
+    // consecutive misses — after 2 in a row show error instead of spinning
+    // on "connecting"/"live" forever.
+    let missCount = 0;
 
     const poll = async () => {
       if (stopped) return;
@@ -231,31 +235,48 @@ export function useSessionStream(sessionId: string | null, opts?: { taskAgentNam
           getSession(sessionId),
         ]);
         if (stopped || seq !== seqRef.current) return;
-        let sessOutcome = '';
-        if (sess) {
-          setSession(sess);
-          const so = typeof (sess as Record<string, unknown>)?.outcome === 'string'
-            ? ((sess as Record<string, unknown>).outcome as string).toLowerCase()
-            : null;
-          if (so) { sessOutcome = so; setOutcome(so); }
-        }
-        if (list) {
-          merge(list as unknown[]);
-          // Idle detection: server does not guarantee asc order (idle marker
-          // can arrive first), so scan the whole list + session outcome.
-          // Any idle/completed marker means the agent parked — show closed.
-          const arr = Array.isArray(list) ? list : [];
-          let ltype = '';
-          let outcomeVal = sessOutcome || '';
-          for (const m of arr) {
-            const r = m as Record<string, unknown>;
-            const t = typeof r?.type === 'string' ? (r.type as string).toLowerCase() : '';
-            if (t === 'idle') ltype = 'idle';
-            const o = typeof r?.outcome === 'string' ? (r.outcome as string).toLowerCase() : '';
-            if (o) { outcomeVal = o; setOutcome(o); }
+        if (list === null) {
+          // Message fetch failed (helper swallows HTTP/network errors as null).
+          // Without this the UI would sit on "connecting" forever with the
+          // composer locked. Two misses in a row = real error.
+          if (++missCount >= 2) setStatus('error');
+          if (sess) setSession(sess);
+        } else {
+          missCount = 0;
+          let sessOutcome = '';
+          if (sess) {
+            setSession(sess);
+            const so = typeof (sess as Record<string, unknown>)?.outcome === 'string'
+              ? ((sess as Record<string, unknown>).outcome as string).toLowerCase()
+              : null;
+            if (so) { sessOutcome = so; setOutcome(so); }
           }
-          const idleLike = ltype === 'idle' || ['interrupted', 'completed', 'succeeded', 'done', 'success', 'aborted', 'failed', 'error'].includes(outcomeVal);
-          setStatus(idleLike ? 'closed' : 'live');
+          if (list) {
+            merge(list as unknown[]);
+            // Idle detection: server does not guarantee asc order (idle marker
+            // can arrive first), so scan the whole list + session outcome.
+            // Any idle/completed marker means the agent parked — show closed.
+            // A fresh session with zero chat messages is always idle-ready,
+            // otherwise a brand new board assistant idles as "live" forever and
+            // locks the input before the first prompt.
+            const arr = Array.isArray(list) ? list : [];
+            const hasChat = arr.some((mm) => {
+              const rr = mm as Record<string, unknown>;
+              const tt = typeof rr?.type === 'string' ? (rr.type as string).toLowerCase() : '';
+              return tt !== 'idle' && tt !== 'compaction' && !(Array.isArray(rr?.content) && (rr.content as unknown[]).length === 0);
+            });
+            let ltype = '';
+            let outcomeVal = sessOutcome || '';
+            for (const m of arr) {
+              const r = m as Record<string, unknown>;
+              const t = typeof r?.type === 'string' ? (r.type as string).toLowerCase() : '';
+              if (t === 'idle') ltype = 'idle';
+              const o = typeof r?.outcome === 'string' ? (r.outcome as string).toLowerCase() : '';
+              if (o) { outcomeVal = o; setOutcome(o); }
+            }
+            const idleLike = !hasChat || ltype === 'idle' || ['interrupted', 'completed', 'succeeded', 'done', 'success', 'aborted', 'failed', 'error'].includes(outcomeVal);
+            setStatus(idleLike ? 'closed' : 'live');
+          }
         }
       } catch {
         if (!stopped && seq === seqRef.current) setStatus('error');
@@ -284,14 +305,19 @@ export function useSessionStream(sessionId: string | null, opts?: { taskAgentNam
                 merge(list as unknown[]);
                 let ltype2 = '';
                 let outcome2 = '';
-                for (const m2 of Array.isArray(list) ? (list as unknown as Record<string, unknown>[]) : []) {
+                const arr2 = Array.isArray(list) ? (list as unknown as Record<string, unknown>[]) : [];
+                const hasChat2 = arr2.some((mm2) => {
+                  const tt2 = typeof mm2?.type === 'string' ? (mm2.type as string).toLowerCase() : '';
+                  return tt2 !== 'idle' && tt2 !== 'compaction' && !(Array.isArray(mm2?.content) && (mm2.content as unknown[]).length === 0);
+                });
+                for (const m2 of arr2) {
                   const t2 = typeof (m2 as Record<string, unknown>)?.type === 'string' ? ((m2 as Record<string, unknown>).type as string).toLowerCase() : '';
                   if (t2 === 'idle') ltype2 = 'idle';
                   const o2 = typeof (m2 as Record<string, unknown>)?.outcome === 'string' ? ((m2 as Record<string, unknown>).outcome as string).toLowerCase() : '';
                   if (o2) outcome2 = o2;
                 }
-                const idleLike = ltype2 === 'idle' || ['interrupted', 'completed', 'succeeded', 'success', 'aborted', 'done'].includes(outcome2);
-                setStatus(idleLike ? 'closed' : 'live');
+                const idleLike2 = !hasChat2 || ltype2 === 'idle' || ['interrupted', 'completed', 'succeeded', 'success', 'aborted', 'failed', 'error', 'done'].includes(outcome2);
+                setStatus(idleLike2 ? 'closed' : 'live');
               }
             }).catch(() => {});
           }
