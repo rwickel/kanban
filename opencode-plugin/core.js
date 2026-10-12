@@ -229,6 +229,17 @@ function toolTimeMs(t) {
  * A service such as "npm run dev" is not stuck: it returns completed promptly
  * and keeps the process alive, so no running tool survives to be flagged here.
  */
+/**
+ * Tools that block on a human instead of doing work. `question` waits for the
+ * user to pick an option, so a long "running" state is correct behaviour — not
+ * a stall. The watchdog must never interrupt these.
+ */
+const WAITING_TOOLS = new Set(["question", "ask", "permission", "confirm"]);
+
+export function isWaitingTool(name) {
+  return WAITING_TOOLS.has(String(name || "").toLowerCase());
+}
+
 export function findStuckTool(msg, stallMs = 90000) {
   if (!msg || typeof msg !== "object") return null;
   const pool = [
@@ -242,6 +253,9 @@ export function findStuckTool(msg, stallMs = 90000) {
     if (String(p.type || "").toLowerCase() !== "tool") continue;
     const st = p.state || {};
     if (String(st.status || "").toLowerCase() !== "running") continue;
+    const toolName = p.name || st.name || "tool";
+    // A waiting-for-human tool is idle by design, never a stall.
+    if (isWaitingTool(toolName)) continue;
     if (toolTimeMs(p?.time?.completed) || toolTimeMs(st.completed) || toolTimeMs(st.completedAt)) continue;
     const ran =
       toolTimeMs(p?.time?.ran) ??
@@ -251,10 +265,43 @@ export function findStuckTool(msg, stallMs = 90000) {
     if (ran == null) continue;
     const age = now - ran;
     if (age > stallMs && (!oldest || age > oldest.ageMs)) {
-      oldest = { name: p.name || st.name || "tool", id: p.id || st.id || null, ageMs: Math.round(age) };
+      oldest = { name: toolName, id: p.id || st.id || null, ageMs: Math.round(age) };
     }
   }
   return oldest;
+}
+
+/**
+ * The newest question a session is currently blocked on, or null.
+ * Used to hand a subtask's pending question back to its parent session.
+ */
+export function findPendingQuestion(msg) {
+  if (!msg || typeof msg !== "object") return null;
+  const pool = [
+    ...(Array.isArray(msg.content) ? msg.content : []),
+    ...(Array.isArray(msg.parts) ? msg.parts : []),
+  ];
+  for (const p of pool) {
+    if (!p || typeof p !== "object") continue;
+    if (String(p.type || "").toLowerCase() !== "tool") continue;
+    const st = p.state || {};
+    const status = String(st.status || "").toLowerCase();
+    if (status === "completed" || status === "error") continue;
+    const toolName = p.name || st.name || "";
+    if (!isWaitingTool(toolName)) continue;
+    const input = st.input && typeof st.input === "object" ? st.input : {};
+    const raw = Array.isArray(input.questions) ? input.questions : [];
+    const questions = raw.map((q) => ({
+      header: String(q?.header || "Question"),
+      question: String(q?.question || ""),
+      multiple: Boolean(q?.multiple),
+      options: Array.isArray(q?.options)
+        ? q.options.map((o) => ({ label: String(o?.label || ""), description: String(o?.description || "") }))
+        : [],
+    }));
+    return { toolId: p.id || st.id || null, tool: toolName, questions };
+  }
+  return null;
 }
 
 export async function ocInterrupt(apiBase, headers, sessionId) {

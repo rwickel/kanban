@@ -7,7 +7,7 @@ import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Bot, User, ChevronDown, Wrench, Check, AlertTriangle } from 'lucide-react';
 import type { ChatStatus } from '../hooks/useSessionStream';
-import type { ChatMessage } from './chatEvents';
+import type { ChatMessage, QuestionItem } from './chatEvents';
 import { linkifyFilePaths, parsePreviewHref } from './filePaths';
 
 export const STATUS_DOT: Record<ChatStatus, { bg: string; label: string; pulse: boolean }> = {
@@ -94,24 +94,347 @@ export function ThinkingBlock({ msg, showAvatar, agentName, modelName, onFileCli
   );
 }
 
-export function ToolRow({ msg, onFileClick }: { msg: ChatMessage; onFileClick: (absPath: string) => void }) {
+/** Serialize the picks into the form answer the backend expects: { q0, q1, … }. */
+function buildQuestionAnswer(questions: QuestionItem[], picks: Record<number, string[]>, texts: Record<number, string>): Record<string, string | string[]> {
+  const answer: Record<string, string | string[]> = {};
+  for (let i = 0; i < questions.length; i++) {
+    const q = questions[i];
+    if (q.freeText) answer[`q${i}`] = (texts[i] ?? '').trim();
+    else answer[`q${i}`] = q.multiple ? (picks[i] ?? []) : (picks[i]?.[0] ?? '');
+  }
+  return answer;
+}
+
+/** Structured answer entries for the cool list — one per question. */
+export interface QuestionAnswerEntry { header: string; question: string; answers: string[]; }
+
+function normalizeAnswerValue(v: unknown): string[] {
+  if (typeof v === 'string') return v.trim() ? [v.trim()] : [];
+  if (Array.isArray(v)) return (v as unknown[]).map((x) => (typeof x === 'string' ? x.trim() : String(x).trim())).filter(Boolean);
+  if (v && typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    const label = o.label ?? o.value ?? o.answer ?? o.selected ?? o.title;
+    if (typeof label === 'string' && label.trim()) return [label.trim()];
+    try { return [JSON.stringify(v).slice(0, 200)]; } catch { return [String(v)]; }
+  }
+  if (v != null) { const s = String(v).trim(); return s ? [s] : []; }
+  return [];
+}
+
+export function parseQuestionAnswers(raw?: string, questions: QuestionItem[] = []): QuestionAnswerEntry[] {
+  const out = (raw ?? '').trim();
+  if (!out) return [];
+  let parsed: unknown = null;
+  let isJson = false;
+  try { parsed = JSON.parse(out); isJson = true; } catch { /* plain text */ }
+  if (!isJson) {
+    const clean = out.replace(/\s+/g, ' ').slice(0, 400);
+    if (!questions.length) return [{ header: 'Answer', question: '', answers: [clean] }];
+    // Plain text with single question: show as its answer
+    if (questions.length === 1) return [{ header: questions[0].header, question: questions[0].question, answers: [clean] }];
+    return [{ header: questions[0].header, question: questions[0].question, answers: [clean] }];
+  }
+  if (parsed == null || typeof parsed !== 'object') {
+    const s = String(parsed ?? '').trim();
+    if (!s) return [];
+    if (questions.length) return [{ header: questions[0].header, question: questions[0].question, answers: [s] }];
+    return [{ header: 'Answer', question: '', answers: [s] }];
+  }
+  const o = parsed as Record<string, unknown>;
+  // Direct q0 map at top level? e.g. { q0: "a", q1: ["b","c"] }
+  const hasQKeys = Object.keys(o).some((k) => /^q\d+$/.test(k));
+  let map: Record<string, unknown> | null = null;
+  if (hasQKeys) map = o;
+  else {
+    const envelopeKeys = ['answers', 'data', 'result', 'selections', 'selected', 'answer'] as const;
+    for (const k of envelopeKeys) {
+      const v = o[k];
+      if (v == null) continue;
+      if (typeof v === 'string') {
+        if (questions.length) return [{ header: questions[0].header, question: questions[0].question, answers: [v] }];
+        return [{ header: 'Answer', question: '', answers: [v] }];
+      }
+      if (Array.isArray(v)) {
+        // Array envelope: distribute per question when lengths match, else single-question list
+        const arr = (v as unknown[]).map((item) => {
+          if (typeof item === 'string') return item;
+          if (item && typeof item === 'object') {
+            const q = item as Record<string, unknown>;
+            const label = q.label ?? q.answer ?? q.value ?? q.selected ?? q.title;
+            return typeof label === 'string' ? label : JSON.stringify(q).slice(0, 200);
+          }
+          return String(item);
+        }).filter(Boolean) as string[];
+        if (questions.length === 0) return [{ header: 'Answer', question: '', answers: arr }];
+        if (questions.length === 1) return [{ header: questions[0].header, question: questions[0].question, answers: arr }];
+        if (arr.length === questions.length) {
+          return questions.map((q, i) => ({ header: q.header, question: q.question, answers: arr[i] ? [arr[i]] : [] }));
+        }
+        // Fallback: all answers under first question
+        return questions.map((q, i) => ({ header: q.header, question: q.question, answers: i === 0 ? arr : [] }));
+      }
+      if (v && typeof v === 'object' && !Array.isArray(v)) { map = v as Record<string, unknown>; break; }
+    }
+  }
+  if (map) {
+    return questions.map((q, i) => {
+      const key = `q${i}`;
+      let v: unknown = (map as Record<string, unknown>)[key] ?? (map as Record<string, unknown>)[String(i)];
+      // Also try header/question as key
+      if (v == null) v = (map as Record<string, unknown>)[q.header] ?? (map as Record<string, unknown>)[q.question];
+      // Positional fallback when map is ordered but keys are different
+      if (v == null && Object.keys(map as Record<string, unknown>).length === questions.length) {
+        v = Object.values(map as Record<string, unknown>)[i];
+      }
+      return { header: q.header, question: q.question, answers: normalizeAnswerValue(v) };
+    });
+  }
+  // No recognized envelope: show raw compact text under first question
+  const fallback = out.replace(/\s+/g, ' ').slice(0, 400);
+  if (questions.length) return [{ header: questions[0].header, question: questions[0].question, answers: [fallback] }];
+  return [{ header: 'Answer', question: '', answers: [fallback] }];
+}
+
+function hasAnyAnswer(entries: QuestionAnswerEntry[]): boolean {
+  return entries.some((e) => e.answers.length > 0);
+}
+
+/** Cool answer list — replaces raw JSON with pills and per-question rows. */
+function QuestionAnswerList({ entries }: { entries: QuestionAnswerEntry[] }) {
+  if (!entries.length || !hasAnyAnswer(entries)) return null;
+  return (
+    <div
+      className="panel overflow-hidden"
+      style={{
+        background: 'var(--surface)',
+        borderColor: 'color-mix(in srgb, var(--emerald) 28%, var(--border))',
+      }}
+    >
+      <div
+        className="flex items-center gap-1.5 px-2.5 py-1.5"
+        style={{
+          background: 'color-mix(in srgb, var(--emerald) 9%, var(--surface-2))',
+          borderBottom: '1px solid color-mix(in srgb, var(--emerald) 18%, var(--border))',
+        }}
+      >
+        <span
+          className="w-5 h-5 rounded-full flex items-center justify-center shrink-0"
+          style={{ background: 'color-mix(in srgb, var(--emerald) 18%, transparent)', border: '1px solid color-mix(in srgb, var(--emerald) 30%, transparent)' }}
+        >
+          <Check className="w-3 h-3" style={{ color: 'var(--emerald)' }} strokeWidth={2.5} />
+        </span>
+        <span className="text-[10px] font-bold uppercase tracking-widest mono" style={{ color: 'var(--emerald)' }}>
+          Answer{entries.length > 1 ? 's' : ''}
+        </span>
+        <span className="text-[10px] mono muted">— {entries.reduce((n, e) => n + e.answers.length, 0)} pick{entries.reduce((n, e) => n + e.answers.length, 0) === 1 ? '' : 's'}</span>
+      </div>
+      <ul className="px-2.5 py-2 space-y-2.5">
+        {entries.map((e, i) => (
+          <li key={i} className="flex gap-2.5">
+            <span
+              className="shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold mono"
+              style={{
+                background: 'color-mix(in srgb, var(--emerald) 12%, transparent)',
+                color: 'var(--emerald)',
+                border: '1px solid color-mix(in srgb, var(--emerald) 22%, transparent)',
+              }}
+            >
+              {i + 1}
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="text-[11px] leading-snug flex flex-wrap items-baseline gap-1">
+                <span className="pill p-green text-[9px] px-1.5 py-0 leading-none" style={{ fontSize: 9 }}>{e.header || 'Question'}</span>
+                <span className="font-semibold t-strong">{e.question}</span>
+              </p>
+              {e.answers.length > 0 ? (
+                <div className="flex flex-wrap gap-1 mt-1.5">
+                  {e.answers.map((a, j) => (
+                    <span
+                      key={j}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium mono max-w-full"
+                      style={{
+                        background: 'color-mix(in srgb, var(--emerald) 11%, var(--surface-2))',
+                        border: '1px solid color-mix(in srgb, var(--emerald) 26%, transparent)',
+                        color: 'var(--emerald)',
+                      }}
+                    >
+                      <Check className="w-3 h-3 shrink-0" strokeWidth={2.2} />
+                      <span className="truncate">{a}</span>
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-[11px] muted mono mt-1">— no pick</p>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * Interactive question card: checkbox list for options, text field when the
+ * question has none. Submit stays disabled until every question is answered.
+ */
+function QuestionCard({
+  msg,
+  onAnswered,
+}: {
+  msg: ChatMessage;
+  onAnswered?: (toolCallId: string, answer: Record<string, string | string[]>) => void;
+}) {
+  const t = msg.tool!;
+  const questions = t.questions ?? [];
+  const done = (t.status ?? '').toLowerCase() === 'executed';
+  const answerEntries = done ? parseQuestionAnswers(t.output, questions) : [];
+  const [picks, setPicks] = useState<Record<number, string[]>>({});
+  const [texts, setTexts] = useState<Record<number, string>>({});
+  const [sent, setSent] = useState(false);
+
+  const isAnswered = (i: number) => {
+    const q = questions[i];
+    if (!q) return false;
+    return q.freeText ? (texts[i] ?? '').trim().length > 0 : (picks[i]?.length ?? 0) > 0;
+  };
+  const allAnswered = questions.length > 0 && questions.every((_, i) => isAnswered(i));
+  const canSubmit = !done && !sent && allAnswered && !!t.toolCallId && !!onAnswered;
+
+  const toggle = (i: number, label: string) => {
+    setPicks((prev) => {
+      const cur = prev[i] ?? [];
+      if (questions[i]?.multiple) {
+        return { ...prev, [i]: cur.includes(label) ? cur.filter((l) => l !== label) : [...cur, label] };
+      }
+      // Single-select: picking the active label clears it.
+      return { ...prev, [i]: cur.includes(label) ? [] : [label] };
+    });
+  };
+
+  const submit = () => {
+    if (!canSubmit || !t.toolCallId) return;
+    setSent(true);
+    onAnswered!(t.toolCallId, buildQuestionAnswer(questions, picks, texts));
+  };
+
+  return (
+    <div className="px-2.5 py-2.5 space-y-2.5">
+      {questions.map((q, i) => {
+        const picked = picks[i] ?? [];
+        return (
+          <div key={i} className="panel overflow-hidden" style={{ background: 'var(--surface-2)' }}>
+            <div
+              className="px-2.5 py-1.5 border-b hairline"
+              style={{ borderBottomWidth: 1, borderBottomStyle: 'solid', background: 'var(--surface)' }}
+            >
+              <span
+                className="text-[10px] font-semibold uppercase tracking-widest mono"
+                style={{ color: 'var(--blue)' }}
+              >
+                {q.header || 'Question'}
+              </span>
+            </div>
+            <div className="px-2.5 py-2">
+              <p className="text-[12px] font-semibold t-strong leading-snug">{q.question}</p>
+              {q.freeText ? (
+                <input
+                  type="text"
+                  value={texts[i] ?? ''}
+                  disabled={done}
+                  onChange={(e) => setTexts((p) => ({ ...p, [i]: e.target.value }))}
+                  placeholder="Type your answer…"
+                  className="input mt-2 mono text-[11.5px]"
+                  style={{ padding: '6px 8px', fontSize: '11.5px' }}
+                />
+              ) : (
+                <ul className="mt-2 space-y-1">
+                  {q.options.map((o, j) => {
+                    const on = picked.includes(o.label);
+                    const Input = q.multiple ? 'input' : 'input';
+                    return (
+                      <li key={j}>
+                        <label
+                          className="flex gap-1.5 items-start text-[11px] cursor-pointer rounded px-1 py-0.5"
+                          style={{ background: on ? 'color-mix(in srgb, var(--blue) 8%, transparent)' : 'transparent' }}
+                        >
+                          <Input
+                            type={q.multiple ? 'checkbox' : 'radio'}
+                            name={`q-${i}`}
+                            checked={on}
+                            disabled={done}
+                            onChange={() => toggle(i, o.label)}
+                            className="shrink-0 mt-0.5"
+                            style={{ accentColor: 'var(--blue)', cursor: done ? 'default' : 'pointer' }}
+                          />
+                          <span className="min-w-0">
+                            <span className="mono t-soft">{o.label}</span>
+                            {o.description && <span className="muted"> — {o.description}</span>}
+                          </span>
+                        </label>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          </div>
+        );
+      })}
+      {done && <QuestionAnswerList entries={answerEntries} />}
+      {!done && onAnswered && (
+        <div className="flex items-center gap-2 pt-0.5">
+          <button
+            type="button"
+            disabled={!canSubmit}
+            onClick={submit}
+            className="btn px-3 py-1.5 text-[11px] font-semibold mono"
+            style={canSubmit
+              ? { background: 'var(--accent)', color: 'var(--accent-text)', borderColor: 'var(--accent)', cursor: 'pointer' }
+              : { opacity: 0.55, cursor: 'not-allowed' }}
+          >
+            {sent ? 'sent' : 'submit'}
+          </button>
+          {!allAnswered && (
+            <span className="text-[10px] muted mono">
+              answer every question to continue
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function ToolRow({ msg, onFileClick, onAnswered }: { msg: ChatMessage; onFileClick: (absPath: string) => void; onAnswered?: (toolCallId: string, answer: Record<string, string | string[]>) => void }) {
   const t = msg.tool;
   const executed = (t?.status ?? '').toLowerCase() === 'executed';
   const hasDiff = !!t?.diff && t.diff.length > 0;
-  const [open, setOpen] = useState(hasDiff);
+  const isQuestion = t?.render === 'question' && !!t.questions?.length;
+  const [open, setOpen] = useState(hasDiff || isQuestion);
   const isWrite = (t?.tool ?? '').toLowerCase().includes('write') && !(t?.tool ?? '').toLowerCase().includes('todo');
+  const pendingQuestion = isQuestion && !executed;
+  // Tool result doubles as the recorded answer when the question already ran.
+  const hasQuestionAnswer = executed && hasAnyAnswer(parseQuestionAnswers(t?.output, t?.questions ?? []));
+  // Question rows name the tool only — the question itself is the body.
+  const lineSummary = isQuestion ? '' : t?.summary;
+  const statusLabel = pendingQuestion ? 'waiting for answer' : lineSummary;
   return (
     <div className="flex gap-2 justify-start animate-fadeIn">
       <div className="w-6 h-6 flex items-center justify-center shrink-0" style={{ border: '1px solid var(--border)', borderRadius: 6, background: 'var(--surface)' }}>
         {executed
           ? <Check className="w-3.5 h-3.5" style={{ color: 'var(--emerald)' }} strokeWidth={1.75} />
-          : <Wrench className="w-3.5 h-3.5 muted" strokeWidth={1.75} />}
+          : <Wrench className="w-3.5 h-3.5" style={{ color: pendingQuestion ? 'var(--amber)' : undefined }} strokeWidth={1.75} />}
       </div>
       <div className="flex-1 min-w-0 max-w-[88%]">
         <button onClick={() => setOpen((v) => !v)}
           className="btn w-full flex items-center gap-2 px-2.5 py-1.5 mono text-[11px] text-left">
           <span className="font-semibold shrink-0 t-strong">{t?.tool ?? 'tool'}</span>
-          {t?.summary && <span className="muted truncate font-sans">{t.summary}</span>}
+          {statusLabel && (
+            <span className="truncate font-sans" style={{ color: pendingQuestion ? 'var(--amber)' : 'var(--muted)' }}>
+              {statusLabel}
+            </span>
+          )}
           <ChevronDown className={`w-3 h-3 shrink-0 muted transition-transform ${open ? 'rotate-180' : ''}`} strokeWidth={1.75} />
         </button>
         {open && (
@@ -144,23 +467,14 @@ export function ToolRow({ msg, onFileClick }: { msg: ChatMessage; onFileClick: (
                   ))}
                 </pre>
               </div>
-            ) : t?.input && (
+            ) : !isQuestion && t?.input && (
               <div className="px-2.5 py-2 border-b hairline" style={{ borderBottomWidth: 1, borderBottomStyle: 'solid' }}>
                 <p className="text-[10px] uppercase tracking-widest muted mono mb-1">Input</p>
                 <pre className="mono text-[11px] leading-relaxed t-soft whitespace-pre-wrap break-words">{t.input}</pre>
               </div>
             )}
-            {t?.render === 'question' && t.questions ? (
-              <div className="px-2.5 py-2 space-y-2">
-                {t.questions.map((q, i) => (
-                  <div key={i}>
-                    <p className="text-[11px] font-semibold t-strong">{q.header}: {q.question}</p>
-                    {q.options.map((o, j) => (
-                      <p key={j} className="mono text-[11px] muted">· {o.label}{o.description ? ` — ${o.description}` : ''}</p>
-                    ))}
-                  </div>
-                ))}
-              </div>
+            {isQuestion ? (
+              <QuestionCard msg={msg} onAnswered={onAnswered} />
             ) : null}
             {t?.render === 'todo' && t.todos ? (
               <div className="px-2.5 py-2 space-y-1">
@@ -171,7 +485,7 @@ export function ToolRow({ msg, onFileClick }: { msg: ChatMessage; onFileClick: (
                 ))}
               </div>
             ) : null}
-            {t?.output ? (
+            {t?.output && !(isQuestion && hasQuestionAnswer) ? (
               <div className="px-2.5 py-2">
                 <p className="text-[10px] uppercase tracking-widest muted mono mb-1">Result</p>
                 <pre className="mono text-[11px] leading-relaxed muted whitespace-pre-wrap break-words">{t.output}</pre>

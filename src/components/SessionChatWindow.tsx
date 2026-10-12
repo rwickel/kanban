@@ -5,7 +5,7 @@ import {
   X, Send, Loader2, ExternalLink, Copy, Check, Download, Square,
 } from 'lucide-react';
 import { Task } from '../types';
-import { sendPrompt, interruptSession } from '../api/opencode';
+import { answerTool, sendPrompt, interruptSession } from '../api/opencode';
 import { useSessionStream } from '../hooks/useSessionStream';
 import { chatToMarkdown } from './chatEvents';
 import { STATUS_DOT, ThinkingBlock, ToolRow, ChatBubble, ChatErrorRow } from './ChatFeed';
@@ -157,6 +157,16 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
     }
   };
 
+  // Answer a blocked `question` tool (a pending form server-side). The session
+  // stays busy until the form resolves, so the picker lives in the tool row.
+  const handleAnswer = async (toolCallId: string, answer: Record<string, string | string[]>) => {
+    if (!sessionId) return;
+    setSendError(null);
+    const res = await answerTool(sessionId, toolCallId, answer);
+    if (!res.ok) setSendError(`Could not send the answer — ${res.error ?? 'unknown error'}`);
+    retry();
+  };
+
   const copySessionId = async () => {
     if (!sessionId) return;
     try { await navigator.clipboard.writeText(sessionId); } catch {
@@ -239,7 +249,7 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
           const prev = idx > 0 ? messages[idx - 1] : undefined;
           const startsTurn = msg.kind !== 'user' && (!prev || prev.kind === 'user');
           const modelHint = task.modelProviderID && task.modelId ? `${task.modelProviderID}/${task.modelId}` : task.modelId ?? undefined;
-          if (msg.kind === 'tool') return <ToolRow key={msg.id} msg={msg} onFileClick={(p) => setPreviewPath(p)} />;
+          if (msg.kind === 'tool') return <ToolRow key={msg.id} msg={msg} onFileClick={(p) => setPreviewPath(p)} onAnswered={handleAnswer} />;
           if (msg.kind === 'error') return <ChatErrorRow key={msg.id} msg={msg} />;
           if (msg.kind === 'reasoning') return <ThinkingBlock key={msg.id} msg={msg} showAvatar={startsTurn} agentName={task.agentName} modelName={modelHint} onFileClick={(p) => setPreviewPath(p)} />;
           return <ChatBubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : task.agentName} modelName={msg.kind === 'user' ? undefined : modelHint} showAvatar={msg.kind === 'user' ? true : startsTurn} onFileClick={(p) => setPreviewPath(p)} />;

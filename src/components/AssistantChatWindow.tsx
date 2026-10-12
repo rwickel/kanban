@@ -6,7 +6,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { X, Send, Loader2, Copy, Check, RefreshCw, Plus, Download, Square } from 'lucide-react';
 import { Agent, OpenCodeModelInfo, Project } from '../types';
-import { createSession, sendPrompt, interruptSession, fetchModels } from '../api/opencode';
+import { answerTool, createSession, sendPrompt, interruptSession, fetchModels } from '../api/opencode';
 import { useSessionStream } from '../hooks/useSessionStream';
 import { STATUS_DOT, ThinkingBlock, ToolRow, ChatBubble, ChatErrorRow } from './ChatFeed';
 import { chatToMarkdown, ChatMessage } from './chatEvents';
@@ -369,7 +369,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
           {messages.map((msg, idx) => {
             const prev = idx > 0 ? messages[idx - 1] : undefined;
             const startsTurn = msg.kind !== 'user' && (!prev || prev.kind === 'user');
-            if (msg.kind === 'tool') return <ToolRow key={msg.id} msg={msg} onFileClick={(p) => setPreviewPath(p)} />;
+            if (msg.kind === 'tool') return <ToolRow key={msg.id} msg={msg} onFileClick={(p) => setPreviewPath(p)} onAnswered={(id, out) => { answerTool(sessionId!, id, out).then((r) => { if (!r.ok) setSendError(`Could not send the answer — ${r.error ?? 'unknown error'}`); retry(); }); }} />;
             if (msg.kind === 'error') return <ChatErrorRow key={msg.id} msg={msg} />;
             if (msg.kind === 'reasoning') return <ThinkingBlock key={msg.id} msg={msg} showAvatar={startsTurn} agentName={agentName} modelName={modelHint} onFileClick={(p) => setPreviewPath(p)} />;
             return <ChatBubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : agentName} modelName={msg.kind === 'user' ? undefined : modelHint} showAvatar={msg.kind === 'user' ? true : startsTurn} onFileClick={(p) => setPreviewPath(p)} />;

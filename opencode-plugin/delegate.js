@@ -7,6 +7,7 @@
 // goes through server/kanban.py, so the CLI and the plugin share the store.
 
 import {
+  findPendingQuestion as findPendingQuestionMsg,
   findStuckTool,
   jsonResult,
   loadStyleGuide,
@@ -223,6 +224,30 @@ async function awaitTask({ ctx, taskId, sessionId, parentSessionId, timeoutMs, i
       return jsonResult({ task: row, sessionId, waited: true, parentSessionId })
     }
 
+    // The subtask is blocked on a human question. Hand it to the caller
+    // instead of silently polling until timeout — the caller's own session
+    // has a picker, so it can relay the question to the user and answer back.
+    const pending = await findPendingQuestion(ctx, sessionId)
+    if (pending) {
+      return jsonResult({
+        ok: true,
+        needsAnswer: true,
+        questions: pending.questions,
+        questionToolId: pending.toolId,
+        sessionId,
+        taskId,
+        parentSessionId,
+        task: row,
+        howToReply:
+          "This subtask is waiting on a question nobody can answer from its own session. " +
+          "Ask the user using your OWN question tool with the questions above, then relay the picked " +
+          "labels back by finding the pending form for this session (GET /session/{sessionId}/form " +
+          `with the tool id ${pending.toolId}) and replying POST /session/{sessionId}/form/{formID}/reply { answer: { q0, q1, … } } ` +
+          "(one key per asked question, each value the chosen label or label array). " +
+          "Do not mark the task done until you have relayed the answer.",
+      })
+    }
+
     const stuck = await detectStuckTool(ctx, sessionId, lastStuckNotifiedAt, taskId)
     if (stuck) {
       lastStuckNotifiedAt = Date.now()
@@ -241,6 +266,23 @@ async function awaitTask({ ctx, taskId, sessionId, parentSessionId, timeoutMs, i
     const remaining = deadline - Date.now()
     await waitForIdle(ctx, sessionId, Math.min(interval, Math.max(remaining, 1000)))
   }
+}
+
+/**
+ * Scan the subtask session for a running question/waiting tool.
+ * Returns { toolId, tool, questions } or null.
+ */
+async function findPendingQuestion(ctx, sessionId) {
+  try {
+    const list = await listMessages(ctx, sessionId, 15)
+    for (const msg of list) {
+      const hit = findPendingQuestionMsg(msg)
+      if (hit && hit.questions && hit.questions.length > 0) return hit
+    }
+  } catch {
+    /* best effort — a scan failure just means keep polling */
+  }
+  return null
 }
 
 /**

@@ -6,7 +6,14 @@
 
 export interface DiffLine { type: 'add' | 'del' | 'ctx' | 'hunk'; text: string }
 export interface QuestionOption { label: string; description: string }
-export interface QuestionItem { header: string; question: string; options: QuestionOption[]; multiple?: boolean }
+export interface QuestionItem {
+  header: string;
+  question: string;
+  options: QuestionOption[];
+  multiple?: boolean;
+  /** No options means the user must type a free-text answer. */
+  freeText: boolean;
+}
 export interface TodoItem { content: string; status: string; activeForm?: string }
 
 export interface ToolCallInfo {
@@ -26,6 +33,10 @@ export interface ToolCallInfo {
   filePath?: string;
   questions?: QuestionItem[];
   todos?: TodoItem[];
+  /** Provider tool-call id — needed to answer a waiting question. */
+  toolCallId?: string;
+  /** Still running: the session is blocked waiting on this tool. */
+  pending?: boolean;
 }
 
 export interface MessageMeta {
@@ -113,7 +124,19 @@ function toolSummary(part: Payload): string {
   return input.brief || action;
 }
 
-interface ToolDetail { action: string; brief: string; input: string; output: string; render?: 'diff' | 'question' | 'todo' | 'generic'; diff?: DiffLine[]; filePath?: string; questions?: QuestionItem[]; todos?: TodoItem[] }
+interface ToolDetail {
+  action: string;
+  brief: string;
+  input: string;
+  output: string;
+  render?: 'diff' | 'question' | 'todo' | 'generic';
+  diff?: DiffLine[];
+  filePath?: string;
+  questions?: QuestionItem[];
+  todos?: TodoItem[];
+  toolCallId?: string;
+  pending?: boolean;
+}
 
 /** Extract human-readable input/output from a v2 tool part. */
 function toolInput(part: Payload): ToolDetail {
@@ -158,17 +181,21 @@ function toolInput(part: Payload): ToolDetail {
   const pattern = pick('pattern', 'query');
   const text = pick('text', 'content');
   const tName = partToolName(part);
+  const toolCallId = str(part.id) || str(state.id) || undefined;
+  const pending = ['running', 'pending', 'waiting', 'started'].includes((str(state.status) || '').toLowerCase());
   // Plain-tool rows stay minimal: just the name (+ URL), never the output dump.
   if (['webfetch', 'websearch', 'fetch', 'search'].includes(toolName)) {
     const brief = command || (path ? `${tName} ${path}` : '') || pattern || tName;
-    return { action: brief.slice(0, 200), brief: brief.slice(0, 200), input: '', output: '', render: 'generic' as const, diff: undefined, filePath: path || undefined, questions: undefined, todos: undefined };
+    return { action: brief.slice(0, 200), brief: brief.slice(0, 200), input: '', output: '', render: 'generic' as const, diff: undefined, filePath: path || undefined, questions: undefined, todos: undefined, toolCallId, pending: false };
   }
   const action =
     command || (path ? `${tName} ${path}` : '') || pattern || tName;
 
-  // Brief one-liner: action → output, capped
-  const briefOut = output.replace(/\s+/g, ' ').trim().slice(0, 120);
-  const brief = [action, briefOut].filter(Boolean).join(' → ').slice(0, 200);
+  // Brief one-liner: action → output, capped — but never echo the full question
+  // text in the tool-line summary. The question is the body, not a detail.
+  const isQuestionTool = toolName.includes('question');
+  const briefOut = isQuestionTool ? '' : output.replace(/\s+/g, ' ').trim().slice(0, 120);
+  const brief = isQuestionTool ? action : [action, briefOut].filter(Boolean).join(' → ').slice(0, 200);
 
   let render: 'diff' | 'question' | 'todo' | 'generic' = 'generic';
   let diff: DiffLine[] | undefined;
@@ -177,17 +204,24 @@ function toolInput(part: Payload): ToolDetail {
   const filePath = path || undefined;
 
   // question tool: rawInput.questions = [{header, question, options:[{label,description}], multiple}]
+  // options: [] means the user must type a free-text answer for that question.
   const qRaw = (rawInput as Payload)['questions'];
-  if (toolName.includes('question') && Array.isArray(qRaw)) {
+  if (isQuestionTool && Array.isArray(qRaw)) {
     render = 'question';
-    questions = (qRaw as Payload[]).map((q) => ({
-      header: str((q as Payload).header) || 'Question',
-      question: str((q as Payload).question),
-      multiple: Boolean((q as Payload).multiple),
-      options: Array.isArray((q as Payload).options)
-        ? ((q as Payload).options as Payload[]).map((o) => ({ label: str(o.label), description: str(o.description) }))
-        : [],
-    }));
+    questions = (qRaw as Payload[]).map((q) => {
+      const options = Array.isArray((q as Payload).options)
+        ? ((q as Payload).options as Payload[])
+            .map((o) => ({ label: str(o.label), description: str(o.description) }))
+            .filter((o) => o.label || o.description)
+        : [];
+      return {
+        header: str((q as Payload).header) || 'Question',
+        question: str((q as Payload).question),
+        multiple: Boolean((q as Payload).multiple),
+        options,
+        freeText: options.length === 0,
+      };
+    });
   }
   // todowrite/todo: rawInput.todos = [{content, status, activeForm}]
   const tRaw = (rawInput as Payload)['todos'];
@@ -227,7 +261,7 @@ function toolInput(part: Payload): ToolDetail {
     } catch { /* ignore */ }
   }
   const input = inputLines.join('\n');
-  return { action, brief, input, output: output.length > 4000 ? `${output.slice(0, 4000)}\n… (truncated)` : output, render, diff, filePath, questions, todos };
+  return { action, brief, input, output: output.length > 4000 ? `${output.slice(0, 4000)}\n… (truncated)` : output, render, diff, filePath, questions, todos, toolCallId, pending };
 }
 
 function contentToMessages(id: string, kind: 'user' | 'assistant', part: Payload, meta?: MessageMeta): ChatMessage[] {
@@ -300,6 +334,8 @@ function contentToMessages(id: string, kind: 'user' | 'assistant', part: Payload
           filePath: (detail as any).filePath,
           questions: (detail as any).questions,
           todos: (detail as any).todos,
+          toolCallId: (detail as any).toolCallId,
+          pending: (detail as any).pending,
         },
       }];
     }

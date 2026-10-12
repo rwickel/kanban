@@ -256,6 +256,65 @@ export async function interruptSession(sessionId: string): Promise<boolean> {
   }
 }
 
+/**
+ * Answer a blocked `question` tool.
+ *
+ * There is no dedicated question route on this server: the question tool
+ * blocks on a *form* (`metadata.kind: "question"`, linked to the tool's
+ * messageID/callID) and wakes when that form is answered:
+ *
+ *   GET  /session/{id}/form              → pending forms
+ *   POST /session/{id}/form/{formID}/reply  { answer: { q0, q1, … } }
+ *
+ * The answer object is keyed by field key (q0, q1, …). Each value matches the
+ * field type: a string field takes a label string, a multiselect takes a
+ * label array. Uses the shared Vite proxy (/api/kanban/oc) so no password
+ * lives in the browser.
+ */
+export async function answerTool(
+  sessionId: string,
+  toolCallId: string,
+  answer: Record<string, string | string[]>,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    // 1. Find the pending question form that belongs to this tool call.
+    const listRes = await fetch(`${baseUrl()}/session/${sessionId}/form`, { headers: headers() });
+    if (!listRes.ok) {
+      const body = await listRes.text().catch(() => '');
+      return { ok: false, error: `list failed HTTP ${listRes.status} — ${body.slice(0, 300)}` };
+    }
+    const listJson = await listRes.json().catch(() => ({}));
+    const payload = (listJson && typeof listJson === 'object' && 'data' in listJson)
+      ? (listJson as { data: unknown }).data
+      : listJson;
+    type QForm = { id?: string; metadata?: { kind?: string; tool?: { id?: string } } };
+    const pending: QForm[] = Array.isArray(payload) ? payload : [];
+
+    const hit = pending.find((f) => f?.metadata?.tool?.id === toolCallId)
+      // No form still carries this call id (already answered?) — surface that
+      // instead of answering a sibling's question.
+      ?? null;
+    if (!hit?.id) return { ok: false, error: 'question already answered or closed' };
+
+    // 2. Reply with the per-field answers.
+    const res = await fetch(
+      `${baseUrl()}/session/${sessionId}/form/${encodeURIComponent(hit.id)}/reply`,
+      {
+        method: 'POST',
+        headers: headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ answer }),
+      },
+    );
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      return { ok: false, error: `HTTP ${res.status} — ${body.slice(0, 300)}` };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String((e as Error).message) };
+  }
+}
+
 /** SSE bus: GET /api/event streams server events (needs auth header — EventSource
  *  can't set headers, so we fetch+parse the stream manually). Calls onEvent
  *  for frames mentioning the session. Returns an unsubscribe fn. */
