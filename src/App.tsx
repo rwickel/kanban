@@ -215,7 +215,7 @@ export default function App() {
       if (info) setIsConnected(true);
     });
 
-    // Option B: MCP writes straight to SQLite — just refresh from the store.
+    // Option B: agents write straight to SQLite — just refresh from the store.
     // Backoff: 5s healthy, doubling per failure up to 60s so a dead
     // server doesn't spam the console with ERR_CONNECTION_REFUSED.
     let stopped = false;
@@ -521,23 +521,17 @@ export default function App() {
 
   // Auto-start: ANY task sitting in running without an active startup
   // gets executed — whether the user dragged it there or an agent flipped
-  // it via kanban_update_status/MCP/PATCH. Covers external moves the drag
+  // it via kanban_update_status/plugin/PATCH. Covers external moves the drag
   // handler never sees (5s poll picks them up). In-flight guard prevents doubles.
   // Skips error-phase cards so a failed start doesn't loop; chat icon retries.
-  // Belt-and-braces with the server: cmd_task_move/update reset startupPhase
-  // on every transition to running, so re-runs (done → backlog → running)
-  // look fresh here too — but a stale 'ready' row (server not restarted yet)
-  // is still picked up by also accepting ready-with-session below.
+   // The server resets startupPhase on every transition to running, so a
+   // deliberate re-run (done → backlog → running) still starts fresh.
   useEffect(() => {
     const candidates = tasks.running.filter((t) => {
       if (startingRef.current.has(t.id)) return false;
       if (['creating-session', 'sending-prompt', 'error'].includes(t.startupPhase as string)) return false;
       // Fresh (never started, or server reset on move): start.
       if (!t.startupPhase) return true;
-      // Stale 'ready' re-run (pre-fix row): its updatedAt moved on the drag
-      // but no prompt was ever sent for this run. startTaskExecution resends
-      // the prompt into the existing session — safe, no duplicate session.
-      if (t.startupPhase === 'ready' && t.sessionId) return true;
       return false;
     });
     if (candidates.length === 0) return;

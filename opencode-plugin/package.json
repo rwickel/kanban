@@ -1,0 +1,8 @@
+{
+  "name": "opencode-kanban-plugin",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenCode plugin exposing the kanban board tools with caller session awareness",
+  "main": "index.ts"
+}

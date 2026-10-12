@@ -1,0 +1,385 @@
+// kanban plugin — kanban board tools exposed as native OpenCode tools.
+//
+// Why a plugin instead of an external MCP server: an MCP tool call does not carry the
+// caller session. This plugin gets Tool.Context.sessionID, so kanban_delegate and
+// kanban_create_task can attach the calling session as parentSessionId on their own.
+//
+// Register:  plugins: ["file:///C:/Users/Robert/work/kanban-clone/opencode-plugin"]
+//
+// Only the board state goes through server/kanban.py. Agent sessions go
+// through the running server's own ctx.session client, so no extra
+// `opencode serve` and no port or password is needed for delegation.
+
+import { callingSessionId, cliResult, jsonResult, runCli, toolError } from "./core.js"
+import { delegateTool, messageToTool } from "./delegate.js"
+
+// Optional arguments are expressed by leaving the key out of `required`,
+// so one string helper covers both required and optional fields.
+const str = (description: string) => ({ type: "string", description })
+
+const statusEnum = (description: string) => ({
+  type: "string",
+  enum: ["backlog", "running", "done", "blocked"],
+  description,
+})
+
+const priorityEnum = (description: string) => ({
+  type: "string",
+  enum: ["low", "medium", "high", "critical"],
+  description,
+})
+
+export default {
+  id: "kanban",
+  async setup(ctx: any) {
+    await ctx.tool.transform((editor: any) => {
+      editor.namespace({
+        name: "kanban",
+        description: "Shared kanban board: boards, tasks, and agent delegation",
+      })
+
+      // --- boards ---------------------------------------------------------
+
+      editor.add({
+        name: "kanban_create_board",
+        description:
+          "Create a new kanban board (project). Returns the created board JSON including its uuid. Pass folder (name inside KANBAN_PROJECTS_ROOT) or path (must be inside KANBAN_PROJECTS_ROOT).",
+        input: {
+          type: "object",
+          properties: {
+            name: str("Board name"),
+            folder: str("Folder name inside KANBAN_PROJECTS_ROOT"),
+            path: str("Full project path (must be inside KANBAN_PROJECTS_ROOT)"),
+            description: str("Board description"),
+            gitUrl: str("Git remote URL"),
+            gitBranch: str("Pinned git branch (default main)"),
+            agentIds: {
+              type: "array",
+              items: { type: "string" },
+              description: "Teammate agent ids for this board",
+            },
+            id: str("Explicit board uuid (default random)"),
+          },
+          required: ["name"],
+          additionalProperties: false,
+        },
+        options: { namespace: "kanban" },
+        execute: async (input: any) => {
+          if (!input.name?.trim()) toolError("name required")
+          const argv = ["project", "create", "--name", input.name, "--actor", "agent"]
+          if (input.folder) argv.push("--folder", input.folder)
+          if (input.path) argv.push("--path", input.path)
+          if (input.description) argv.push("--description", input.description)
+          if (input.gitUrl) argv.push("--git-url", input.gitUrl)
+          if (input.gitBranch) argv.push("--git-branch", input.gitBranch)
+          if (input.id) argv.push("--id", input.id)
+          for (const a of input.agentIds ?? []) if (a) argv.push("--agent-id", a)
+          return cliResult(runCli(argv))
+        },
+      })
+
+      editor.add({
+        name: "kanban_list_boards",
+        description: "List all kanban boards (projects) from the shared store.",
+        input: { type: "object", properties: {}, additionalProperties: false },
+        options: { namespace: "kanban" },
+        execute: async () => cliResult(runCli(["project", "list", "--json"])),
+      })
+
+      editor.add({
+        name: "kanban_get_board",
+        description: "Show one kanban board by id with its task counts.",
+        input: {
+          type: "object",
+          properties: { projectId: str("Board uuid (project id)") },
+          required: ["projectId"],
+          additionalProperties: false,
+        },
+        options: { namespace: "kanban" },
+        execute: async (input: any) => {
+          if (!input.projectId?.trim()) toolError("projectId required")
+          const r = runCli(["project", "list", "--json"])
+          if (!r.ok) return cliResult(r)
+          const row = JSON.parse(r.text).find?.((p: any) => p.id === input.projectId)
+          if (!row) toolError(`board not found: ${input.projectId}`)
+          return jsonResult(row)
+        },
+      })
+
+      editor.add({
+        name: "kanban_update_board",
+        description:
+          "Patch a kanban board's name, folder/path, description, git settings, or agent team. Returns updated board JSON.",
+        input: {
+          type: "object",
+          properties: {
+            projectId: str("Board uuid (project id)"),
+            name: str("New board name"),
+            folder: str("New folder name inside KANBAN_PROJECTS_ROOT"),
+            path: str("New full path (must be inside KANBAN_PROJECTS_ROOT)"),
+            description: str("New description"),
+            gitUrl: str("New git remote URL"),
+            gitBranch: str("New pinned git branch"),
+            agentIds: {
+              type: "array",
+              items: { type: "string" },
+              description: "Replace agent team list",
+            },
+          },
+          required: ["projectId"],
+          additionalProperties: false,
+        },
+        options: { namespace: "kanban" },
+        execute: async (input: any) => {
+          if (!input.projectId?.trim()) toolError("projectId required")
+          const argv = ["project", "update", input.projectId, "--actor", "agent"]
+          if (input.name !== undefined) argv.push("--name", input.name)
+          if (input.folder !== undefined) argv.push("--folder", input.folder)
+          if (input.path !== undefined) argv.push("--path", input.path)
+          if (input.description !== undefined) argv.push("--description", input.description)
+          if (input.gitUrl !== undefined) argv.push("--git-url", input.gitUrl)
+          if (input.gitBranch !== undefined) argv.push("--git-branch", input.gitBranch)
+          if (input.agentIds !== undefined) {
+            for (const a of input.agentIds) if (a) argv.push("--agent-id", a)
+          }
+          if (argv.length <= 4) toolError("nothing to update")
+          return cliResult(runCli(argv))
+        },
+      })
+
+      editor.add({
+        name: "kanban_delete_board",
+        description: "Delete a kanban board and all its tasks. This cannot be undone.",
+        input: {
+          type: "object",
+          properties: { projectId: str("Board uuid (project id) to delete") },
+          required: ["projectId"],
+          additionalProperties: false,
+        },
+        options: { namespace: "kanban" },
+        execute: async (input: any) => {
+          if (!input.projectId?.trim()) toolError("projectId required")
+          return cliResult(runCli(["project", "delete", input.projectId, "--actor", "agent"]))
+        },
+      })
+
+      // --- tasks ----------------------------------------------------------
+
+      editor.add({
+        name: "kanban_create_task",
+        description:
+          "Create a new task in a project's backlog. Returns the created task JSON including its uuid. The calling session is attached as parentSessionId automatically.",
+        input: {
+          type: "object",
+          properties: {
+            projectId: str("Project uuid the task belongs to"),
+            title: str("Task title"),
+            description: str("Task description"),
+            priority: priorityEnum("Priority (default medium)"),
+            parentSessionId: str("Override the parent session (default: this session)"),
+          },
+          required: ["projectId", "title"],
+          additionalProperties: false,
+        },
+        options: { namespace: "kanban" },
+        execute: async (input: any, context: any) => {
+          const argv = [
+            "task", "create",
+            "--project", input.projectId,
+            "--title", input.title,
+            "--actor", "agent",
+          ]
+          if (input.description) argv.push("--description", input.description)
+          if (input.priority) argv.push("--priority", input.priority)
+          const parent = callingSessionId(input.parentSessionId, context)
+          if (parent) argv.push("--parent-session-id", parent)
+          return cliResult(runCli(argv))
+        },
+      })
+
+      editor.add({
+        name: "kanban_list_tasks",
+        description:
+          "List tasks from the shared store, optionally filtered by project and/or status.",
+        input: {
+          type: "object",
+          properties: {
+            projectId: str("Project uuid filter"),
+            status: statusEnum("Task status filter"),
+          },
+          additionalProperties: false,
+        },
+        options: { namespace: "kanban" },
+        execute: async (input: any) => {
+          const argv = ["task", "list"]
+          if (input.projectId) argv.push("--project", input.projectId)
+          if (input.status) argv.push("--status", input.status)
+          return cliResult(runCli(argv))
+        },
+      })
+
+      editor.add({
+        name: "kanban_task_status",
+        description: "Show one task by id. Without a task id, list recent board events.",
+        input: {
+          type: "object",
+          properties: { taskId: str("Task uuid. If omitted, lists recent events instead.") },
+          additionalProperties: false,
+        },
+        options: { namespace: "kanban" },
+        execute: async (input: any) => {
+          if (input.taskId) return cliResult(runCli(["task", "show", input.taskId]))
+          return cliResult(runCli(["events", "list", "--limit", "20"]))
+        },
+      })
+
+      editor.add({
+        name: "kanban_update_status",
+        description:
+          "Move a kanban task to a new status. Call with status 'done' when complete, 'blocked' if stuck. Prefer task_result for the answer; result/resultContext here are stored alongside the move. Do NOT rewrite the description.",
+        input: {
+          type: "object",
+          properties: {
+            taskId: str("Kanban task id (uuid, from the Task id in your prompt)"),
+            status: statusEnum("New status"),
+            result: str("Task result — last assistant message + context"),
+            resultContext: str("Extra context for the result"),
+          },
+          required: ["taskId", "status"],
+          additionalProperties: false,
+        },
+        options: { namespace: "kanban" },
+        execute: async (input: any) => {
+          const moved = runCli(["task", "move", input.taskId, input.status, "--actor", "agent"])
+          if (!moved.ok) return cliResult(moved)
+          if (input.result !== undefined || input.resultContext !== undefined) {
+            const argv = ["task", "update", input.taskId, "--actor", "agent"]
+            if (input.result !== undefined) argv.push("--result", input.result)
+            if (input.resultContext !== undefined) argv.push("--result-context", input.resultContext)
+            const u = runCli(argv)
+            if (u.ok) return cliResult(u)
+          }
+          return cliResult(moved)
+        },
+      })
+
+      editor.add({
+        name: "kanban_task_result",
+        description:
+          "Optional. Store or override the board's visible result for a task (shown under the card). Normally the last assistant message becomes the result automatically — use this only when you need a different, corrected, or richer result. Never write your answer into the description.",
+        input: {
+          type: "object",
+          properties: {
+            taskId: str("Kanban task id (uuid)"),
+            result: str("Final answer / outcome summary, shown on the board card"),
+            resultContext: str("Extra context for the result (sources, links, notes)"),
+          },
+          required: ["taskId", "result"],
+          additionalProperties: false,
+        },
+        options: { namespace: "kanban" },
+        execute: async (input: any) => {
+          const argv = [
+            "task", "update", input.taskId,
+            "--actor", "agent",
+            "--result", input.result,
+          ]
+          if (input.resultContext !== undefined) {
+            argv.push("--result-context", input.resultContext)
+          }
+          return cliResult(runCli(argv))
+        },
+      })
+
+      editor.add({
+        name: "kanban_update_task",
+        description:
+          "Patch a task's metadata (title/description/priority/parent-session). The description is the original task brief — do NOT overwrite it with your answer. Write your answer with task_result instead. Returns updated task JSON.",
+        input: {
+          type: "object",
+          properties: {
+            taskId: str("Kanban task id (uuid)"),
+            title: str("New title (renames the task)"),
+            description: str("Original task brief — never to store your result"),
+            priority: priorityEnum("New priority"),
+            parentSessionId: str("Parent session that created this task"),
+          },
+          required: ["taskId"],
+          additionalProperties: false,
+        },
+        options: { namespace: "kanban" },
+        execute: async (input: any) => {
+          const argv = ["task", "update", input.taskId, "--actor", "agent"]
+          if (input.title !== undefined) argv.push("--title", input.title)
+          if (input.description !== undefined) argv.push("--description", input.description)
+          if (input.priority !== undefined) argv.push("--priority", input.priority)
+          if (input.parentSessionId !== undefined) {
+            argv.push("--parent-session-id", input.parentSessionId)
+          }
+          if (argv.length <= 3) toolError("nothing to update")
+          return cliResult(runCli(argv))
+        },
+      })
+
+      // --- delegation -----------------------------------------------------
+
+      editor.add({
+        name: "kanban_delegate",
+        description:
+          "Create a task for another agent on the team and start it immediately. Fire-and-forget by default — returns { task, sessionId, waited:false, parentSessionId } right away so the caller can fan out. Pass wait:true to block until done/blocked. This session is attached as parentSessionId automatically; an explicit parentSessionId wins. The subtask flips to done/blocked when the teammate is done.",
+        input: {
+          type: "object",
+          properties: {
+            projectId: str("Project uuid the subtask belongs to"),
+            title: str("Subtask title"),
+            description: str("Subtask description / instructions for the teammate"),
+            priority: priorityEnum("Priority (default medium)"),
+            agentId: str("Teammate agent id (must be in the project's team). Required."),
+            agentName: str("Teammate agent display name"),
+            modelId: str("Model id for the teammate session"),
+            modelProviderID: str("Model provider id for the teammate session"),
+            parentSessionId: str("Override the parent session (default: this session)"),
+            timeoutSec: {
+              type: "number",
+              description: "Max seconds to wait when wait:true (default 600, cap 1800)",
+            },
+            pollMs: { type: "number", description: "Poll interval in ms when wait:true (default 3000)" },
+            wait: {
+              type: "boolean",
+              description: "When true, WAIT until done/blocked before returning. Default false.",
+            },
+          },
+          required: ["projectId", "title", "agentId"],
+          additionalProperties: false,
+        },
+        options: { namespace: "kanban" },
+        execute: async (input: any, context: any) =>
+          delegateTool(
+            { ...input, parentSessionId: callingSessionId(input.parentSessionId, context) },
+            context,
+            ctx,
+          ),
+      })
+
+      editor.add({
+        name: "kanban_message_to",
+        description:
+          "Send a follow-up question into an EXISTING subtask session (same thread, no new task) and WAIT for the next assistant message — returns {sessionId, taskId, resultText}. Use after delegate when you want to ask more in the same session. Pass sessionId (from a delegate return) or taskId (resolves to its sessionId).",
+        input: {
+          type: "object",
+          properties: {
+            sessionId: str("Subtask session id (from a delegate return). Either this or taskId."),
+            taskId: str("Subtask id — resolves to its sessionId. Either this or sessionId."),
+            text: str("Follow-up question/instruction for the teammate"),
+            timeoutSec: { type: "number", description: "Max seconds to wait (default 120, cap 600)" },
+            pollMs: { type: "number", description: "Poll interval in ms (default 1500)" },
+          },
+          required: ["text"],
+          additionalProperties: false,
+        },
+        options: { namespace: "kanban" },
+        execute: async (input: any) => messageToTool(input, ctx),
+      })
+    })
+  },
+}

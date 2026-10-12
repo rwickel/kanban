@@ -53,6 +53,9 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
+  // Keep Stop visible until the stream confirms the interrupt took effect,
+  // otherwise the button vanishes before the session reports closed.
+  const [interrupted, setInterrupted] = useState(false);
   const [copied, setCopied] = useState(false);
   const [exported, setExported] = useState(false);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
@@ -91,10 +94,15 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages.length]);
 
+  useEffect(() => {
+    if (status === 'closed' || status === 'idle') setInterrupted(false);
+  }, [status]);
+
   if (!project) return null;
   const st = STATUS_DOT[status];
 
-  const busy = status === 'live' || status === 'connecting' || messages.some((m) => m.kind === 'tool' && m.tool && !['executed', 'completed', 'error'].includes((m.tool.status || '').toLowerCase()));
+  const busy = status === 'live' || status === 'connecting' || stopping || interrupted ||
+    messages.some((m) => m.kind === 'tool' && m.tool && !['executed', 'completed', 'error'].includes((m.tool.status || '').toLowerCase()));
 
   const onHandlePointerDown = (e: React.PointerEvent) => {
     draggingRef.current = true;
@@ -141,6 +149,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
     if (sessionId) {
       try { localStorage.removeItem(storageKey(project.id)); } catch {}
       setSessionId(null);
+      setInterrupted(false);
       setSendError(null);
       setCreateError(null);
     }
@@ -152,6 +161,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
     if (sessionId) {
       try { localStorage.removeItem(storageKey(project.id)); } catch {}
       setSessionId(null);
+      setInterrupted(false);
       setSendError(null);
       setCreateError(null);
     }
@@ -185,6 +195,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
     }
     try { localStorage.removeItem(storageKey(project.id)); } catch {}
     setSessionId(null);
+    setInterrupted(false);
     setInput('');
     setSendError(null);
     setCreateError(null);
@@ -224,7 +235,10 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
     setSendError(null);
     const ok = await interruptSession(sessionId);
     setStopping(false);
-    if (ok) retry();
+    if (ok) {
+      setInterrupted(true);
+      retry();
+    }
     else setSendError('Stop failed — session may already be idle.');
   };
 
@@ -232,6 +246,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
     e?.preventDefault();
     const text = input.trim();
     if (!text || sending) return;
+    setInterrupted(false);
     setSending(true);
     setSendError(null);
     const sid = await ensureSession();

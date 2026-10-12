@@ -29,7 +29,7 @@ Usage:
   python server/kanban.py task delete <taskId>
   python server/kanban.py events list [--task <taskId>] [--limit 50]
 
-All write commands print JSON to stdout (machine-readable for MCP/Vite).
+All write commands print JSON to stdout (machine-readable for plugin/HTTP).
 Human-readable errors go to stderr with non-zero exit.
 """
 
@@ -582,7 +582,7 @@ def cmd_task_update(args):
         params.append(require_status(args.status))
         changes["status"] = args.status
         # Same arming as cmd_task_move: status flips via update (drag =
-        # PATCH, MCP = task update) must reset the runner handshake too.
+        # PATCH, plugin = task update) must reset the runner handshake too.
         if args.status == "running" and args.startup_phase is None:
             sets.append("startup_phase = ?")
             params.append(None)

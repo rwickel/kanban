@@ -1,0 +1,56 @@
+import { spawn } from 'node:child_process';
+import net from 'node:net';
+
+import { loadEnvFile } from './env.mjs';
+
+loadEnvFile();
+
+function portInUse(port) {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: '127.0.0.1', port });
+    socket.once('connect', () => { socket.destroy(); resolve(true); });
+    socket.once('error', () => { socket.destroy(); resolve(false); });
+  });
+}
+
+const services = [
+  { name: 'kanban', command: 'vite', port: 3001 },
+  { name: 'opencode', command: 'opencode serve --port 4099', port: 4099 },
+];
+
+const children = [];
+for (const service of services) {
+  // Reuse a service already listening on its configured port. This makes
+  // `npm run dev` safe after a previous terminal or OpenCode restart.
+  if (await portInUse(service.port)) {
+    console.log(`[${service.name}] already running on port ${service.port}; reusing it`);
+    continue;
+  }
+  const child = spawn(service.command, { env: process.env, shell: true, stdio: 'inherit' });
+  child.on('error', (error) => console.error(`[${service.name}] ${error.message}`));
+  children.push({ name: service.name, child });
+}
+
+let stopping = false;
+function stop(exitCode = 0) {
+  if (stopping) return;
+  stopping = true;
+  for (const { child } of children) if (!child.killed) child.kill();
+  process.exitCode = exitCode;
+}
+
+if (children.length === 0) {
+  console.log('Kanban and OpenCode are already running.');
+}
+
+for (const { name, child } of children) {
+  child.on('exit', (code, signal) => {
+    if (stopping) return;
+    if (signal) console.error(`[${name}] stopped by ${signal}`);
+    else if (code) console.error(`[${name}] exited with code ${code}`);
+    stop(code ?? 0);
+  });
+}
+
+process.on('SIGINT', () => stop(0));
+process.on('SIGTERM', () => stop(0));

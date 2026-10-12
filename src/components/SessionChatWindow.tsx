@@ -70,6 +70,9 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
+  // Keep Stop visible until the stream confirms the interrupt took effect,
+  // otherwise the button flips back to Send while the session shuts down.
+  const [interrupted, setInterrupted] = useState(false);
   const [copied, setCopied] = useState(false);
   const [exported, setExported] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -109,14 +112,18 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
   };
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages.length]);
-  useEffect(() => { setInput(''); setSendError(null); }, [sessionId]);
+  useEffect(() => { setInput(''); setSendError(null); setInterrupted(false); }, [sessionId]);
+  // Confirm the interrupt took effect before returning to the Send button.
+  useEffect(() => {
+    if (status === 'closed' || status === 'idle') setInterrupted(false);
+  }, [status]);
 
   if (!task) return null;
   const st = STATUS_DOT[status];
 
   // A session is "busy" while the SSE/poll feed says live or the last
   // assistant row still carries a non-completed tool (shell stuck, etc.).
-  const busy = status === 'live' || status === 'connecting' || messages.some(
+  const busy = status === 'live' || status === 'connecting' || stopping || interrupted || messages.some(
     (m) => m.kind === 'tool' && m.tool && !['executed', 'completed', 'error'].includes((m.tool.status || '').toLowerCase())
   );
 
@@ -126,13 +133,17 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
     setSendError(null);
     const ok = await interruptSession(sessionId);
     setStopping(false);
-    if (ok) retry();
+    if (ok) {
+      setInterrupted(true);
+      retry();
+    }
     else setSendError('Stop failed — session may already be idle.');
   };
 
   const handleSend = async (e?: React.FormEvent) => {
     e?.preventDefault();
     if (!input.trim() || !sessionId || sending) return;
+    setInterrupted(false);
     setSending(true);
     setSendError(null);
     const text = input.trim();

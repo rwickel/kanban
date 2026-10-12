@@ -3,10 +3,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node scripts/dev.mjs",
+    "dev:ui": "vite",
+    "dev:opencode": "opencode serve --port 4099",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "test": "node --test src/**/*.test.ts"
+    "test": "node --test src/**/*.test.ts scripts/**/*.test.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.1.0",

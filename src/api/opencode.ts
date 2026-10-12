@@ -2,7 +2,7 @@ import { OpenCodeAgentInfo, OpenCodeModelInfo, OpenCodeSessionInfo } from '../ty
 
 // Browser never holds the OpenCode password. All OpenCode traffic goes
 // through Vite's /api/kanban/oc/* proxy, which injects Basic auth server-side
-// from .kanban-data/opencode.json (or env). So baseUrl is fixed and headers
+// from the ignored root .env. So baseUrl is fixed and headers
 // carry no secret.
 function baseUrl(): string {
   return '/api/kanban/oc';
@@ -300,12 +300,12 @@ export async function getServerInfo(): Promise<any> {
 }
 
 /** Test the connection via the server-side proxy (password never stored in browser). */
-export async function testConnection(url: string, password: string): Promise<{ ok: boolean; agentCount: number; status?: number }> {
+export async function testConnection(): Promise<{ ok: boolean; agentCount: number; status?: number }> {
   try {
     const res = await fetch('/api/kanban/server/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, password }),
+      body: '{}',
     });
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));

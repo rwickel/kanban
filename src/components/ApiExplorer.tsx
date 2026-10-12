@@ -254,7 +254,7 @@ export default function ApiExplorer({ projectId }: { projectId: string | null })
           {live ? 'LIVE · /api/kanban/docs?format=json' : 'OFFLINE · static copy'}
         </span>
         <span className="muted text-[12px]">
-          No auth on <code className="mono">/api/kanban/*</code>. Other <code className="mono">/api/*</code> paths proxy to OpenCode :4096 (Basic auth).
+          No auth on <code className="mono">/api/kanban/*</code>. Other <code className="mono">/api/*</code> paths proxy to OpenCode configured in the root .env (Basic auth).
         </span>
       </div>
 

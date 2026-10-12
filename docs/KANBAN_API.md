@@ -209,7 +209,7 @@ Invoke-WebRequest http://localhost:3001/api/kanban/delegate `
 
 Body: `projectId*`, `title*`; optional `description`, `priority`,
 `agentId`/`agentName` (must be in the project's team), `modelId`,
-`modelProviderID`, `serverUrl`, `serverPassword`, `timeoutSec` (default 600,
+`modelProviderID`, `timeoutSec` (default 600,
 cap 1800), `pollMs` (default 3000), `wait` (default true — false =
 fire-and-forget, returns right after starting).
 
@@ -217,10 +217,8 @@ How it works: creates the subtask → flips it to `running` → spawns a session
 in the project dir via the OpenCode server → sends the prompt (which tells the
 teammate to finish with `PATCH …/tasks/:id {"status":"done"}`) → polls SQLite
 until `done`/`blocked` or the timeout. Spawn/prompt failures park the subtask
-as `blocked` with `startupError`. Auth to OpenCode comes from (in order): `serverPassword` field, the
-stored creds file (`.kanban-data/opencode.json`, written once via the Server
-modal → `PUT /api/kanban/server` or `OPENCODE_SERVER_PASSWORD` /
-`KANBAN_OPENCODE_PASSWORD` env).
+as `blocked` with `startupError`. OpenCode URL and authentication come only
+from `OPENCODE_SERVER_URL` and `OPENCODE_SERVER_PASSWORD` in the root `.env`.
 **Give the client a generous `-TimeoutSec`** (≥ `timeoutSec`).
 
 ## Follow-up — `POST /api/kanban/message_to` (same session, no new task)
@@ -244,18 +242,16 @@ Invoke-WebRequest http://localhost:3001/api/kanban/message_to `
 ```
 
 Body: `sessionId` **or** `taskId` (resolves via the task's `sessionId`) +
-`text*`; optional `serverUrl`, `serverPassword`, `timeoutSec` (default 120,
+`text*`; optional `timeoutSec` (default 120,
 cap 600), `pollMs` (default 1500). Only the **last assistant message** is
 relevant — tool/reasoning frames are skipped, capped at 4000 chars
-(`resultTruncated: true` when cut). MCP: `kanban_message_to
+(`resultTruncated: true` when cut). Plugin tool: `kanban_message_to
 {sessionId?|taskId?,text,...}`. Same OpenCode auth as delegate.
 
-### `GET` / `PUT /api/kanban/server`
+### `GET /api/kanban/server`
 
-One-time creds storage so delegate needs **no per-call password**:
-`PUT { url?, password? }` → `{ ok, url, hasPassword }` (stored in
-`.kanban-data/opencode.json`, `GET` never returns the secret). The Server
-modal writes it on every Save.
+Returns `{ url, hasPassword }` from the root `.env`. The endpoint never returns
+the secret. Server settings are read-only in the browser.
 
 ## Events — `/api/kanban/events`
 
@@ -288,12 +284,12 @@ Invoke-WebRequest "http://localhost:3001/api/kanban/events?limit=5" -UseBasicPar
 | 500 | anything else, e.g. failed `git clone` (its stderr mentions "Repository not found" but stays a 500) |
 | 401 | **only** on the OpenCode proxy (`/api/*` minus `/api/kanban`): `{"_tag":"UnauthorizedError","message":"Authentication required"}` |
 
-## MCP equivalents (`mcp-kanban/server.js`)
+## Plugin tool equivalents (`opencode-plugin/`)
 
-Same SQLite rows, stdio transport, actor recorded as `"agent"`:
+Same SQLite rows, native plugin tools, actor recorded as `"agent"`:
 
-| MCP tool | HTTP equivalent |
-| -------- | --------------- |
+| Plugin tool | HTTP equivalent |
+| ----------- | --------------- |
 | `kanban_update_status {taskId,status}` | `PATCH /api/kanban/tasks/:id {status}` |
 | `kanban_create_task {projectId,title,...}` | `POST /api/kanban/tasks` |
 | `kanban_update_task {taskId,...}` | `PATCH /api/kanban/tasks/:id` |

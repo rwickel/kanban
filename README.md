@@ -1,10 +1,27 @@
 # kanban
 Kanban Board Opencode Agent
 
+## Development
+
+The ignored root `.env` is the only source for the OpenCode server URL and password:
+
+```dotenv
+OPENCODE_SERVER_URL=http://127.0.0.1:4099
+OPENCODE_SERVER_PASSWORD=<local-secret>
+```
+
+Start the Kanban UI and OpenCode server together:
+
+```powershell
+npm run dev
+```
+
+Restart OpenCode after changing `.env`. The Kanban plugin also loads this file directly.
+
 ## Workflow: kanban task -> opencode agent -> kanban task
 
-Option B — the MCP server owns storage (SQLite). The browser is a thin
-client. No queue files, no localStorage truth.
+SQLite owns storage. The browser is a thin client. No queue files, no
+localStorage truth. Agents use native plugin tools, never MCP.
 
 ```
 +----------------+   HTTP   +----------------+   CLI   +----------------+
@@ -15,20 +32,19 @@ client. No queue files, no localStorage truth.
         |                   +-------+--------+         +-------+--------+
         | creates session                   CLI                 ^ CLI
         | + sends prompt                      \                 |
-        v                                      \                | MCP tools
-+----------------+                              \               | (stdio)
+        v                                      \                | native
++----------------+                              \               | plugin tools
 | OpenCode :4096 |                               \      +-------+--------+
-| /api/session   |                                \     |  MCP server    |
-| /api/.../prompt|                                 \    |  mcp-kanban/   |
-+----------------+                                  \   |  server.js     |
-                                                     \  +-------+--------+
-                                                      \         | called by
-                                                       \       v
-                                                        \ +---------------+
-                                                         \| opencode agent|
-                                                          | (has taskId + |
-                                                          |  projectId)  |
-                                                          +---------------+
+| /api/session   |                                \     |  kanban plugin |
+| /api/.../prompt|                                 \    |  opencode-plugin/|
++----------------+                                  \   +-------+--------+
+                                                     \          | called by
+                                                      \        v
+                                                       \ +----------------+
+                                                        \| opencode agent |
+                                                         | (has taskId +  |
+                                                         |  projectId)    |
+                                                         +----------------+
 ```
 
 ### 1. kanban task -> opencode agent (App.tsx: startTaskExecution)
@@ -45,7 +61,7 @@ user drops card
 ```
 
 `buildTaskPrompt()` embeds `Task id` + `Project id` and instructs the
-agent to call back via MCP tools when done (done/blocked), to split
+agent to call back via plugin tools when done (done/blocked), to split
 follow-ups (kanban_create_task), and to search first (kanban_list_tasks).
 
 ### 2. Shared store (server/kanban.py)
@@ -65,10 +81,10 @@ events   (ts, task_id, actor, action, details) -- audit log
 CLI prints row JSON: `task create|list|show|update|move|delete`,
 `project create|list`, `events list`.
 
-### 3. opencode agent -> kanban task (mcp-kanban/server.js)
+### 3. opencode agent -> kanban task (opencode-plugin/)
 
-stdio MCP, every tool runs `kanban.py` against the same DB and returns
-row JSON synchronously (agent gets the id back):
+Native plugin tools. Every tool runs `kanban.py` against the same DB and
+returns row JSON synchronously (agent gets the id back):
 
 ```
 kanban_update_status {taskId, status} ... task move ......... done/blocked at end

@@ -7,26 +7,16 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFileSync, existsSync, promises as fsp } from "node:fs";
 import { resolve as resolvePath, relative as relativePath, dirname as dirnamePath, sep as sepPath } from "node:path";
+import { loadEnvFile } from "./scripts/env.mjs";
 
 const execFileAsync = promisify(execFile);
 
 const VALID_STATUSES = new Set(["backlog", "running", "done", "blocked"]);
 
-// Load .env so KANBAN_* vars are available without restarting the shell.
-(() => {
-  const p = join(dirname(fileURLToPath(import.meta.url)), ".env");
-  if (!existsSync(p)) return;
-  for (const line of readFileSync(p, "utf8").split("\n")) {
-    const t = line.trim();
-    if (!t || t.startsWith("#") || !t.includes("=")) continue;
-    const k = t.slice(0, t.indexOf("=")).trim();
-    const v = t.slice(t.indexOf("=") + 1).trim();
-    if (k && v && !process.env[k]) process.env[k] = v;
-  }
-})();
+loadEnvFile();
 
 // Option B: SQLite store owned by server/kanban.py (uuid model).
-// Shared file so host, Vite, MCP, and Docker see the same truth:
+// Shared file so host, Vite, plugin, and Docker see the same truth:
 //   host:      <repo>/.kanban-data/kanban.db
 //   container: /work/kanban-clone/.kanban-data/kanban.db
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -168,26 +158,16 @@ function opencodeAuthHeaders(password) {
   return { Authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}` };
 }
 
-// Server-side OpenCode creds: password lives ONLY in Node (file/env).
-// The browser never stores it — it calls /api/kanban/oc/* and Vite injects auth.
-// Write once via PUT /api/kanban/server (Server modal) or .env.
-function credsFile() {
-  return join(dirname(DB), "opencode.json");
-}
+// Server-side OpenCode credentials come only from the ignored root .env.
 function loadServerCreds() {
-  const file = credsFile();
-  let fromFile = {};
-  try {
-    if (existsSync(file)) fromFile = JSON.parse(readFileSync(file, "utf8") || "{}");
-  } catch { /* corrupted — fall through to env */ }
   return {
-    url: fromFile.url || process.env.OPENCODE_SERVER_URL || "http://127.0.0.1:4099",
-    password: fromFile.password ?? process.env.OPENCODE_SERVER_PASSWORD ?? process.env.KANBAN_OPENCODE_PASSWORD ?? "",
+    url: process.env.OPENCODE_SERVER_URL || "http://127.0.0.1:4099",
+    password: process.env.OPENCODE_SERVER_PASSWORD || "",
   };
 }
 
 // Customizable agent style: prompts/final-message-style.md is injected into
-// every agent prompt. Edit the file, restart the dev server + MCP server.
+// every agent prompt. Edit the file, restart the dev server + plugin (opencode restart).
 function loadStyleGuide() {
   try {
     const p = join(HERE, "prompts", "final-message-style.md");
@@ -198,8 +178,8 @@ function loadStyleGuide() {
 
 // ---- message_to helpers: follow-up in the SAME subtask session ----
 // Only the last assistant text message is relevant as the return value.
-function ocApiBase(serverUrl) {
-  const base = ((serverUrl || loadServerCreds().url || "http://127.0.0.1:4099") + "").replace(/\/+$/, "");
+function ocApiBase() {
+  const base = ((loadServerCreds().url || "http://127.0.0.1:4099") + "").replace(/\/+$/, "");
   return base.endsWith("/api") ? base : `${base}/api`;
 }
 function ocAuthHeaders(password) {
@@ -264,7 +244,7 @@ function capResult(text, cap = 4000) {
 // Sends a follow-up into the SAME session (no new task) and waits for the
 // next assistant message. Used after delegate when the parent wants to ask more.
 async function messageToSession(opts) {
-  const { sessionId: sidIn, taskId, text, timeoutSec = 120, pollMs = 1500, serverUrl, serverPassword } = opts || {};
+  const { sessionId: sidIn, taskId, text, timeoutSec = 120, pollMs = 1500 } = opts || {};
   const bodyText = (text || "").trim();
   if (!bodyText) throw { status: 400, message: "text required" };
   let sessionId = (sidIn || "").trim();
@@ -277,8 +257,8 @@ async function messageToSession(opts) {
   if (!sessionId) throw { status: 400, message: "sessionId or taskId required" };
   const timeout = Math.min(Math.max(Number(timeoutSec) || 120, 15), 600);
   const interval = Math.min(Math.max(Number(pollMs) || 1500, 1000), 10000);
-  const apiBase = ocApiBase(serverUrl);
-  const H = ocAuthHeaders(serverPassword);
+  const apiBase = ocApiBase();
+  const H = ocAuthHeaders();
 
   // Baseline: newest assistant message id before we send (so we wait for a NEW one).
   // ocFetchMessages returns asc order; extractLastAssistant walks from the end.
@@ -325,7 +305,7 @@ async function delegateTask(opts) {
     projectId, title, description = "", priority = "medium",
     agentId, agentName, modelId, modelProviderID,
     parentSessionId, result, resultContext,
-    serverUrl, serverPassword, timeoutSec = 600, pollMs = 3000, wait = false,
+    timeoutSec = 600, pollMs = 3000, wait = false,
   } = opts || {};
   if (!projectId || !title) {
     throw { status: 400, message: "projectId and title required" };
@@ -359,10 +339,10 @@ async function delegateTask(opts) {
   const tid = created.id;
   await cli(["task", "move", tid, "running", "--actor", "delegate"]);
 
-  const base = ((serverUrl || loadServerCreds().url || "http://127.0.0.1:4099") + "").replace(/\/+$/, "");
+  const base = ((loadServerCreds().url || "http://127.0.0.1:4099") + "").replace(/\/+$/, "");
   const apiBase = base.endsWith("/api") ? base : `${base}/api`;
   const stored = loadServerCreds();
-  const password = serverPassword ?? stored.password ?? "";
+  const password = stored.password || "";
   const H = { "Content-Type": "application/json", ...opencodeAuthHeaders(password) };
 
   try {
@@ -554,8 +534,8 @@ function kanbanDocs() {
       { method: "GET", path: "/api/kanban/folders/:name/git", returns: "{folder,isRepo,branch,dirty,remote,branches}" },
       { method: "POST", path: "/api/kanban/clone", body: "url*, folder*, branch?", returns: "{ok:true,folder,path}" },
       { method: "GET", path: "/api/kanban/events", query: "task?, limit=50", returns: "Event[]" },
-      { method: "GET|PUT", path: "/api/kanban/server", body: "PUT: url?, password? — stores OpenCode creds once so delegate needs no per-call password", returns: "{url, hasPassword}" },
-      { method: "POST", path: "/api/kanban/delegate", body: "projectId*, title*, agentId*, description?, priority?, agentName?, modelId?, modelProviderID?, parentSessionId?, serverUrl?, serverPassword?, timeoutSec?=600, pollMs?=3000, wait?=false — creates a subtask for a teammate and starts it NOW. Fire-and-forget by default (returns {task, sessionId, waited:false} immediately). Pass wait:true to block until done/blocked.", returns: "{task, sessionId, waited}" },
+      { method: "GET", path: "/api/kanban/server", returns: "Environment-managed {url, hasPassword}" },
+      { method: "POST", path: "/api/kanban/delegate", body: "projectId*, title*, agentId*, description?, priority?, agentName?, modelId?, modelProviderID?, parentSessionId?, timeoutSec?=600, pollMs?=3000, wait?=false — creates a subtask for a teammate and starts it NOW. Fire-and-forget by default (returns {task, sessionId, waited:false} immediately). Pass wait:true to block until done/blocked.", returns: "{task, sessionId, waited}" },
       { method: "POST", path: "/api/kanban/message_to", body: "sessionId?|taskId?*, text*, timeoutSec?=120, pollMs?=1500 — follow-up in SAME subtask session (no new task). Waits for the next assistant message and returns {sessionId, taskId, resultText, resultTruncated}. Use after delegate.", returns: "{sessionId, taskId, resultText, resultTruncated, messageId, waited}" },
       { method: "GET", path: "/api/kanban/docs", returns: "try-it-out HTML page (?format=json → catalogue)" },
       { method: "GET", path: "/api/kanban/openapi.json", returns: "OpenAPI 3.0 spec" },
@@ -735,14 +715,14 @@ function kanbanOpenApi() {
       "/api/kanban/delegate": {
         post: {
           summary: "Create + start a subtask for a teammate (fire-and-forget by default; wait:true blocks until done)",
-          requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["projectId", "title", "agentId"], properties: { projectId: { type: "string" }, title: { type: "string" }, agentId: { type: "string" }, description: { type: "string" }, priority: { type: "string" }, agentName: { type: "string" }, modelId: { type: "string" }, modelProviderID: { type: "string" }, parentSessionId: { type: "string" }, result: { type: "string" }, resultContext: { type: "string" }, serverUrl: { type: "string" }, serverPassword: { type: "string" }, timeoutSec: { type: "integer", default: 600 }, pollMs: { type: "integer", default: 3000 }, wait: { type: "boolean", default: false } } } } } },
+          requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["projectId", "title", "agentId"], properties: { projectId: { type: "string" }, title: { type: "string" }, agentId: { type: "string" }, description: { type: "string" }, priority: { type: "string" }, agentName: { type: "string" }, modelId: { type: "string" }, modelProviderID: { type: "string" }, parentSessionId: { type: "string" }, result: { type: "string" }, resultContext: { type: "string" }, timeoutSec: { type: "integer", default: 600 }, pollMs: { type: "integer", default: 3000 }, wait: { type: "boolean", default: false } } } } } },
           responses: { 200: { description: "{task, sessionId, waited}", content: { "application/json": { schema: { type: "object" } } } } },
         },
       },
       "/api/kanban/message_to": {
         post: {
           summary: "Follow-up in the SAME subtask session (no new task) — waits for next assistant message",
-          requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["text"], properties: { sessionId: { type: "string" }, taskId: { type: "string" }, text: { type: "string" }, serverUrl: { type: "string" }, serverPassword: { type: "string" }, timeoutSec: { type: "integer", default: 120 }, pollMs: { type: "integer", default: 1500 } } } } } },
+          requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["text"], properties: { sessionId: { type: "string" }, taskId: { type: "string" }, text: { type: "string" }, timeoutSec: { type: "integer", default: 120 }, pollMs: { type: "integer", default: 1500 } } } } } },
           responses: { 200: { description: "{sessionId, taskId, resultText, resultTruncated, messageId, waited}", content: { "application/json": { schema: { type: "object" } } } } },
         },
       },
@@ -750,11 +730,6 @@ function kanbanOpenApi() {
         get: {
           summary: "Stored OpenCode creds (url + hasPassword, never the secret)",
           responses: { 200: { description: "{url,hasPassword}", content: { "application/json": { schema: { type: "object" } } } } },
-        },
-        put: {
-          summary: "Store OpenCode url+password once so delegate needs no per-call password",
-          requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: { url: { type: "string" }, password: { type: "string" } } } } } },
-          responses: { 200: { description: "{ok,url,hasPassword}", content: { "application/json": { schema: { type: "object" } } } } },
         },
       },
       "/api/kanban/docs": {
@@ -949,7 +924,7 @@ function kanbanApi() {
           }
           // ---- /api/kanban/oc/* → OpenCode proxy with SERVER-SIDE auth ----
           // The browser never holds the password. It calls these routes and
-          // Vite injects Basic opencode:<password> from opencode.json/env.
+          // Vite injects Basic opencode:<password> from the root .env.
           if (parts[0] === "oc") {
             const ocPath = "/" + parts.slice(1).join("/");
             const qs = q.toString();
@@ -1009,35 +984,18 @@ function kanbanApi() {
               return json(res, 502, { ok: false, error: `OpenCode proxy failed: ${String(err?.message || err).slice(0, 300)}` });
             }
           }
-          // GET/PUT /api/kanban/server → store/load OpenCode url+password for delegate
+          // GET /api/kanban/server → report environment-managed OpenCode state.
           if (parts[0] === "server" && parts.length === 1) {
             if (req.method === "GET") return json(res, 200, { url: loadServerCreds().url, hasPassword: !!loadServerCreds().password });
-            if (req.method === "PUT") {
-              const b = await readBody(req);
-              const cur = loadServerCreds();
-              const next = {
-                url: (b.url ?? cur.url ?? "http://127.0.0.1:4099").toString().trim() || cur.url,
-                password: b.password !== undefined ? String(b.password) : cur.password,
-              };
-              const { writeFileSync } = await import("node:fs");
-              const file = credsFile();
-              const dir = dirname(file);
-              const { mkdirSync } = await import("node:fs");
-              try { mkdirSync(dir, { recursive: true }); } catch {}
-              writeFileSync(file, JSON.stringify(next, null, 2), "utf8");
-              return json(res, 200, { ok: true, url: next.url, hasPassword: !!next.password });
-            }
+            return json(res, 405, { ok: false, error: "Server settings are managed by the root .env file." });
           }
-          // POST /api/kanban/server/test {url?, password?} → test OpenCode creds
-          // SERVER-SIDE so the password never stays in the browser.
+          // POST /api/kanban/server/test → test environment-managed credentials.
           if (parts[0] === "server" && parts.length === 2 && parts[1] === "test" && req.method === "POST") {
-            const b = await readBody(req);
             const stored = loadServerCreds();
-            const tryUrl = ((b.url ?? stored.url ?? "http://127.0.0.1:4099") + "").replace(/\/+$/, "");
+            const tryUrl = (stored.url || "http://127.0.0.1:4099").replace(/\/+$/, "");
             const tryApi = tryUrl.endsWith("/api") ? tryUrl : `${tryUrl}/api`;
-            const tryPw = b.password !== undefined ? String(b.password) : stored.password;
             try {
-              const up = await fetch(`${tryApi}/agent`, { headers: opencodeAuthHeaders(tryPw) });
+              const up = await fetch(`${tryApi}/agent`, { headers: opencodeAuthHeaders(stored.password) });
               if (!up.ok) return json(res, up.status >= 500 ? 502 : up.status, { ok: false, status: up.status });
               const j = await up.json().catch(() => ({}));
               const list = Array.isArray(j) ? j : (j?.data ?? []);
@@ -1159,7 +1117,7 @@ export default defineConfig({
     port: 3001,
     strictPort: true,
     proxy: {
-      "/api": "http://localhost:4096",
+      "/api": "http://127.0.0.1:4099",
     },
     hmr: {
       port: 3001,
