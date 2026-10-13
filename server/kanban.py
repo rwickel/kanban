@@ -56,7 +56,9 @@ for _k in ("KANBAN_PROJECTS_ROOT",):
     _envp = REPO / ".env"
     if _envp.exists() and not os.getenv(_k):
         try:
-            for _line in _envp.read_text(encoding="utf-8").splitlines():
+            # utf-8-sig: .env files written by PowerShell start with a BOM,
+            # which would otherwise prefix the first key and break matching.
+            for _line in _envp.read_text(encoding="utf-8-sig").splitlines():
                 _line = _line.strip()
                 if _line and not _line.startswith("#") and "=" in _line:
                     _kk, _vv = _line.split("=", 1)
@@ -102,12 +104,16 @@ CREATE TABLE IF NOT EXISTS tasks (
     parent_session_id TEXT,
     result TEXT,
     result_context TEXT,
+    notified_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id);
+-- NOTE: idx_tasks_parent_notified is created in get_conn() AFTER the
+-- notified_at backfill, so old DBs (table exists, column missing) don't
+-- fail here with "no such column" at executescript time.
 
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -148,6 +154,10 @@ def get_conn(db_path: Path) -> sqlite3.Connection:
         ("parent_session_id", "TEXT"),
         ("result", "TEXT"),
         ("result_context", "TEXT"),
+        # Delivery ledger: set when a finished task's result has been queued back
+        # into its parent session (see vite.config.js reconcileResultsLoop).
+        # NULL means "not yet delivered", so restarts retry automatically.
+        ("notified_at", "TEXT"),
     ):
         if col not in cols:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {ddl}")
@@ -160,6 +170,12 @@ def get_conn(db_path: Path) -> sqlite3.Connection:
     ):
         if col not in pcols:
             conn.execute(f"ALTER TABLE projects ADD COLUMN {col} {ddl}")
+    # Index the delivery-ledger scan. Created here (not in SCHEMA) because the
+    # old-DB path above may still have been adding notified_at.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_parent_notified "
+        "ON tasks(status, parent_session_id, notified_at)"
+    )
     conn.commit()
     return conn
 
@@ -247,6 +263,7 @@ def row_to_task(r: sqlite3.Row) -> dict:
         "parentSessionId": r["parent_session_id"] if "parent_session_id" in keys else None,
         "result": r["result"] if "result" in keys else None,
         "resultContext": r["result_context"] if "result_context" in keys else None,
+        "notifiedAt": r["notified_at"] if "notified_at" in keys else None,
         "createdAt": r["created_at"],
         "updatedAt": r["updated_at"],
     }
@@ -565,6 +582,7 @@ def cmd_task_update(args):
         ("parent_session_id", getattr(args, "parent_session_id", None)),
         ("result", getattr(args, "result", None)),
         ("result_context", getattr(args, "result_context", None)),
+        ("notified_at", getattr(args, "notified_at", None)),
     ]
     for col, val in mapping:
         if val is not None:
@@ -713,6 +731,55 @@ def cmd_task_watch(args):
                             "sessionId": r["session_id"] if "session_id" in keys2 else None})
     conn.commit()
     print(json.dumps({"checked": len(rows), "stalled": stalled}, indent=2))
+    conn.close()
+
+
+def cmd_task_notify_pending(args):
+    """Delivery ledger scan: finished tasks with a parent that are NOT yet delivered.
+
+    This is the read half of the result link-back. It watches the DATA (status +
+    parent_session_id + notified_at), so every path that flips a task to
+    done/blocked is covered — reconciler, watchdog, plugin, drag-drop — not just
+    the callers that remembered to notify.
+    """
+    conn = get_conn(args.db)
+    rows = conn.execute(
+        """SELECT * FROM tasks
+             WHERE status IN ('done', 'blocked')
+               AND parent_session_id IS NOT NULL
+               AND TRIM(COALESCE(parent_session_id, '')) != ''
+               AND notified_at IS NULL
+             ORDER BY updated_at ASC"""
+    ).fetchall()
+    out = [row_to_task(r) for r in rows]
+    lim = getattr(args, "limit", None)
+    if lim is not None:
+        out = out[: int(lim)]
+    print(json.dumps(out, indent=2))
+    conn.close()
+
+
+def cmd_task_notify_mark(args):
+    """Stamp notified_at so the ledger stops retrying these tasks (idempotent).
+
+    Accepts one or more ids so a parent that received a single batched
+    delivery is stamped in a single subprocess call.
+    """
+    conn = get_conn(args.db)
+    stamped = []
+    for tid in args.task_ids:
+        row = conn.execute("SELECT id FROM tasks WHERE id = ?", (tid,)).fetchone()
+        if not row:
+            fail(f"Task not found: {tid}")
+        ts = now_iso()
+        conn.execute(
+            "UPDATE tasks SET notified_at = ?, updated_at = ? WHERE id = ?",
+            (ts, ts, tid),
+        )
+        log_event(conn, tid, args.actor, "task.notified", {"notifiedAt": ts})
+        stamped.append({"id": tid, "notifiedAt": ts})
+    conn.commit()
+    print(json.dumps({"ok": True, "marked": stamped}))
     conn.close()
 
 
@@ -868,6 +935,15 @@ def main(argv=None):
     tw.add_argument("--default-timeout", type=int, default=600, help="Default stall limit in seconds when task has no --expected-sec.")
     tw.add_argument("--actor", default="watchdog")
     tw.set_defaults(func=cmd_task_watch)
+
+    tn = tsub.add_parser("notify-pending", help="List finished tasks with a parent that are not yet delivered.")
+    tn.add_argument("--limit", type=int, default=None, help="Cap rows returned.")
+    tn.set_defaults(func=cmd_task_notify_pending)
+
+    tm2 = tsub.add_parser("notify-mark", help="Stamp notified_at so these tasks stop being retried (idempotent).")
+    tm2.add_argument("task_ids", nargs="+", help="One or more task ids to stamp.")
+    tm2.add_argument("--actor", default="notifier")
+    tm2.set_defaults(func=cmd_task_notify_mark)
 
     ep = sub.add_parser("events", help="Event log.")
     esub = ep.add_subparsers(dest="ecmd", required=True)

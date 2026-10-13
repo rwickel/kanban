@@ -37,6 +37,7 @@ import {
 } from './store/kanban';
 import { fetchAgents, createSession, sendPrompt, getServerInfo } from './api/opencode';
 import { getTaskModelPref } from './store/serverConfig';
+import { ensureAssistantSession } from './store/assistantSession';
 import KanbanColumn, { columnIcons } from './components/KanbanColumn';
 import TaskModal from './components/TaskModal';
 import SessionChatWindow from './components/SessionChatWindow';
@@ -231,6 +232,18 @@ export default function App() {
     timer = setTimeout(tick, pollDelayMs());
     return () => { stopped = true; clearTimeout(timer); };
   }, [loadData, loadAgents]);
+
+  // Board assistant chat gets its own assistant session at startup so the
+  // id is known right away (pastable in the welcome bubble, usable as
+  // parentSessionId on the first delegated task). Does not reopen the panel.
+  useEffect(() => {
+    const pid = activeProjectId;
+    if (!pid) return;
+    const proj = projects.find((p) => p.id === pid);
+    if (!proj) return;
+    void ensureAssistantSession(proj).catch((e) => console.warn('assistant session startup failed', e));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProjectId]);
 
   // Active project
   const activeProject = projects.find(p => p.id === activeProjectId) || null;
