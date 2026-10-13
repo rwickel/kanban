@@ -103,29 +103,29 @@
 
 /* ——— column tabs ——— */
 .m-tabs {
-  display: flex;
-  gap: 6px;
-  padding: 8px 12px;
-  overflow-x: auto;
-  scrollbar-width: none;
-  background: var(--surface);
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  padding: 6px 10px;
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--surface-2);
   border-bottom: 1px solid var(--border);
 }
 
-.m-tabs::-webkit-scrollbar { display: none; }
-
 .m-tab {
-  flex: 1 0 auto;
-  min-width: 78px;
-  min-height: 44px;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 40px;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
+  gap: 3px;
+  padding: 5px 3px;
+  border: 1px solid transparent;
   border-radius: 6px;
-  background: var(--surface-2);
+  background: transparent;
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: 11px;
@@ -133,12 +133,25 @@
   letter-spacing: .02em;
   text-transform: uppercase;
   white-space: nowrap;
+  transition: background .16s ease, color .16s ease, border-color .16s ease;
+}
+
+.m-tab .pill {
+  flex-shrink: 0;
+  padding-inline: 5px !important;
+  background: var(--surface);
 }
 
 .m-tab.is-active {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--accent-text);
+}
+
+.m-tab.is-active .pill {
+  background: color-mix(in srgb, var(--accent-text) 18%, transparent);
+  color: inherit;
+  border-color: color-mix(in srgb, var(--accent-text) 25%, transparent);
 }
 
 .m-tab-icon { width: 14px; height: 14px; flex-shrink: 0; }
@@ -259,12 +272,17 @@
 .m-full {
   position: fixed;
   inset: 0;
+  width: 100%;
+  height: 100dvh;
+  min-height: 0;
+  box-sizing: border-box;
   z-index: 62;
   display: flex;
   flex-direction: column;
   background: var(--surface);
   padding-top: env(safe-area-inset-top);
   padding-bottom: env(safe-area-inset-bottom);
+  overflow: hidden;
   animation: m-slide-up .2s ease-out;
 }
 
@@ -483,6 +501,7 @@
 /* ——— full screen chat ——— */
 .m-chat-feed {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   padding: 14px 12px;

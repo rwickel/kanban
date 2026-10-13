@@ -55,6 +55,11 @@ export default function MobileHeader({
         <button className="m-icon-btn" onClick={onToggleTheme} aria-label="Toggle theme">
           {theme === 'light' ? <Moon className="w-4 h-4" strokeWidth={1.75} /> : <Sun className="w-4 h-4" strokeWidth={1.75} />}
         </button>
+        {project && (
+          <button className="m-icon-btn" onClick={onOpenAssistant} aria-label="Open board assistant" title="Open board assistant">
+            <MessageSquare className="w-4 h-4" strokeWidth={1.75} />
+          </button>
+        )}
         <button className="m-icon-btn" onClick={() => setDrawer(true)} aria-label="Open menu">
           <Menu className="w-4 h-4" strokeWidth={1.75} />
         </button>
