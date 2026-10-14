@@ -41,7 +41,7 @@ export default function MobileChat({
   const [createError, setCreateError] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
-  const { supported: speechSupported, listening: speechListening, speechError, toggle: toggleSpeech } = useSpeechInput();
+  const { listening: speechListening, transcribing: speechTranscribing, downloadPct: speechPct, speechError, toggle: toggleSpeech, clearSpeechError } = useSpeechInput();
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -220,38 +220,40 @@ export default function MobileChat({
 
       {speechError && (
         <div
-          className="px-3 py-2 text-[11px]"
+          className="px-3 py-2 text-[11px] flex items-center gap-2"
+          role="alert"
           style={{ position: 'absolute', right: 0, bottom: 76, left: 0, color: 'var(--amber)', background: 'var(--surface)' }}
         >
-          {speechError}
+          <span className="flex-1">{speechError}</span>
+          <button type="button" className="underline shrink-0" onClick={clearSpeechError} aria-label="Dismiss speech error">Dismiss</button>
         </div>
       )}
 
-      <form className="m-chat-foot" style={{ gridRow: 3, height: 76, minHeight: 0, overflow: 'hidden', alignItems: 'center' }} onSubmit={busy ? (e) => { e.preventDefault(); handleStop(); } : handleSend}>
+      <form className="m-chat-foot" style={{ gridRow: 3, height: 76, minHeight: 0, minWidth: 0, maxWidth: '100vw', overflow: 'hidden', alignItems: 'center' }} onSubmit={busy ? (e) => { e.preventDefault(); handleStop(); } : handleSend}>
         <input
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder={speechListening ? 'Listening — speak now…' : busy ? 'Session running — Stop to interrupt…' : 'Reply to agent…'}
+          placeholder={speechTranscribing ? 'Transcribing locally…' : speechListening ? (speechPct != null && speechPct >= 0 ? `Loading voice model ${Math.min(100, Math.round(speechPct * 100))}%…` : 'Listening — speak now…') : busy ? 'Session running — Stop to interrupt…' : 'Reply to agent…'}
           className="input"
           style={{ height: 44, minHeight: 44, maxHeight: 44 }}
           disabled={busy || creating || (!activeSessionId && !project)}
         />
-        {speechSupported && !busy && (
-          <button
-            type="button"
-            onClick={() => toggleSpeech((text) => setInput((prev) => (prev ? `${prev} ${text}` : text).slice(0, 4000)))}
-            disabled={creating || (!activeSessionId && !project)}
-            className="m-chat-send"
-            style={speechListening
-              ? { background: 'var(--danger)', width: 44, height: 44, minHeight: 44, flexShrink: 0 }
-              : { width: 44, height: 44, minHeight: 44, flexShrink: 0 }}
-            aria-label={speechListening ? 'Stop speech input' : 'Use speech input'}
-            aria-pressed={speechListening}
-          >
-            {speechListening ? <MicOff className="w-4 h-4" strokeWidth={1.75} /> : <Mic className="w-4 h-4" strokeWidth={1.75} />}
-          </button>
-        )}
+        {/* Mic always visible: on plain-http phones the mic API is
+            missing, so toggle() shows the HTTPS hint instead of hiding. */}
+        <button
+          type="button"
+          onClick={() => toggleSpeech((text) => setInput((prev) => (prev ? `${prev} ${text}` : text).slice(0, 4000)))}
+          disabled={creating || (!activeSessionId && !project) || (busy && !speechListening)}
+          className="m-chat-send"
+          style={speechListening
+            ? { background: 'var(--danger)', width: 44, height: 44, minHeight: 44, flexShrink: 0 }
+            : { width: 44, height: 44, minHeight: 44, flexShrink: 0 }}
+          aria-label={speechListening ? 'Stop speech input' : 'Use speech input'}
+          aria-pressed={speechListening}
+        >
+          {speechListening ? <MicOff className="w-4 h-4" strokeWidth={1.75} /> : <Mic className="w-4 h-4" strokeWidth={1.75} />}
+        </button>
         {busy ? (
           <button type="submit" disabled={stopping || !activeSessionId} className="m-chat-send" style={{ background: 'var(--danger)', width: 44, height: 44, minHeight: 44, flexShrink: 0 }} aria-label="Stop session">
             {stopping ? <Loader2 className="w-4 h-4 animate-spin" strokeWidth={1.75} /> : <Square className="w-4 h-4" strokeWidth={1.75} />}

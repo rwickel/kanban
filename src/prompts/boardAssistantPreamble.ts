@@ -32,6 +32,8 @@ const FALLBACK_TEMPLATE = [
   '',
   'This chat is the board assistant for {{projectName}}. It is not a board task.',
   '',
+  'Project description: {{projectDescription}}',
+  '',
   'Session id: {{sessionId}}',
   'Pass `"parentSessionId": "{{sessionId}}"` when you delegate work so results link back here.',
   '',
@@ -46,6 +48,7 @@ const FALLBACK_TEMPLATE = [
 
 export interface PreambleVars {
   projectName: string;
+  projectDescription: string;
   projectPath: string;
   projectId: string;
   sessionId: string;
@@ -114,6 +117,7 @@ export async function buildAssistantPreamble(
   const [template, styleGuide] = await Promise.all([loadPreambleTemplate(), loadStyleGuide()]);
   return renderPreamble(template, {
     projectName: project.name?.trim() || '(unnamed project)',
+    projectDescription: project.description?.trim() || '(no project description provided)',
     projectPath: project.path?.trim() || '(no path)',
     projectId: project.id,
     sessionId,

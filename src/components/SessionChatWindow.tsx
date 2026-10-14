@@ -106,7 +106,7 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
   const [interrupted, setInterrupted] = useState(false);
   const [copied, setCopied] = useState(false);
   const [exported, setExported] = useState(false);
-  const { supported: speechSupported, listening: speechListening, speechError, toggle: toggleSpeech } = useSpeechInput();
+  const { supported: speechSupported, listening: speechListening, transcribing: speechTranscribing, downloadPct: speechPct, speechError, toggle: toggleSpeech } = useSpeechInput();
   const bottomRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(() => {
     try {
@@ -325,11 +325,12 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
       <form onSubmit={busy ? (e) => { e.preventDefault(); handleStop(); } : handleSend} className="p-3 border-t hairline" style={{ borderTopWidth: 1, borderTopStyle: 'solid', background: 'var(--surface)' }}>
         <div className="flex gap-1.5 items-end">
           <input type="text" value={input} onChange={(e) => setInput(e.target.value)}
-            placeholder={speechListening ? 'Listening — speak now…' : busy ? 'Session running — Stop to interrupt…' : 'Reply to agent…  (↵ send)'} className="input" disabled={busy} />
-          {speechSupported && !busy && (
+            placeholder={speechTranscribing ? 'Transcribing locally…' : speechListening ? (speechPct != null && speechPct >= 0 ? `Loading voice model ${Math.min(100, Math.round(speechPct * 100))}%…` : 'Listening — speak now…') : busy ? 'Session running — Stop to interrupt…' : 'Reply to agent…  (↵ send)'} className="input" disabled={busy} />
+          {speechSupported && (
             <button
               type="button"
               onClick={() => toggleSpeech((text) => setInput((prev) => (prev ? `${prev} ${text}` : text).slice(0, 4000)))}
+              disabled={busy && !speechListening}
               className="btn p-2 shrink-0"
               title={speechListening ? 'Stop speech input' : 'Use speech input'}
               aria-pressed={speechListening}

@@ -44,12 +44,19 @@ export default function MobileHeader({
           <button className="m-logo-btn" onClick={() => setDrawer(true)} aria-label="Open menu" title="Open menu">
             <span className="m-logo"><LayoutGrid className="w-4 h-4" strokeWidth={1.75} /></span>
           </button>
-          <span style={{ minWidth: 0 }}>
+          <button
+            className="m-project"
+            style={{ minWidth: 0 }}
+            onClick={() => { if (project) onEditProject(project); }}
+            disabled={!project}
+            aria-label={project ? `Edit project ${project.name}` : 'No project selected'}
+            title={project ? 'Edit project' : undefined}
+          >
             <span className="m-project-name">{project?.name ?? 'Select project'}</span>
             <span className="m-project-sub">
               {isConnected ? 'CONNECTED' : 'DEMO'} · {projects.length} project{projects.length === 1 ? '' : 's'}
             </span>
-          </span>
+          </button>
         </div>
         <span className={`pill ${isConnected ? 'p-green' : 'p-amber'}`}>
           {isConnected ? <Wifi className="w-3 h-3" strokeWidth={1.75} /> : <WifiOff className="w-3 h-3" strokeWidth={1.75} />}

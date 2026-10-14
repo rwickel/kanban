@@ -28,6 +28,7 @@ const agents: Agent[] = [
 test('renders every known slot and leaves unknown slots visible', () => {
   const out = renderPreamble('# Board assistant — {{projectName}}\n{{teamLines}}\n{{nope}}', {
     projectName: project.name,
+    projectDescription: project.description,
     projectPath: project.path,
     projectId: project.id,
     sessionId: 'ses_1',
@@ -43,6 +44,7 @@ test('renders every known slot and leaves unknown slots visible', () => {
 test('empty string values keep their placeholder rather than blanking the line', () => {
   const out = renderPreamble('Session id: {{sessionId}}', {
     projectName: 'Demo',
+    projectDescription: '',
     projectPath: '',
     projectId: '',
     sessionId: '',

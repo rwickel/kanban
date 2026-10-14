@@ -5,7 +5,7 @@
 import { useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Bot, User, ChevronDown, Wrench, Check, AlertTriangle } from 'lucide-react';
+import { Bot, User, ChevronDown, Wrench, Check, Copy, AlertTriangle } from 'lucide-react';
 import type { ChatStatus } from '../hooks/useSessionStream';
 import type { ChatMessage, QuestionItem } from './chatEvents';
 import { linkifyFilePaths, parsePreviewHref } from './filePaths';
@@ -499,6 +499,7 @@ export function ToolRow({ msg, onFileClick, onAnswered }: { msg: ChatMessage; on
 }
 
 export function ChatBubble({ msg, agentName, modelName, showAvatar = true, onFileClick }: { msg: ChatMessage; agentName?: string; modelName?: string; showAvatar?: boolean; onFileClick: (absPath: string) => void }) {
+  const [copied, setCopied] = useState(false);
   const isUser = msg.kind === 'user';
   const metaAgent = msg.meta?.agent ?? agentName;
   const metaModel = msg.meta?.model ?? modelName;
@@ -531,6 +532,23 @@ export function ChatBubble({ msg, agentName, modelName, showAvatar = true, onFil
     elapsed ? `elapsed: ${elapsed}` : null,
     hasCost ? `cost: $${cost!.toFixed(4)}` : null,
   ].filter(Boolean).join('\n');
+  const copyMessage = async () => {
+    try {
+      await navigator.clipboard.writeText(msg.markdown);
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = msg.markdown;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  };
   return (
     <div className={`flex gap-2 animate-fadeIn ${isUser ? 'justify-end' : 'justify-start'}`}>
       {!isUser && (showAvatar ? (
@@ -542,10 +560,10 @@ export function ChatBubble({ msg, agentName, modelName, showAvatar = true, onFil
         {!isUser && showAvatar && agentName && (
           <p className="text-[10px] font-semibold uppercase tracking-widest muted mb-1 ml-1 mono">{agentName}</p>
         )}
-        <div className="md-body text-[12.5px] leading-relaxed break-words"
+        <div className="md-body relative text-[12.5px] leading-relaxed break-words"
           style={isUser
-            ? { background: 'var(--accent)', color: 'var(--accent-text)', border: '1px solid var(--accent)', borderRadius: 6, padding: '8px 10px' }
-            : { background: 'var(--surface)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 6, padding: '8px 10px' }}>
+            ? { background: 'var(--accent)', color: 'var(--accent-text)', border: '1px solid var(--accent)', borderRadius: 6, padding: '8px 10px 28px' }
+            : { background: 'var(--surface)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 6, padding: '8px 10px 28px' }}>
           <Markdown
             remarkPlugins={[remarkGfm]}
             components={{
@@ -568,6 +586,15 @@ export function ChatBubble({ msg, agentName, modelName, showAvatar = true, onFil
               },
             }}
           >{linkifyFilePaths(msg.markdown)}</Markdown>
+          <button
+            type="button"
+            onClick={copyMessage}
+            className="btn absolute right-1 bottom-1 inline-flex items-center justify-center p-1"
+            title={copied ? 'Copied' : 'Copy message'}
+            aria-label={copied ? 'Message copied' : 'Copy message'}
+          >
+            {copied ? <Check className="w-3 h-3" style={{ color: isUser ? 'var(--accent-text)' : 'var(--emerald)' }} strokeWidth={1.75} /> : <Copy className="w-3 h-3" strokeWidth={1.75} />}
+          </button>
         </div>
         {!isUser && metaBits.length > 0 && (
           <p className="text-[10px] muted mono mt-1 ml-1 truncate" title={metaTitle}>

@@ -56,7 +56,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
   const [copied, setCopied] = useState(false);
   const [exported, setExported] = useState(false);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
-  const { supported: speechSupported, listening: speechListening, speechError, toggle: toggleSpeech } = useSpeechInput();
+  const { supported: speechSupported, listening: speechListening, transcribing: speechTranscribing, downloadPct: speechPct, speechError, toggle: toggleSpeech } = useSpeechInput();
   const bottomRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(() => {
     try {
@@ -421,12 +421,12 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
         {speechError && <div className="px-3.5 pt-2 text-[11px]" style={{ color: 'var(--amber)' }}>{speechError}</div>}
         <form onSubmit={busy ? (e) => { e.preventDefault(); handleStop(); } : handleSend} className="p-3 border-t hairline" style={{ borderTopWidth: 1, borderTopStyle: 'solid', background: 'var(--surface)' }}>
           <div className="flex gap-1.5 items-end">
-            <input type="text" value={input} onChange={(e) => setInput(e.target.value)} placeholder={speechListening ? 'Listening — speak now…' : busy ? 'Assistant running — Stop to interrupt…' : 'Ask the board assistant…  (↵ send)'} className="input" disabled={busy || creating} autoFocus />
-            {speechSupported && !busy && (
+            <input type="text" value={input} onChange={(e) => setInput(e.target.value)} placeholder={speechTranscribing ? 'Transcribing locally…' : speechListening ? (speechPct != null && speechPct >= 0 ? `Loading voice model ${Math.min(100, Math.round(speechPct * 100))}%…` : 'Listening — speak now…') : busy ? 'Assistant running — Stop to interrupt…' : 'Ask the board assistant…  (↵ send)'} className="input" disabled={busy || creating} autoFocus />
+            {speechSupported && (
               <button
                 type="button"
                 onClick={() => toggleSpeech((text) => setInput((prev) => (prev ? `${prev} ${text}` : text).slice(0, 4000)))}
-                disabled={creating}
+                disabled={creating || (busy && !speechListening)}
                 className="btn p-2 shrink-0"
                 title={speechListening ? 'Stop speech input' : 'Use speech input'}
                 aria-pressed={speechListening}

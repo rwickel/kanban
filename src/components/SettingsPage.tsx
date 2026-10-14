@@ -1,7 +1,7 @@
-import { ArrowLeft, Check, Monitor, Moon, Smartphone, Sun, Type } from 'lucide-react';
+import { ArrowLeft, Check, Languages, Monitor, Moon, Smartphone, Sun, Type } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Theme, useTheme } from '../hooks/useTheme';
-import { FontSize, PreferredView, usePreferences } from '../hooks/usePreferences';
+import { FontSize, PreferredView, SPEECH_LANGS, usePreferences } from '../hooks/usePreferences';
 
 const FONT_SIZES: { value: FontSize; label: string }[] = [
   { value: 13, label: 'Compact' },
@@ -12,7 +12,7 @@ const FONT_SIZES: { value: FontSize; label: string }[] = [
 
 export default function SettingsPage() {
   const { theme, setTheme } = useTheme();
-  const { preferredView, setPreferredView, fontSize, setFontSize } = usePreferences();
+  const { preferredView, setPreferredView, fontSize, setFontSize, speechLang, setSpeechLang } = usePreferences();
   const backPath = window.location.search.includes('from=mobile') ? '/m' : '/';
 
   const chooseView = (value: PreferredView) => {
@@ -52,6 +52,18 @@ export default function SettingsPage() {
               icon={Type}
               selected={fontSize === option.value}
               onClick={() => setFontSize(option.value)}
+            />
+          ))}
+        </SettingSection>
+
+        <SettingSection title="Speech language" description="Voice input transcribes in this language. First use downloads the model once (~75MB).">
+          {SPEECH_LANGS.map((option) => (
+            <Choice
+              key={option.value}
+              label={option.label}
+              icon={Languages}
+              selected={speechLang === option.value}
+              onClick={() => setSpeechLang(option.value)}
             />
           ))}
         </SettingSection>
