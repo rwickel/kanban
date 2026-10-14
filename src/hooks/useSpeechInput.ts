@@ -99,12 +99,17 @@ async function blobTo16kMono(blob: Blob): Promise<Float32Array> {  const buf = a
 }
 
 export function useSpeechInput() {
+  // Capability (browser can do it) vs. context (HTTPS needed for mic).
+  // Keep these separate: on plain-http LAN, Chrome hides getUserMedia but
+  // the browser itself is fine — toggle() then reports insecure-context
+  // instead of the misleading "not supported".
   const [supported] = useState(() =>
     typeof window !== 'undefined' &&
-    !!navigator?.mediaDevices?.getUserMedia &&
     typeof MediaRecorder !== 'undefined' &&
     (typeof AudioContext !== 'undefined' ||
       typeof (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext !== 'undefined'));
+  const [micAvailable] = useState(() =>
+    typeof window !== 'undefined' && !!navigator?.mediaDevices?.getUserMedia);
   const [listening, setListening] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const [downloadPct, setDownloadPct] = useState<number | null>(null);
@@ -117,7 +122,24 @@ export function useSpeechInput() {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mimeRef = useRef<string | undefined>(undefined);
   const heardRef = useRef(false);
+  const preloadedRef = useRef(false);
   const onTextRef = useRef<((text: string, isFinal: boolean) => void) | null>(null);
+
+  // Warm the model when the chat mounts, so tapping mic later starts
+  // transcribing immediately instead of showing "Loading voice model".
+  // Cached in IndexedDB after first download; no-op when ready.
+  useEffect(() => {
+    if (!supported || preloadedRef.current) return;
+    if (typeof window === 'undefined' || !window.isSecureContext) return;
+    preloadedRef.current = true;
+    const timer = setTimeout(() => {
+      getTranscriber((pct) => setDownloadPct(pct)).then(
+        () => setDownloadPct(null),
+        () => setDownloadPct(null),
+      );
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [supported]);
 
   useEffect(() => () => {
     stoppedRef.current = true;
@@ -219,9 +241,15 @@ export function useSpeechInput() {
       return;
     }
     // Mic input requires a secure context (HTTPS or localhost).
-    // Android Chrome blocks getUserMedia on plain http://LAN URLs.
+    // Android Chrome HIDES getUserMedia on plain http://LAN URLs, so check
+    // this BEFORE micAvailable: otherwise http://192.168.x.x reports the
+    // misleading "not supported" instead of the real HTTPS fix.
     if (typeof window !== 'undefined' && !window.isSecureContext) {
-      fail('insecure-context', 'Microphone needs HTTPS — open this board over https:// or localhost, then retry.');
+      fail('insecure-context', 'Microphone needs HTTPS — this browser is fine, but the page must load over https:// (or localhost). Plain http://LAN never prompts for mic on Android.');
+      return;
+    }
+    if (!micAvailable) {
+      fail('unsupported', 'Speech input not supported in this browser — try Chrome on Android.');
       return;
     }
     setSpeechError(null);
@@ -235,14 +263,25 @@ export function useSpeechInput() {
       () => setDownloadPct(null),
     );
     // 1. Mic permission + start recording immediately (fast UX).
+    // Android Chrome: if the OS permission is hard-denied ("Don't allow" with
+    // "never ask again" or site set to Block), getUserMedia throws
+    // NotAllowedError without a prompt. Surface the exact Android fix path.
     let stream: MediaStream;
     try {
+      try {
+        const perm = await (navigator as unknown as { permissions?: { query: (o: { name: string }) => Promise<{ state: string }> } }).permissions?.query({ name: 'microphone' as never });
+        if (perm && perm.state === 'denied') {
+          fail('not-allowed',
+            'Microphone blocked on this phone — in Chrome tap ⋮ > Settings > Site settings > Microphone, allow it for this site; then Android Settings > Apps > Chrome > Permissions > Microphone > Allow, reload, retry.');
+          return;
+        }
+      } catch { /* Permissions API missing — fall through to getUserMedia */ }
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (err) {
       const name = (err as { name?: string })?.name ?? '';
       if (name === 'NotAllowedError' || name === 'SecurityError') {
         fail('not-allowed',
-          'Microphone blocked — tap the lock icon in the address bar, allow Microphone, then retry.');
+          'Microphone blocked — tap the lock/tune icon left of the address bar, set Microphone to Allow, reload. Still blocked? Chrome ⋮ > Settings > Site settings > Microphone + Android Settings > Apps > Chrome > Permissions > Microphone > Allow.');
       } else if (name === 'NotFoundError' || name === 'OverconstrainedError') {
         fail('not-found', 'No microphone found — check the device has a mic and it is enabled.');
       } else if (name === 'NotReadableError' || name === 'AbortError') {
@@ -261,7 +300,7 @@ export function useSpeechInput() {
     streamRef.current = stream;
     setListening(true);
     startChunk();
-  }, [listening, transcribing, supported, stop, startChunk, fail]);
+  }, [listening, transcribing, supported, micAvailable, stop, startChunk, fail]);
 
   return {
     supported, listening: listening || transcribing, speechError,

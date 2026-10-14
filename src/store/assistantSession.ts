@@ -9,6 +9,7 @@ import {
   buildAssistantPreamble,
 } from '../prompts/boardAssistantPreamble';
 import type { Project } from '../types';
+import { readSpeechLang } from '../hooks/usePreferences';
 import { getTaskModelPref } from './serverConfig';
 
 const SESSION_PREFIX = 'kanban_assistant_session_';
@@ -77,7 +78,9 @@ async function createFor(project: Project, agentId: string, model: string): Prom
   void (async () => {
     try {
       const agents = await fetchAgents(directory);
-      const markdown = await buildAssistantPreamble(project, agents, res.session!.id);
+      const language = readSpeechLang();
+      const languageNames: Record<string, string> = { en: 'English', de: 'German', fr: 'French', es: 'Spanish', it: 'Italian', pt: 'Portuguese', nl: 'Dutch' };
+      const markdown = await buildAssistantPreamble(project, agents, res.session!.id, languageNames[language] ?? language);
       await putSessionInstruction(res.session!.id, PREAMBLE_KEY, markdown);
     } catch {
       /* S4 covers the miss: attach + one retry, then the inline fallback. */

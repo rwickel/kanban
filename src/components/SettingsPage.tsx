@@ -56,7 +56,7 @@ export default function SettingsPage() {
           ))}
         </SettingSection>
 
-        <SettingSection title="Speech language" description="Voice input transcribes in this language. First use downloads the model once (~75MB).">
+        <SettingSection title="Response and speech language" description="Chat output, task summaries, and voice input use this language.">
           {SPEECH_LANGS.map((option) => (
             <Choice
               key={option.value}

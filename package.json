@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
+    "dev:https": "node scripts/dev.mjs --https",
     "dev:ui": "vite",
     "dev:opencode": "opencode serve --port 4099",
     "build": "vite build",
@@ -35,6 +36,7 @@
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
     "@types/uuid": "^9.0.7",
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
     "@vitejs/plugin-react": "^4.3.4",
     "tailwindcss": "^4.1.7",
     "typescript": "^5.7.0",

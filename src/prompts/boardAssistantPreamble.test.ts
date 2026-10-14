@@ -29,6 +29,7 @@ test('renders every known slot and leaves unknown slots visible', () => {
   const out = renderPreamble('# Board assistant — {{projectName}}\n{{teamLines}}\n{{nope}}', {
     projectName: project.name,
     projectDescription: project.description,
+    configuredLanguage: 'English',
     projectPath: project.path,
     projectId: project.id,
     sessionId: 'ses_1',
@@ -45,6 +46,7 @@ test('empty string values keep their placeholder rather than blanking the line',
   const out = renderPreamble('Session id: {{sessionId}}', {
     projectName: 'Demo',
     projectDescription: '',
+    configuredLanguage: '',
     projectPath: '',
     projectId: '',
     sessionId: '',

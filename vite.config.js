@@ -1,6 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import basicSsl from "@vitejs/plugin-basic-ssl";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join, dirname } from "node:path";
@@ -1045,6 +1046,8 @@ function kanbanApi() {
                 res.setHeader("Content-Type", "text/event-stream");
                 res.setHeader("Cache-Control", "no-cache");
                 res.setHeader("Connection", "keep-alive");
+                res.setHeader("X-Accel-Buffering", "no");
+                if (typeof res.flushHeaders === "function") res.flushHeaders();
                 const reader = up.body.getReader();
                 const decoder = new TextDecoder();
                 req.on("close", () => { try { reader.cancel(); } catch {} });
@@ -1215,7 +1218,9 @@ function kanbanApi() {
 }
 
 export default defineConfig({
-  plugins: [react(), tailwindcss(), kanbanApi()],
+  // Mic on Android needs HTTPS: run `npm run dev:https` (or KANBAN_HTTPS=1)
+  // to serve with a self-signed cert. Accept the warning on the phone once.
+  plugins: [react(), tailwindcss(), ...(process.env.KANBAN_HTTPS ? [basicSsl()] : []), kanbanApi()],
   server: {
     host: "0.0.0.0",
     port: 3001,
@@ -1225,6 +1230,7 @@ export default defineConfig({
     },
     hmr: {
       port: 3001,
+      ...(process.env.KANBAN_HTTPS ? { protocol: "wss" } : {}),
     },
   },
 });

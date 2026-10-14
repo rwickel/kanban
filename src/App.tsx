@@ -16,7 +16,7 @@ import {
   Sun,
 } from 'lucide-react';
 import { Theme, useTheme } from './hooks/useTheme';
-import { usePreferences } from './hooks/usePreferences';
+import { readSpeechLang, usePreferences } from './hooks/usePreferences';
 import { Task, TaskStatus, TaskPriority, Project, Agent, OpenCodeAgentInfo } from './types';
 import {
   getProjects,
@@ -376,6 +376,8 @@ export default function App() {
 
   const buildTaskPrompt = (task: Task): string => {
     const styleSnippet = styleGuideCache?.trim() || '- Use Simplified Technical English (ASD-STE100) in your final message: approved simple verbs (add, remove, update, move, rename, fix, replace), one instruction per sentence, maximum 20 words per sentence, no jargon.';
+    const languageNames: Record<string, string> = { en: 'English', de: 'German', fr: 'French', es: 'Spanish', it: 'Italian', pt: 'Portuguese', nl: 'Dutch' };
+    const configuredLanguage = languageNames[readSpeechLang()] ?? 'English';
     const title = task.title?.trim() || 'Untitled task';
     const desc = task.description?.trim() || '(no description provided)';
     const prio = task.priority ? task.priority.charAt(0).toUpperCase() + task.priority.slice(1) : 'Medium';
@@ -421,6 +423,9 @@ export default function App() {
       `- Ask the user only if blocked; keep the final message concise — it becomes the stored task result automatically.`,
       `- No status update needed: the board follows your session outcome by itself (end → done, failure → blocked) and captures your last message as the result.`,
       styleSnippet,
+      `- Write all chat output, task results, and summaries in ${configuredLanguage}.`,
+      `- Use Simplified Technical English (ASD-STE100) principles: short sentences, simple verbs, direct statements, and specific results.`,
+      `- Keep technical names, file paths, API paths, IDs, and code unchanged.`,
       '',
       `## Working with other tasks (optional)`,
       '',
@@ -429,6 +434,16 @@ export default function App() {
       `- Delegate + WAIT for result (sync): POST /api/kanban/delegate { "projectId": "${task.projectId}", "title": "...", "description": "...", "agentId": "<teammate-id>", "parentSessionId": "${task.sessionId ?? '<your session id>'}" } → returns the finished Task.`,
       `- Follow-up in the SAME subtask session: POST /api/kanban/message_to { "sessionId": "<from delegate>", "text": "..." } (or { "taskId": "<subtask-id>", "text": "..." }) → { sessionId, resultText }.`,
       `- List work: GET /api/kanban/tasks?projectId=${task.projectId}.`,
+      '',
+      `## Project instructions and lessons`,
+      '',
+      `- Read the project-local AGENTS.md before planning when it exists.`,
+      `- Add durable project instructions, decisions, conventions, commands, and lessons to AGENTS.md.`,
+      `- Create AGENTS.md in the project root when the user asks to save durable guidance.`,
+      `- Update existing entries instead of adding duplicates.`,
+      `- Keep temporary task notes in the task description or result.`,
+      `- Never store passwords, tokens, private keys, or other secrets in AGENTS.md.`,
+      `- Report AGENTS.md changes in the final task result.`,
     ].filter(Boolean).join('\n');
     return headerLines;
   };

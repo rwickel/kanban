@@ -14,8 +14,13 @@ function portInUse(port) {
 }
 
 const services = [
-  { name: 'kanban', command: 'vite', port: 3001 },
-  { name: 'opencode', command: 'opencode serve --port 4099', port: 4099 },
+  {
+    name: 'kanban',
+    command: 'vite',
+    port: 3001,
+    env: process.argv.includes('--https') ? { KANBAN_HTTPS: '1' } : {},
+  },
+  { name: 'opencode', command: 'opencode serve --port 4099', port: 4099, env: {} },
 ];
 
 const children = [];
@@ -26,7 +31,7 @@ for (const service of services) {
     console.log(`[${service.name}] already running on port ${service.port}; reusing it`);
     continue;
   }
-  const child = spawn(service.command, { env: process.env, shell: true, stdio: 'inherit' });
+  const child = spawn(service.command, { env: { ...process.env, ...service.env }, shell: true, stdio: 'inherit' });
   child.on('error', (error) => console.error(`[${service.name}] ${error.message}`));
   children.push({ name: service.name, child });
 }

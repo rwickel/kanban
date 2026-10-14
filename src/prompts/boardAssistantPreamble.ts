@@ -49,6 +49,7 @@ const FALLBACK_TEMPLATE = [
 export interface PreambleVars {
   projectName: string;
   projectDescription: string;
+  configuredLanguage: string;
   projectPath: string;
   projectId: string;
   sessionId: string;
@@ -112,12 +113,14 @@ export async function loadPreambleTemplate(): Promise<string> {
 export async function buildAssistantPreamble(
   project: Project,
   agents: Agent[],
-  sessionId: string
+  sessionId: string,
+  configuredLanguage = 'English'
 ): Promise<string> {
   const [template, styleGuide] = await Promise.all([loadPreambleTemplate(), loadStyleGuide()]);
   return renderPreamble(template, {
     projectName: project.name?.trim() || '(unnamed project)',
     projectDescription: project.description?.trim() || '(no project description provided)',
+    configuredLanguage,
     projectPath: project.path?.trim() || '(no path)',
     projectId: project.id,
     sessionId,
