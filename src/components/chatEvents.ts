@@ -180,6 +180,10 @@ function toolInput(part: Payload): ToolDetail {
   const path = pick('path', 'file', 'filePath', 'filename', 'url');
   const pattern = pick('pattern', 'query');
   const text = pick('text', 'content');
+  // Code Mode `execute` carries JS in `code` (state.input.code) — without
+  // this the row renders as bare "execute" with an empty body.
+  const code = pick('code') || str((part as Payload).code) || str(state.code);
+  const codeFirstLine = code ? (code.split('\n')[0] ?? '').trim().slice(0, 120) : '';
   const tName = partToolName(part);
   const toolCallId = str(part.id) || str(state.id) || undefined;
   const pending = ['running', 'pending', 'waiting', 'started'].includes((str(state.status) || '').toLowerCase());
@@ -189,7 +193,7 @@ function toolInput(part: Payload): ToolDetail {
     return { action: brief.slice(0, 200), brief: brief.slice(0, 200), input: '', output: '', render: 'generic' as const, diff: undefined, filePath: path || undefined, questions: undefined, todos: undefined, toolCallId, pending: false };
   }
   const action =
-    command || (path ? `${tName} ${path}` : '') || pattern || tName;
+    command || (path ? `${tName} ${path}` : '') || pattern || codeFirstLine || tName;
 
   // Brief one-liner: action → output, capped — but never echo the full question
   // text in the tool-line summary. The question is the body, not a detail.
@@ -251,6 +255,7 @@ function toolInput(part: Payload): ToolDetail {
   const hasDiff = render === 'diff' && !!diff && diff.length > 0;
   const inputLines: string[] = [];
   if (command) inputLines.push(`$ ${command}`);
+  if (code) inputLines.push(code.length > 2000 ? `${code.slice(0, 2000)}\n… (truncated)` : code);
   if (path) inputLines.push(path);
   if (!command && !path && pattern) inputLines.push(pattern);
   if (!hasDiff && text && text !== command) inputLines.push(text.length > 2000 ? `${text.slice(0, 2000)}\n… (truncated)` : text);
@@ -299,6 +304,12 @@ function contentToMessages(id: string, kind: 'user' | 'assistant', part: Payload
         const innerInput = ((state.input as Payload | undefined) ?? {}) as Payload;
         const code = str(innerInput.code).slice(0, 2000);
         if (calls.length > 0) {
+          // The wrapper result lives in state.content, not on the inner
+          // calls — attach it to the last row so Result is not empty.
+          const innerOut = (state.content as Payload[] | undefined) ?? [];
+          const wrapperOut = Array.isArray(innerOut)
+            ? innerOut.map((c) => str((c as Payload).text)).filter(Boolean).join('\n')
+            : '';
           return calls.map((c, i) => ({
             id: `${id}-tool-${i}`,
             kind: 'tool' as const,
@@ -308,7 +319,7 @@ function contentToMessages(id: string, kind: 'user' | 'assistant', part: Payload
               status: str(c.status) || 'completed',
               summary: summarizeCallInput(str(c.tool), (c.input ?? {}) as Payload),
               input: summarizeCallInput(str(c.tool), (c.input ?? {}) as Payload, true),
-              output: '',
+              output: i === calls.length - 1 ? wrapperOut.slice(0, 4000) : '',
               render: 'generic' as const,
             },
           }));

@@ -52,3 +52,52 @@ test('shows the terminal connection error for a failed idle session', () => {
     markdown: 'ConnectionRefused: Unable to connect. Is the computer able to access the URL?',
   }]);
 });
+
+test('renders an execute tool row with its code, not an empty body', () => {
+  const messages = toChatMessage({
+    id: 'msg_execute',
+    type: 'assistant',
+    content: [{
+      type: 'tool',
+      name: 'execute',
+      state: {
+        status: 'completed',
+        input: { code: 'const res = search({ query: "x" });\nreturn res;' },
+        output: '{"items":[]}',
+      },
+    }],
+  });
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0]?.kind, 'tool');
+  assert.equal(messages[0]?.tool?.tool, 'execute');
+  assert.ok((messages[0]?.tool?.input ?? '').includes('const res = search'));
+});
+
+test('shows the wrapper result on an execute subcall row', () => {
+  const messages = toChatMessage({
+    id: 'msg_exec_wrap',
+    type: 'assistant',
+    content: [{
+      type: 'tool',
+      name: 'execute',
+      state: {
+        status: 'completed',
+        input: { code: 'const updated = await tools.kanban.kanban_update_board({projectId: "p1"});\nreturn updated;' },
+        content: [{ type: 'text', text: '{\r\n  "id": "p1",\r\n  "name": "kanban-clone"\r\n}' }],
+      },
+      metadata: {
+        toolCalls: [{
+          tool: 'kanban.kanban_update_board',
+          status: 'completed',
+          input: { projectId: 'p1' },
+        }],
+      },
+    }],
+  });
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0]?.tool?.tool, 'kanban.kanban_update_board');
+  assert.ok((messages[0]?.tool?.input ?? '').includes('projectId'));
+  assert.ok((messages[0]?.tool?.output ?? '').includes('kanban-clone'));
+});
