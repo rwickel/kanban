@@ -177,7 +177,7 @@ export default function MobileApp() {
       )}
 
       {(chatTask || assistantOpen) && (
-        <MobileChat task={chatTask} project={chatTask ? null : activeProject} onBack={closeOverlays} />
+        <MobileChat task={chatTask} project={chatTask ? null : activeProject} availableAgents={availableAgents} onBack={closeOverlays} />
       )}
 
       {projectDialog !== null && (

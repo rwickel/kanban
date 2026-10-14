@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
-import { Project, Task } from '../types';
-import { sendPrompt, interruptSession, answerTool } from '../api/opencode';
-import { ensureAssistantSession, readAssistantSessionId, readAssistantAgentPref, readAssistantModelPref } from '../store/assistantSession';
+import { Agent, OpenCodeModelInfo, Project, Task } from '../types';
+import { sendPrompt, interruptSession, answerTool, fetchModels } from '../api/opencode';
+import { ensureAssistantSession, clearAssistantSession, readAssistantSessionId, readAssistantAgentPref, readAssistantModelPref, saveAssistantPrefs } from '../store/assistantSession';
 import { useSessionStream } from '../hooks/useSessionStream';
 import { useSpeechInput } from '../hooks/useSpeechInput';
 import { STATUS_DOT, ThinkingBlock, ToolRow, ChatBubble, ChatErrorRow } from '../components/ChatFeed';
-import { ChatMessage } from '../components/chatEvents';
+import { ChatMessage, chatToMarkdown } from '../components/chatEvents';
 import FilePreviewModal from '../components/FilePreviewModal';
 import { updateTask } from '../store/kanban';
-import { ArrowLeft, Send, Loader2, Square, Mic, MicOff } from 'lucide-react';
+import { ArrowLeft, Send, Loader2, Square, Mic, MicOff, Plus, Download, Check, RefreshCw } from 'lucide-react';
 
 const WELCOME: ChatMessage = {
   id: 'welcome',
@@ -20,10 +20,12 @@ const WELCOME: ChatMessage = {
 export default function MobileChat({
   task,
   project,
+  availableAgents,
   onBack,
 }: {
   task: Task | null;
   project: Project | null;
+  availableAgents?: Agent[];
   onBack: () => void;
 }) {
   const sessionId = task?.sessionId ?? null;
@@ -31,16 +33,30 @@ export default function MobileChat({
     project && !task ? readAssistantSessionId(project.id) : null,
   );
   const activeSessionId = sessionId ?? assistantId;
-  const { messages, status, outcome, retry } = useSessionStream(activeSessionId, {
+  const { messages, status, outcome, session, sessionError, retry } = useSessionStream(activeSessionId, {
     taskAgentName: task?.agentName ?? null,
   });
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
+  // Desktop parity: keep Stop until the stream confirms the interrupt.
+  const [interrupted, setInterrupted] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const [exported, setExported] = useState(false);
+  const isAssistant = !task && !!project;
+  // Desktop parity: agent + model pickers for the board assistant.
+  const [selectedAgentId, setSelectedAgentId] = useState<string>(() =>
+    isAssistant ? readAssistantAgentPref(project!.id) : '');
+  const [selectedModel, setSelectedModel] = useState<string>(() =>
+    isAssistant ? readAssistantModelPref(project!.id) : '');
+  const [models, setModels] = useState<OpenCodeModelInfo[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [modelSearch, setModelSearch] = useState('');
+  const agents = availableAgents ?? [];
   const { listening: speechListening, transcribing: speechTranscribing, downloadPct: speechPct, speechError, toggle: toggleSpeech, clearSpeechError } = useSpeechInput();
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -73,23 +89,114 @@ export default function MobileChat({
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages.length]);
 
+  useEffect(() => {
+    if (status === 'closed' || status === 'idle') setInterrupted(false);
+  }, [status]);
+
   if (!task && !project) return null;
 
   const st = STATUS_DOT[status];
   const streamActive = status === 'live' || status === 'connecting';
-  const busy = streamActive || stopping;
-  const agentName = task?.agentName ?? 'Board assistant';
+  const busy = streamActive || sending || stopping || interrupted;
+  const selectedAgent = agents.find((a) => a.id === selectedAgentId);
+  const sessionAgent = (session as { agent?: unknown } | null)?.agent
+    ? (typeof (session as { agent?: unknown }).agent === 'string'
+      ? (session as { agent?: string }).agent
+      : ((session as { agent?: { name?: string; id?: string } }).agent?.name || (session as { agent?: { id?: string } }).agent?.id))
+    : undefined;
+  const agentName = task?.agentName ?? selectedAgent?.name ?? sessionAgent ?? 'Board assistant';
   const modelHint = task?.modelProviderID && task?.modelId
     ? `${task.modelProviderID}/${task.modelId}`
-    : task?.modelId ?? undefined;
+    : task?.modelId ?? selectedModel ?? undefined;
+  const msgCount = messages.length;
+  const who = `${selectedAgent?.name || sessionAgent || 'assistant'} · ${selectedModel || 'server default'}`;
+
+  const loadModels = async () => {
+    setModelsLoading(true);
+    const list = await fetchModels();
+    setModels(list);
+    setModelsLoading(false);
+  };
+
+  useEffect(() => {
+    if (isAssistant) {
+      setSelectedAgentId(readAssistantAgentPref(project!.id));
+      setSelectedModel(readAssistantModelPref(project!.id));
+      void loadModels();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.id]);
+
+  const filteredModels = models.filter((m) => {
+    const query = modelSearch.trim().toLowerCase();
+    return !query || `${m.providerID}/${m.modelID} ${m.name ?? ''}`.toLowerCase().includes(query);
+  });
 
   const handleStop = async () => {
     if (!activeSessionId || stopping) return;
     setStopping(true);
     const ok = await interruptSession(activeSessionId);
     setStopping(false);
-    if (ok) retry();
-    else setSendError('Stop failed — the session may already be idle.');
+    if (ok) {
+      if (isAssistant) setInterrupted(true);
+      retry();
+    } else setSendError('Stop failed — the session may already be idle.');
+  };
+
+  // Desktop parity: changing agent/model resets the assistant session.
+  const handleAgentChange = (v: string) => {
+    if (!project) return;
+    setSelectedAgentId(v);
+    saveAssistantPrefs(project.id, v, selectedModel);
+    if (activeSessionId) {
+      clearAssistantSession(project.id);
+      setAssistantId(null);
+      setInterrupted(false);
+      setSendError(null);
+      setCreateError(null);
+    }
+  };
+
+  const handleModelChange = (v: string) => {
+    if (!project) return;
+    setSelectedModel(v);
+    saveAssistantPrefs(project.id, selectedAgentId, v);
+    if (activeSessionId) {
+      clearAssistantSession(project.id);
+      setAssistantId(null);
+      setInterrupted(false);
+      setSendError(null);
+      setCreateError(null);
+    }
+  };
+
+  const handleNewChat = async () => {
+    if (!project) return;
+    if (activeSessionId && (status === 'live' || status === 'connecting')) {
+      try { await interruptSession(activeSessionId); } catch { /* ignore */ }
+    }
+    clearAssistantSession(project.id);
+    setAssistantId(null);
+    setInterrupted(false);
+    setInput('');
+    setSendError(null);
+    setCreateError(null);
+  };
+
+  const exportMarkdown = () => {
+    const title = task ? task.title : `Board assistant — ${project?.name ?? ''}`;
+    const md = chatToMarkdown(messages, { title, sessionId: activeSessionId, agentName });
+    const name = `${isAssistant ? 'board-assistant' : 'task-chat'}-${(activeSessionId ?? 'no-session').slice(0, 12)}.md`;
+    try {
+      const blob = new Blob([md], { type: 'text/markdown' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = name; document.body.appendChild(a); a.click();
+      document.body.removeChild(a); URL.revokeObjectURL(url);
+    } catch {
+      try { void navigator.clipboard.writeText(md); } catch { /* ignore */ }
+    }
+    setExported(true); setTimeout(() => setExported(false), 1500);
   };
 
   const ensureSession = async (): Promise<string | null> => {
@@ -97,9 +204,10 @@ export default function MobileChat({
     if (!project) return null;
     setCreating(true);
     setCreateError(null);
+    if (isAssistant) saveAssistantPrefs(project.id, selectedAgentId, selectedModel);
     const res = await ensureAssistantSession(project, {
-      agentId: readAssistantAgentPref(project.id),
-      model: readAssistantModelPref(project.id),
+      agentId: isAssistant ? selectedAgentId : readAssistantAgentPref(project.id),
+      model: isAssistant ? selectedModel : readAssistantModelPref(project.id),
     });
     setCreating(false);
     if (!res.id) {
@@ -120,6 +228,7 @@ export default function MobileChat({
     e?.preventDefault();
     const text = input.trim();
     if (!text || sending) return;
+    setInterrupted(false);
     setSending(true);
     setSendError(null);
     const sid = await ensureSession();
@@ -143,11 +252,11 @@ export default function MobileChat({
         width: 'auto',
         height: 'auto',
         display: 'grid',
-        gridTemplateRows: '56px minmax(0, 1fr) 76px',
+        gridTemplateRows: 'auto minmax(0, 1fr) 76px',
         overflow: 'hidden',
       }}
     >
-      <header className="m-overlay-head" style={{ gridRow: 1, height: 56, minHeight: 0, overflow: 'hidden' }}>
+      <header className="m-overlay-head" style={{ gridRow: 1, height: 'auto', minHeight: 56, overflow: 'visible', flexWrap: 'wrap', rowGap: 6 }}>
         <button className="m-icon-btn" onClick={onBack} aria-label="Back to board">
           <ArrowLeft className="w-4 h-4" strokeWidth={1.75} />
         </button>
@@ -156,10 +265,78 @@ export default function MobileChat({
         <span className="pill p-neutral" style={{ fontSize: 10, padding: '2px 7px' }}>
           {agentName} · {activeSessionId ? st.label : creating ? 'creating…' : 'no session'}
         </span>
+        {/* Desktop parity: new chat + export, same as AssistantChatWindow. */}
+        <span style={{ display: 'flex', gap: 6, marginLeft: 'auto' }}>
+          <button type="button" onClick={exportMarkdown} className="m-icon-btn" style={{ width: 36, height: 36 }} title="Export chat as Markdown" aria-label="Export chat as Markdown">
+            {exported ? <Check className="w-4 h-4" style={{ color: 'var(--emerald)' }} strokeWidth={1.75} /> : <Download className="w-4 h-4" strokeWidth={1.75} />}
+          </button>
+          {isAssistant && activeSessionId && (
+            <button type="button" onClick={() => { void handleNewChat(); }} className="m-icon-btn" style={{ width: 36, height: 36 }} title="New assistant chat" aria-label="New assistant chat">
+              <Plus className="w-4 h-4" strokeWidth={1.75} />
+            </button>
+          )}
+        </span>
+        {/* Desktop parity: agent + model pickers for the board assistant. */}
+        {isAssistant && (
+          <span style={{ display: 'flex', gap: 6, flexBasis: '100%', minWidth: 0 }}>
+            <select
+              value={selectedAgentId}
+              onChange={(e) => handleAgentChange(e.target.value)}
+              className="input mono"
+              style={{ flex: '1 1 0', minWidth: 0, height: 36, minHeight: 36, fontSize: 11, padding: '4px 8px' }}
+              title="Assistant agent — changing starts a new chat"
+              aria-label="Assistant agent"
+            >
+              <option value="">Agent: default</option>
+              {agents.map((a) => (
+                <option key={a.id} value={a.id}>{a.name}</option>
+              ))}
+            </select>
+            <span style={{ position: 'relative', flex: '1 1 0', minWidth: 0, display: 'flex', gap: 4 }}>
+              <button
+                type="button"
+                onClick={() => { setModelSearch(''); setModelMenuOpen((open) => !open); }}
+                className="input mono"
+                style={{ flex: '1 1 0', minWidth: 0, height: 36, minHeight: 36, fontSize: 11, padding: '4px 8px', textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                title="Search and select an assistant model — changing starts a new chat"
+              >
+                {selectedModel || 'Model: default'}
+              </button>
+              <button type="button" onClick={() => { void loadModels(); }} disabled={modelsLoading} className="m-icon-btn" style={{ width: 36, height: 36 }} title="Refresh models" aria-label="Refresh models">
+                <RefreshCw className={`w-4 h-4 muted ${modelsLoading ? 'animate-spin' : ''}`} />
+              </button>
+              {modelMenuOpen && (
+                <span className="panel" style={{ position: 'absolute', top: '100%', right: 0, marginTop: 4, padding: 6, zIndex: 50, width: 'min(420px, 90vw)', background: 'var(--surface)' }}>
+                  <input
+                    // eslint-disable-next-line jsx-a11y/no-autofocus
+                    autoFocus
+                    value={modelSearch}
+                    onChange={(e) => setModelSearch(e.target.value)}
+                    placeholder="Search models..."
+                    className="input mono"
+                    style={{ width: '100%', height: 36, minHeight: 36, fontSize: 11, marginBottom: 6 }}
+                  />
+                  <span style={{ display: 'block', maxHeight: 240, overflowY: 'auto' }}>
+                    <button type="button" onClick={() => { handleModelChange(''); setModelMenuOpen(false); }} className="block w-full text-left px-2.5 py-2 mono" style={{ fontSize: 11, background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)' }}>Model: default</button>
+                    {filteredModels.map((m, idx) => {
+                      const key = `${m.providerID}/${m.modelID}`;
+                      return (
+                        <button type="button" key={`${key}__${idx}`} onClick={() => { handleModelChange(key); setModelMenuOpen(false); }} className="block w-full text-left px-2.5 py-2 mono" style={{ fontSize: 11, background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', marginTop: 4 }} title={m.name ? `${key} — ${m.name}` : key}>
+                          <span className="block truncate"><span className="font-semibold">{key}</span>{m.name && <span style={{ color: 'var(--muted)' }}> — {m.name}</span>}</span>
+                        </button>
+                      );
+                    })}
+                    {filteredModels.length === 0 && <span className="muted mono" style={{ display: 'block', fontSize: 11, padding: '12px 8px', textAlign: 'center' }}>No models found.</span>}
+                  </span>
+                </span>
+              )}
+            </span>
+          </span>
+        )}
       </header>
 
       <div className="m-chat-feed" style={{ gridRow: 2, minHeight: 0, overflowY: 'auto' }}>
-        {!task && <ChatBubble msg={WELCOME} agentName={agentName} modelName={modelHint} showAvatar onFileClick={setPreviewPath} />}
+        {!task && <ChatBubble msg={{ ...WELCOME, markdown: isAssistant ? `Board assistant for ${project?.name ?? ''} (${who}). Ask about the board or delegate work. Finished tasks report back here.` : WELCOME.markdown }} agentName={agentName} modelName={modelHint} showAvatar onFileClick={setPreviewPath} />}
         {(status === 'connecting' || status === 'idle') && messages.length === 0 && activeSessionId && (
           <div className="muted" style={{ textAlign: 'center', fontSize: 12 }}>
             <Loader2 className="w-4 h-4 animate-spin" strokeWidth={1.75} /> Connecting…
@@ -190,8 +367,8 @@ export default function MobileChat({
         {messages.map((msg, idx) => {
           const prev = idx > 0 ? messages[idx - 1] : undefined;
           const startsTurn = msg.kind !== 'user' && (!prev || prev.kind === 'user');
-          if (msg.kind === 'tool') return <ToolRow key={msg.id} msg={msg} onFileClick={setPreviewPath} />;
-          if (msg.kind === 'error') return <ChatErrorRow key={msg.id} msg={msg} />;
+          if (msg.kind === 'tool') return <ToolRow key={msg.id} msg={msg} onFileClick={setPreviewPath} onAnswered={(id, out) => { if (!activeSessionId) { setSendError('No session — reconnect first.'); return; } void answerTool(activeSessionId, id, out).then((r) => { if (!r.ok) setSendError(`Could not send the answer — ${r.error ?? 'unknown error'}`); retry(); }); }} />;
+          if (msg.kind === 'error') return <ChatErrorRow key={msg.id} msg={msg} detail={msg.id.endsWith('-outcome') ? sessionError : null} />;
           if (msg.kind === 'reasoning') {
             return <ThinkingBlock key={msg.id} msg={msg} showAvatar={startsTurn} agentName={agentName} modelName={modelHint} onFileClick={setPreviewPath} />;
           }
