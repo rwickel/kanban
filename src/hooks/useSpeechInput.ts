@@ -22,7 +22,7 @@ function getSpeechRecognition(): (new () => SpeechRecognitionInstance) | null {
 const ERROR_HINTS: Record<string, string> = {
   'not-allowed': 'Microphone blocked — tap the lock icon by the address bar, allow Mic, then tap mic again. Needs HTTPS.',
   'service-not-allowed': 'Speech blocked — open this page over HTTPS or localhost, then allow Mic and retry.',
-  network: 'Speech service unreachable — speech needs internet (audio goes to Google servers). Check Wi-Fi, turn off VPN, allow Chrome through Windows Firewall, open https://www.google.com once, then retry.',
+  network: 'Speech service unreachable — Chrome sends audio to Google servers. Check internet, allow Google through VPN/proxy/firewall, open https://www.google.com once, then retry.',
   'language-not-supported': 'Speech language not supported — switch Chrome to English (US) and retry.',
   'no-speech': 'No speech heard — speak right after tapping mic.',
   'audio-capture': 'No microphone found — check Windows Settings > Sound > Input + Chrome mic access.',
@@ -56,12 +56,29 @@ async function ensureMicPermission(): Promise<string | null> {
       return 'Microphone blocked — tap the lock icon by the address bar, allow Mic, then tap mic again. Needs HTTPS.';
     }
     if (name === 'NotFoundError' || name === 'OverconstrainedError') {
-      return 'No microphone found — check device + Android permission for Chrome.';
+      return 'No microphone found — check Windows Settings > Sound > Input + Chrome mic access.';
     }
     if (name === 'NotReadableError' || name === 'AbortError') {
       return 'Microphone is in use — close other apps using the mic, then retry.';
     }
     return 'Microphone blocked — allow mic access for this site, then retry.';
+  }
+}
+
+// navigator.onLine misses VPN/firewall/captive-portal blocks. Probe a
+// tiny Google endpoint (same network path speech uses) before start.
+async function ensureSpeechReachable(): Promise<string | null> {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return ERROR_HINTS.offline;
+  } catch { /* ignore */ }
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    await fetch('https://www.google.com/generate_204', { mode: 'no-cors', cache: 'no-store', signal: ctrl.signal });
+    clearTimeout(timer);
+    return null;
+  } catch {
+    return ERROR_HINTS.offline;
   }
 }
 
@@ -99,6 +116,15 @@ export function useSpeechInput() {
     if (!isSecureForSpeech()) {
       setSpeechErrorCode('service-not-allowed');
       setSpeechError(`${ERROR_HINTS['service-not-allowed']} (service-not-allowed)`);
+      return;
+    }
+    // Desktop fix: check internet first. Web Speech sends audio to
+    // Google servers, so a dropped Wi-Fi/VPN/firewall shows up as
+    // `network` with no detail. Fail fast with a clear offline message.
+    const unreachable = await ensureSpeechReachable();
+    if (unreachable) {
+      setSpeechErrorCode('offline');
+      setSpeechError(`${unreachable} (network)`);
       return;
     }
     setSpeechError(null);

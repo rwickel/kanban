@@ -269,14 +269,14 @@ export async function getSessionInstruction(
 export async function fetchSessionMessages(sessionId: string): Promise<unknown[] | null> {
   // v2: GET /api/session/{id}/message?limit&order → { data: [...], cursor }
   try {
-    const res = await fetch(`${baseUrl()}/session/${sessionId}/message?limit=100&order=asc`, { headers: headers() });
+    const res = await fetch(`${baseUrl()}/session/${sessionId}/message?limit=100&order=desc`, { headers: headers() });
     if (!res.ok) {
       console.error('fetchSessionMessages failed:', res.status, await res.text().catch(() => ''));
       return null;
     }
     const json = await res.json();
     const list = unwrapData<unknown>(json);
-    return Array.isArray(list) ? list : null;
+    return Array.isArray(list) ? [...list].reverse() : null;
   } catch (error) {
     console.error('Error fetching session messages:', error);
     return null;
