@@ -6,6 +6,7 @@
 // Clone model: id=uuid, status=backlog|running|done|blocked, projectId=uuid.
 import { Task, Project, TaskStatus, TaskPriority } from '../types';
 import { v4 as uuidv4 } from 'uuid';
+import { enqueue, listOps, removeOp, isNetworkError, QueuedOfflineError } from './offlineQueue';
 
 const LS_TASKS = 'kanban_tasks';
 const LS_PROJECTS = 'kanban_projects';
@@ -93,12 +94,17 @@ export async function getProjects(): Promise<Project[]> {
   }
 }
 
-export async function createProject(name: string, path: string, description: string): Promise<Project> {
+export async function createProject(name: string, path: string, description: string, extra?: {
+  gitUrl?: string; gitBranch?: string; mkdir?: boolean;
+}): Promise<Project> {
   // Preserve id client-side so UI can route immediately.
   // path may be a folder name ("Bridge-Server") or absolute path inside the root.
   const body: Record<string, unknown> = { id: uuidv4(), name, description };
   if (/^[a-zA-Z]:[\\/]/.test(path) || path.startsWith('\\\\') || path.startsWith('/')) body.path = path;
   else body.folder = path;
+  if (extra?.gitUrl !== undefined) body.gitUrl = extra.gitUrl;
+  if (extra?.gitBranch !== undefined) body.gitBranch = extra.gitBranch;
+  if (extra?.mkdir !== undefined) body.noMkdir = !extra.mkdir;
   const project = await api<Project>('/api/kanban/projects', {
     method: 'POST',
     body: JSON.stringify(body),
@@ -181,6 +187,31 @@ export async function getTasks(projectId?: string): Promise<Task[]> {
   }
 }
 
+/** Raw POST without queueing — replay uses this so a failed replay breaks instead of re-queuing. */
+async function postTaskRaw(body: Record<string, unknown>): Promise<Task> {
+  const task = await api<Task>('/api/kanban/tasks', { method: 'POST', body: JSON.stringify(body) });
+  mergeTaskCache(task);
+  return task;
+}
+
+/** Raw PATCH without queueing. Strips the client-only pendingSync flag. */
+async function patchTaskRaw(id: string, updates: Record<string, unknown>): Promise<Task> {
+  const { pendingSync: _drop, ...clean } = updates;
+  void _drop;
+  const task = await api<Task>(`/api/kanban/tasks/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(clean),
+  });
+  mergeTaskCache(task);
+  return task;
+}
+
+function sanitizeUpdates(updates: Partial<Task>): Record<string, unknown> {
+  const { pendingSync: _drop, ...rest } = updates as Record<string, unknown>;
+  void _drop;
+  return rest;
+}
+
 export async function createTask(
   projectId: string,
   title: string,
@@ -192,28 +223,93 @@ export async function createTask(
   modelId?: string,
   modelProviderID?: string,
   result?: string,
-  resultContext?: string
+  resultContext?: string,
+  clientId?: string,
+  acceptanceCriteria?: string
 ): Promise<Task> {
-  const task = await api<Task>('/api/kanban/tasks', {
-    method: 'POST',
-    body: JSON.stringify({
-      id: uuidv4(), projectId, title, description,
-      status: 'backlog', priority,
+  // Client-generated id: offline replays reuse it, so a retried POST
+  // either creates the row or fails "already exists" (safe to skip).
+  const id = clientId ?? uuidv4();
+  const payload: Record<string, unknown> = {
+    id, projectId, title, description,
+    status: 'backlog', priority,
+    agentId, agentName, sessionId, modelId, modelProviderID,
+    result, resultContext, acceptanceCriteria,
+  };
+  try {
+    return await postTaskRaw(payload);
+  } catch (e) {
+    if (!isNetworkError(e)) throw e;
+    enqueue({
+      kind: 'create', clientId: id, projectId, title, description, priority,
+      acceptanceCriteria,
       agentId, agentName, sessionId, modelId, modelProviderID,
-      result, resultContext,
-    }),
-  });
-  mergeTaskCache(task);
-  return task;
+    });
+    const now = new Date().toISOString();
+    mergeTaskCache({
+      id, projectId, title, description, status: 'backlog', priority,
+      agentId, agentName, sessionId, modelId, modelProviderID,
+      acceptanceCriteria, pendingSync: true, createdAt: now, updatedAt: now,
+    });
+    throw new QueuedOfflineError('Offline — task queued, syncs on reconnect.', id);
+  }
 }
 
 export async function updateTask(id: string, updates: Partial<Task>): Promise<Task | null> {
-  const task = await api<Task>(`/api/kanban/tasks/${encodeURIComponent(id)}`, {
-    method: 'PATCH',
-    body: JSON.stringify(updates),
-  });
-  mergeTaskCache(task);
-  return task;
+  const clean = sanitizeUpdates(updates);
+  try {
+    return await patchTaskRaw(id, clean);
+  } catch (e) {
+    if (!isNetworkError(e)) throw e;
+    enqueue({ kind: 'update', id, updates: clean });
+    const all = lsGet<Task[]>(LS_TASKS, []);
+    const i = all.findIndex((t) => t.id === id);
+    if (i !== -1) {
+      all[i] = { ...all[i], ...clean, pendingSync: true } as Task;
+      cacheTasks(all);
+    }
+    throw new QueuedOfflineError('Offline — update queued, syncs on reconnect.', id);
+  }
+}
+
+/** Replay queued writes FIFO. Stops at the first network error; drops ops the server already has. */
+let replayingNow = false;
+export async function replayOfflineQueue(): Promise<{ synced: number; remaining: number }> {
+  if (replayingNow) return { synced: 0, remaining: listOps().length };
+  replayingNow = true;
+  try {
+    let synced = 0;
+    for (const op of listOps()) {
+      try {
+        if (op.kind === 'create') {
+          await postTaskRaw({
+            id: op.clientId, projectId: op.projectId, title: op.title,
+            description: op.description, status: 'backlog', priority: op.priority,
+            agentId: op.agentId, agentName: op.agentName, sessionId: op.sessionId,
+             modelId: op.modelId, modelProviderID: op.modelProviderID,
+             acceptanceCriteria: op.acceptanceCriteria,
+          });
+        } else {
+          await patchTaskRaw(op.id, op.updates);
+        }
+        removeOp(op.qid);
+        synced++;
+      } catch (e) {
+        if (isNetworkError(e)) break;
+        const msg = String((e as Error)?.message ?? e);
+        // Already replayed, or the task is gone — drop instead of blocking the queue.
+        if (/already exists|not found|404/i.test(msg)) {
+          removeOp(op.qid);
+          synced++;
+          continue;
+        }
+        break;
+      }
+    }
+    return { synced, remaining: listOps().length };
+  } finally {
+    replayingNow = false;
+  }
 }
 
 export async function deleteTask(id: string): Promise<void> {
@@ -306,6 +402,39 @@ export async function cloneRepo(url: string, folder: string, branch?: string): P
     method: 'POST',
     body: JSON.stringify({ url, folder, branch: branch || 'main' }),
   });
+}
+
+/** Shared save path: clone-then-create on new projects, update otherwise. Desktop + mobile. */
+export async function saveProject(
+  data: { name: string; folder: string; description: string; gitUrl?: string; gitBranch?: string; mkdir?: boolean },
+  existingId?: string | null,
+): Promise<Project | null> {
+  const folder = data.folder.trim();
+  // Clone into the new folder first (server does git clone).
+  if (data.gitUrl && data.mkdir && folder) {
+    await cloneRepo(data.gitUrl, folder, data.gitBranch);
+  }
+  const payload: Partial<Project> = {
+    name: data.name,
+    folder,
+    description: data.description,
+    gitUrl: data.gitUrl,
+    gitBranch: data.gitBranch,
+  };
+  if (existingId) {
+    return updateProject(existingId, payload);
+  }
+  const created = await createProject(data.name, folder, data.description, {
+    gitUrl: data.gitUrl,
+    gitBranch: data.gitBranch,
+    mkdir: data.mkdir,
+  });
+  // createProject stores the link; patch again if server dropped git fields.
+  if ((data.gitUrl || data.gitBranch) && (!created.gitUrl || !created.gitBranch)) {
+    const patched = await updateProject(created.id, { gitUrl: data.gitUrl, gitBranch: data.gitBranch });
+    return patched ?? created;
+  }
+  return created;
 }
 
 // ---- one-shot migration: push existing localStorage rows into SQLite ----

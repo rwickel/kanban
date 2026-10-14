@@ -12,6 +12,8 @@ interface KanbanColumnProps {
   onDeleteTask: (id: string) => void;
   onOpenChat: (task: Task) => void;
   onAddTask: () => void;
+  onMove?: (task: Task, status: TaskStatus) => void;
+  onRetry?: (task: Task) => void;
   deletingIds?: Set<string>;
 }
 
@@ -29,6 +31,8 @@ export const columnIcons: Record<TaskStatus, LucideIcon> = {
   blocked: AlertOctagon,
 };
 
+const PRIO_ORDER: Record<Task['priority'], number> = { critical: 0, high: 1, medium: 2, low: 3 };
+
 export default function KanbanColumn({
   status,
   title,
@@ -38,6 +42,8 @@ export default function KanbanColumn({
   onDeleteTask,
   onOpenChat,
   onAddTask,
+  onMove,
+  onRetry,
   deletingIds,
 }: KanbanColumnProps) {
   const { setNodeRef, isOver } = useDroppable({
@@ -68,13 +74,15 @@ export default function KanbanColumn({
             <p className="text-[13px] muted mono">Drop here</p>
           </div>
         )}
-        {tasks.map((task) => (
+        {[...tasks].sort((a, b) => PRIO_ORDER[a.priority] - PRIO_ORDER[b.priority]).map((task) => (
           <TaskCard
             key={task.id}
             task={task}
             onEdit={onEditTask}
             onDelete={onDeleteTask}
             onOpenChat={onOpenChat}
+            onMove={onMove}
+            onRetry={onRetry}
             isDeleting={deletingIds?.has(task.id)}
           />
         ))}

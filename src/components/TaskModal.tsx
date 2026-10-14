@@ -10,6 +10,7 @@ interface TaskModalProps {
   onSave: (data: {
     title: string;
     description: string;
+    acceptanceCriteria?: string;
     priority: TaskPriority;
     agentId?: string;
     agentName?: string;
@@ -25,10 +26,13 @@ interface TaskModalProps {
 export default function TaskModal({ isOpen, onClose, onSave, task, availableAgents }: TaskModalProps) {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
+  const [acceptanceCriteria, setAcceptanceCriteria] = useState('');
   const [priority, setPriority] = useState<TaskPriority>('medium');
   const [selectedAgentId, setSelectedAgentId] = useState<string>('');
   const [models, setModels] = useState<OpenCodeModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelSearch, setModelSearch] = useState('');
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [result, setResult] = useState('');
   const [resultContext, setResultContext] = useState('');
@@ -38,6 +42,7 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
     if (task) {
       setTitle(task.title);
       setDescription(task.description);
+      setAcceptanceCriteria(task.acceptanceCriteria || '');
       setPriority(task.priority);
       setSelectedAgentId(task.agentId || '');
       setResult(task.result || '');
@@ -50,6 +55,7 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
     } else {
       setTitle('');
       setDescription('');
+      setAcceptanceCriteria('');
       setPriority('medium');
       setSelectedAgentId('');
       setResult('');
@@ -67,6 +73,11 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
     setModelsLoading(false);
   };
 
+  const filteredModels = models.filter((m) => {
+    const query = modelSearch.trim().toLowerCase();
+    return !query || `${m.providerID}/${m.modelID} ${m.name ?? ''}`.toLowerCase().includes(query);
+  });
+
   if (!isOpen) return null;
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -81,6 +92,7 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
     onSave({
       title: title.trim(),
       description: description.trim(),
+      acceptanceCriteria: acceptanceCriteria.trim() || undefined,
       priority,
       agentId: selectedAgentId || undefined,
       agentName: selectedAgent?.name || undefined,
@@ -116,6 +128,11 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
               placeholder="Task description..." rows={3} className="input resize-none" />
           </div>
           <div>
+            <label className="block text-[12px] font-medium t-soft mb-1">Acceptance criteria <span className="muted font-normal">(optional)</span></label>
+            <textarea value={acceptanceCriteria} onChange={(e) => setAcceptanceCriteria(e.target.value)}
+              placeholder="What must be true for this task to be accepted?" rows={3} className="input resize-none" />
+          </div>
+          <div>
             <label className="block text-[12px] font-medium t-soft mb-1">Priority</label>
             <div className="grid grid-cols-4 gap-1.5">
               {(['low', 'medium', 'high', 'critical'] as TaskPriority[]).map((p) => (
@@ -147,9 +164,10 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
                 <RefreshCw className={`w-3 h-3 muted ${modelsLoading ? 'animate-spin' : ''}`} />
               </button>
             </div>
+            <div className="relative">
             <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)} className="input mono">
               <option value="">Server default</option>
-              {models.map((m, idx) => {
+              {filteredModels.map((m, idx) => {
                 const key = `${m.providerID}/${m.modelID}`;
                 return (
                   <option key={`${key}__${idx}`} value={key}>
@@ -158,6 +176,9 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
                 );
               })}
             </select>
+            <input value={modelSearch} onChange={(e) => setModelSearch(e.target.value)}
+              placeholder="Search models..." className="input mono mt-1.5" />
+            </div>
             <p className="text-[11px] muted mt-1">
               Passed as <span className="mono">model: {"{ providerID, modelID }"}</span> when the session is created — so the build worker stops falling back to the global default.
             </p>

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Project } from '../types';
-import { LayoutGrid, Menu, X, Wifi, WifiOff, Moon, Sun, FolderKanban, Plus, Settings, Users, MessageSquare, Server, Monitor } from 'lucide-react';
+import { LayoutGrid, X, Wifi, WifiOff, Moon, Sun, FolderKanban, Plus, Settings, Users, Server, Monitor, SlidersHorizontal } from 'lucide-react';
 
 export default function MobileHeader({
   project,
@@ -13,7 +13,7 @@ export default function MobileHeader({
   onEditProject,
   onOpenServer,
   onOpenTeam,
-  onOpenAssistant,
+  onOpenSettings,
 }: {
   project: Project | null;
   projects: Project[];
@@ -25,7 +25,7 @@ export default function MobileHeader({
   onEditProject: (p: Project) => void;
   onOpenServer: () => void;
   onOpenTeam: () => void;
-  onOpenAssistant: () => void;
+  onOpenSettings: () => void;
 }) {
   const [drawer, setDrawer] = useState(false);
   const close = () => setDrawer(false);
@@ -41,7 +41,9 @@ export default function MobileHeader({
     <header className="m-topbar">
       <div className="m-topbar-row">
         <div className="m-brand">
-          <span className="m-logo"><LayoutGrid className="w-4 h-4" strokeWidth={1.75} /></span>
+          <button className="m-logo-btn" onClick={() => setDrawer(true)} aria-label="Open menu" title="Open menu">
+            <span className="m-logo"><LayoutGrid className="w-4 h-4" strokeWidth={1.75} /></span>
+          </button>
           <span style={{ minWidth: 0 }}>
             <span className="m-project-name">{project?.name ?? 'Select project'}</span>
             <span className="m-project-sub">
@@ -54,14 +56,6 @@ export default function MobileHeader({
         </span>
         <button className="m-icon-btn" onClick={onToggleTheme} aria-label="Toggle theme">
           {theme === 'light' ? <Moon className="w-4 h-4" strokeWidth={1.75} /> : <Sun className="w-4 h-4" strokeWidth={1.75} />}
-        </button>
-        {project && (
-          <button className="m-icon-btn" onClick={onOpenAssistant} aria-label="Open board assistant" title="Open board assistant">
-            <MessageSquare className="w-4 h-4" strokeWidth={1.75} />
-          </button>
-        )}
-        <button className="m-icon-btn" onClick={() => setDrawer(true)} aria-label="Open menu">
-          <Menu className="w-4 h-4" strokeWidth={1.75} />
         </button>
       </div>
 
@@ -76,9 +70,6 @@ export default function MobileHeader({
               </button>
             </div>
             <div className="m-drawer-body">
-              <p className="m-menu-group">Board assistant</p>
-              {item('Chat with assistant', MessageSquare, onOpenAssistant)}
-
               <p className="m-menu-group">Project</p>
               {projects.map((p) => (
                 <button key={p.id} className="m-menu-item" onClick={() => { onSwitchProject(p.id); close(); }}
@@ -93,6 +84,7 @@ export default function MobileHeader({
               <div className="m-menu-sep" />
 
               <p className="m-menu-group">Settings</p>
+              {item('Preferences', SlidersHorizontal, onOpenSettings)}
               {item('Agent team', Users, onOpenTeam)}
               {item('Server connection', Server, onOpenServer)}
               {item('Desktop view', Monitor, () => { window.location.href = '/'; })}

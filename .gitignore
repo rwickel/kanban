@@ -7,3 +7,4 @@ build/
 !.env.example
 .kanban-data/
 .kanban-queue/
+__pycache__/

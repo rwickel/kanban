@@ -38,6 +38,22 @@ export default {
         description: "Shared kanban board: boards, tasks, and agent delegation",
       })
 
+      editor.add({
+        name: "kanban_list_models",
+        description: "List models available from the connected OpenCode providers for delegation.",
+        input: { type: "object", properties: {}, additionalProperties: false },
+        options: { namespace: "kanban" },
+        execute: async () => {
+          try {
+            const response = await ctx.client.provider.list()
+            const data = response?.data ?? response
+            return jsonResult(Array.isArray(data) ? data : [])
+          } catch (error) {
+            return toolError(`failed to list connected models: ${error instanceof Error ? error.message : String(error)}`)
+          }
+        },
+      })
+
       // --- boards ---------------------------------------------------------
 
       editor.add({

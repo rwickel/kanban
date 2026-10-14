@@ -5,6 +5,8 @@ export interface Task {
   id: string;
   title: string;
   description: string;
+  /** Optional conditions that define when the task is accepted. */
+  acceptanceCriteria?: string | null;
   status: TaskStatus;
   priority: TaskPriority;
   agentId?: string;
@@ -24,6 +26,8 @@ export interface Task {
   /** Delivery ledger: ISO timestamp when the finished result was queued back
    *  into the parent session (null = not yet delivered, keep retrying). */
   notifiedAt?: string | null;
+  /** Queued offline, not yet confirmed by the server. Cleared on next server echo. */
+  pendingSync?: boolean;
   projectId: string;
   createdAt: string;
   updatedAt: string;

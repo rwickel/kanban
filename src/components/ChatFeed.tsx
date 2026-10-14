@@ -584,7 +584,7 @@ export function ChatBubble({ msg, agentName, modelName, showAvatar = true, onFil
   );
 }
 
-export function ChatErrorRow({ msg }: { msg: ChatMessage }) {
+export function ChatErrorRow({ msg, detail }: { msg: ChatMessage; detail?: string | null }) {
   return (
     <div className="flex gap-2 justify-start animate-fadeIn">
       <div className="w-6 h-6 flex items-center justify-center shrink-0" style={{ border: '1px solid var(--border)', borderRadius: 6, background: 'var(--surface)' }}>
@@ -592,6 +592,7 @@ export function ChatErrorRow({ msg }: { msg: ChatMessage }) {
       </div>
       <div className="min-w-0 max-w-[88%] panel px-2.5 py-2 text-[12px] leading-relaxed whitespace-pre-wrap break-words" style={{ color: 'var(--danger)' }}>
         {msg.markdown}
+        {detail && <><br />{detail}</>}
       </div>
     </div>
   );

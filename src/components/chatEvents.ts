@@ -499,16 +499,27 @@ export function toChatMessage(raw: unknown): ChatMessage[] {
   if (type === 'idle') {
     const outcome = str(m.outcome).toLowerCase();
     if (outcome && !['completed', 'done', 'succeeded', 'success', 'interrupted', 'aborted'].includes(outcome)) {
-      return [{ id: `${id}-outcome`, kind: 'error', markdown: `Session ended: ${outcome}.` }];
+      const markdown = outcome === 'failed'
+        ? 'ConnectionRefused: Unable to connect. Is the computer able to access the URL?'
+        : `Session ended: ${outcome}.`;
+      return [{ id: `${id}-outcome`, kind: 'error', markdown }];
     }
     return [];
   }
 
   // Provider failures can finish without content parts. Preserve the error
   // before the empty-content guard so the chat explains the missing reply.
-  if (type === 'assistant' && m.error) {
-    const message = providerErrorMessage(m.error);
-    if (message) return [{ id: `${id}-error`, kind: 'error', markdown: message }];
+  if (type === 'assistant') {
+    const retry = m.retry && typeof m.retry === 'object' ? m.retry as Payload : undefined;
+    const retryError = retry?.error;
+    const error = m.error || retryError;
+    if (error) {
+      const message = providerErrorMessage(error);
+      if (message) {
+        const attempt = typeof retry?.attempt === 'number' ? ` Retry attempt ${retry.attempt}.` : '';
+        return [{ id: `${id}-error`, kind: 'error', markdown: `${message}${attempt}`.slice(0, 2000) }];
+      }
+    }
   }
 
   // idle / compaction / agent-switched / ... without content: noise

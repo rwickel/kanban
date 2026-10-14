@@ -1,5 +1,5 @@
 import { Task, TaskPriority } from '../types';
-import { MessageSquare, Pencil, Trash2, Loader2, AlertTriangle } from 'lucide-react';
+import { MessageSquare, Pencil, Trash2, Loader2, AlertTriangle, Play } from 'lucide-react';
 
 const prioCls: Record<TaskPriority, string> = {
   low: 'p-green', medium: 'p-blue', high: 'p-amber', critical: 'p-red',
@@ -11,6 +11,7 @@ export default function MobileCard({
   onEdit,
   onDelete,
   onOpenChat,
+  onMove,
   isDeleting,
 }: {
   task: Task;
@@ -18,6 +19,7 @@ export default function MobileCard({
   onEdit: (t: Task) => void;
   onDelete: (id: string) => void;
   onOpenChat: (t: Task) => void;
+  onMove: (t: Task) => void;
   isDeleting?: boolean;
 }) {
   const busy = task.startupPhase === 'creating-session' || task.startupPhase === 'sending-prompt';
@@ -41,6 +43,9 @@ export default function MobileCard({
               <Loader2 className="w-3 h-3 animate-spin" strokeWidth={1.75} /> starting
             </span>
           )}
+          {task.pendingSync && (
+            <span className="pill p-amber" style={{ fontSize: 10, padding: '2px 7px' }} title="Queued offline — syncs on reconnect">QUEUED</span>
+          )}
           {failed && (
             <span className="pill p-red" style={{ fontSize: 10, padding: '2px 7px' }}>
               <AlertTriangle className="w-3 h-3" strokeWidth={1.75} /> failed
@@ -49,11 +54,19 @@ export default function MobileCard({
         </div>
         <p className="m-card-title">{task.title || 'Untitled task'}</p>
         {task.description && <p className="m-card-desc">{task.description}</p>}
+        {task.acceptanceCriteria && <p className="m-card-desc"><strong>Accept:</strong> {task.acceptanceCriteria}</p>}
       </button>
       <div className="m-card-actions">
-        <button className="m-icon-btn" onClick={() => onOpenChat(task)} aria-label="Open agent chat">
-          <MessageSquare className="w-4 h-4" strokeWidth={1.75} />
-        </button>
+        {task.status !== 'running' && (
+          <button className="m-icon-btn" onClick={() => onMove(task)} aria-label="Move task to running" title="Move to running">
+            <Play className="w-4 h-4" strokeWidth={1.75} />
+          </button>
+        )}
+        {task.status !== 'backlog' && task.sessionId && (
+          <button className="m-icon-btn" onClick={() => onOpenChat(task)} aria-label="Open agent chat">
+            <MessageSquare className="w-4 h-4" strokeWidth={1.75} />
+          </button>
+        )}
         <button className="m-icon-btn" onClick={() => onEdit(task)} aria-label="Edit task">
           <Pencil className="w-4 h-4" strokeWidth={1.75} />
         </button>

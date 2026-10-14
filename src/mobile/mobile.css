@@ -4,12 +4,16 @@
    Add `import './mobile.css'` only from MobileApp. */
 
 .m-root {
-  min-height: 100dvh;
+  position: relative;
+  width: 100%;
+  height: 100dvh;
+  min-height: 0;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   background: var(--bg);
   color: var(--text);
-  overflow-x: hidden;
+  overflow: hidden;
   overscroll-behavior-y: none;
   touch-action: manipulation;
 }
@@ -31,8 +35,9 @@
   top: 0;
   z-index: 40;
   background: var(--surface);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);  
   padding-top: env(safe-area-inset-top);
+  flex: 0 0 auto;
 }
 
 .m-topbar-row {
@@ -50,6 +55,21 @@
   flex: 1;
   min-width: 0;
 }
+
+.m-logo-btn {
+  background: none;
+  border: 0;
+  padding: 6px;
+  margin: -6px;
+  min-height: 44px;
+  min-width: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.m-logo-btn:active .m-logo { filter: brightness(1.15); }
 
 .m-logo {
   width: 28px;
@@ -101,45 +121,72 @@
   color: var(--text-2);
 }
 
-/* ——— column tabs ——— */
+/* ——— column tabs: slim vertical rail ——— */
+.m-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+}
+
 .m-tabs {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 4px;
-  padding: 6px 10px;
-  width: 100%;
+  flex: 0 0 76px;
+  width: 76px;
   box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 8px;
   background: var(--surface-2);
-  border-bottom: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+.m-tabs-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 2px;
+  flex-shrink: 0;
 }
 
 .m-tab {
   min-width: 0;
   width: 100%;
   box-sizing: border-box;
-  min-height: 40px;
+  min-height: 68px;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 3px;
-  padding: 5px 3px;
+  gap: 4px;
+  padding: 10px 4px;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: 10px;
   background: transparent;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: .02em;
-  text-transform: uppercase;
-  white-space: nowrap;
   transition: background .16s ease, color .16s ease, border-color .16s ease;
 }
 
-.m-tab .pill {
-  flex-shrink: 0;
-  padding-inline: 5px !important;
+.m-tab-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.m-tab-count {
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 999px;
   background: var(--surface);
+  color: var(--muted);
+  font-family: var(--font-mono);
 }
 
 .m-tab.is-active {
@@ -148,17 +195,25 @@
   color: var(--accent-text);
 }
 
-.m-tab.is-active .pill {
+.m-tab.is-active .m-tab-count {
   background: color-mix(in srgb, var(--accent-text) 18%, transparent);
   color: inherit;
-  border-color: color-mix(in srgb, var(--accent-text) 25%, transparent);
 }
 
-.m-tab-icon { width: 14px; height: 14px; flex-shrink: 0; }
+.m-tab-icon { width: 20px; height: 20px; flex-shrink: 0; }
+
+.m-tab-assistant {
+  border-style: dashed;
+  border-color: var(--border);
+}
 
 /* ——— board + card ——— */
 .m-board {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  box-sizing: border-box;
   padding: 12px 12px calc(96px + env(safe-area-inset-bottom));
 }
 
@@ -229,9 +284,9 @@
 
 /* ——— floating action button ——— */
 .m-fab {
-  position: fixed;
+  position: absolute;
   right: 16px;
-  bottom: calc(16px + env(safe-area-inset-bottom));
+  bottom: calc(24px + env(safe-area-inset-bottom));
   width: 56px;
   height: 56px;
   z-index: 45;
@@ -243,6 +298,12 @@
   background: var(--accent);
   color: var(--accent-text);
   box-shadow: 0 8px 24px rgba(0, 0, 0, .28);
+}
+.m-fab-assist {
+  bottom: calc(92px + env(safe-area-inset-bottom));
+  background: var(--surface);
+  color: var(--text-2);
+  border: 1px solid var(--border);
 }
 
 /* ——— overlays (sheet, form, drawer, chat) ——— */
@@ -271,22 +332,29 @@
 
 .m-full {
   position: fixed;
-  inset: 0;
-  width: 100%;
-  height: 100dvh;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: auto;
+  width: auto;
   min-height: 0;
   box-sizing: border-box;
   z-index: 62;
   display: flex;
   flex-direction: column;
   background: var(--surface);
-  padding-top: env(safe-area-inset-top);
-  padding-bottom: env(safe-area-inset-bottom);
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: 0;
   overflow: hidden;
   animation: m-slide-up .2s ease-out;
 }
 
 .m-full.is-chat { z-index: 63; background: var(--bg); }
+
+.m-full.is-chat {
+  padding-bottom: 0;
+}
 
 @keyframes m-slide-up {
   from { transform: translateY(4%); opacity: .4; }
@@ -297,7 +365,9 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 56px;
+  flex: 0 0 56px;
+  height: 56px;
+  box-sizing: border-box;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
@@ -439,21 +509,21 @@
 .m-drawer {
   position: fixed;
   top: 0;
-  right: 0;
+  left: 0;
   bottom: 0;
   z-index: 61;
   width: min(300px, 86vw);
   display: flex;
   flex-direction: column;
   background: var(--surface);
-  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
   padding-top: env(safe-area-inset-top);
   padding-bottom: env(safe-area-inset-bottom);
-  animation: m-slide-left .2s ease-out;
+  animation: m-slide-right .2s ease-out;
 }
 
-@keyframes m-slide-left {
-  from { transform: translateX(100%); }
+@keyframes m-slide-right {
+  from { transform: translateX(-100%); }
   to { transform: none; }
 }
 
@@ -500,7 +570,6 @@
 
 /* ——— full screen chat ——— */
 .m-chat-feed {
-  flex: 1;
   min-height: 0;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
@@ -511,16 +580,25 @@
 }
 
 .m-chat-foot {
-  flex-shrink: 0;
+  min-height: 0;
+  box-sizing: border-box;
   display: flex;
+  width: 100%;
   gap: 8px;
-  align-items: flex-end;
-  padding: 10px 12px;
+  align-items: center;
+  padding: 12px 12px calc(12px + env(safe-area-inset-bottom, 0px));
   border-top: 1px solid var(--border);
   background: var(--surface);
+  overflow: visible;
 }
 
-.m-chat-foot .input { flex: 1; }
+.m-chat-foot .input {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 0;
+  height: 44px;
+  box-sizing: border-box;
+}
 
 .m-chat-send {
   width: 44px;

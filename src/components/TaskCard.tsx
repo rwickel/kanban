@@ -1,7 +1,7 @@
 import { Task, TaskPriority } from '../types';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { MessageSquare, Pencil, Trash2, Loader2, AlertTriangle, Copy, Check } from 'lucide-react';
+import { MessageSquare, Pencil, Trash2, Loader2, AlertTriangle, Copy, Check, Play, RotateCcw } from 'lucide-react';
 import { useDraggable } from '@dnd-kit/core';
 import { useState } from 'react';
 
@@ -10,6 +10,8 @@ interface TaskCardProps {
   onEdit: (task: Task) => void;
   onDelete: (id: string) => void;
   onOpenChat: (task: Task) => void;
+  onMove?: (task: Task, status: Task['status']) => void;
+  onRetry?: (task: Task) => void;
   isDeleting?: boolean;
 }
 
@@ -20,7 +22,7 @@ const priorityConfig: Record<TaskPriority, { label: string; cls: string; dot: st
   critical: { label: 'URGENT', cls: 'p-red', dot: 'var(--danger)' },
 };
 
-export default function TaskCard({ task, onEdit, onDelete, onOpenChat, isDeleting }: TaskCardProps) {
+export default function TaskCard({ task, onEdit, onDelete, onOpenChat, onMove, onRetry, isDeleting }: TaskCardProps) {
   const isTemp = task.id.startsWith('temp-');
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: task.id,
@@ -83,7 +85,7 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat, isDeletin
           <Loader2 className="w-4 h-4 animate-spin" strokeWidth={1.75} />
           <span className="text-[12px] t-soft mono">Deleting…</span>
         </div>
-      )}
+         )}
 
       {/* top meta row: mono ID + priority pill */}
       <div className="flex items-center justify-between gap-2 mb-1">
@@ -98,6 +100,9 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat, isDeletin
             <span className="dot" style={{ background: priority.dot }} />
             {priority.label}
           </span>
+          {task.pendingSync && (
+            <span className="pill p-amber" title="Queued offline — syncs on reconnect">QUEUED</span>
+          )}
           <span className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
             <button onClick={(e) => { e.stopPropagation(); onEdit(task); }} onPointerDown={(e) => e.stopPropagation()} className="p-1 rounded hoverable" title="Edit task">
               <Pencil className="w-3 h-3 muted" />
@@ -114,6 +119,11 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat, isDeletin
       <h4 className="text-[15px] font-medium t-strong leading-snug line-clamp-2">{task.title}</h4>
       {task.description && (
         <p className="text-[13px] muted mt-1 line-clamp-2 leading-snug">{task.description}</p>
+      )}
+      {task.acceptanceCriteria && (
+        <p className="text-[11px] t-soft mt-1 line-clamp-2 leading-snug" title={task.acceptanceCriteria}>
+          <strong>Accept:</strong> {task.acceptanceCriteria}
+        </p>
       )}
       {task.result && (
         <div className="text-[12px] t-soft mt-1.5 leading-snug line-clamp-4 md-body overflow-hidden" title={task.resultContext ? `${task.result}\n\nContext: ${task.resultContext}` : task.result}>
@@ -148,7 +158,12 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat, isDeletin
           {task.startupPhase === 'error' && (
             <span className="flex items-start gap-1.5" title={task.startupError}>
               <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-px" />
-              <span className="line-clamp-3">{task.startupError || 'Failed to start session'}</span>
+              <span className="line-clamp-3 flex-1">{task.startupError || 'Failed to start session'}</span>
+              {onRetry && (
+                <button onClick={(e) => { e.stopPropagation(); onRetry(task); }} onPointerDown={(e) => e.stopPropagation()} className="btn p-1 shrink-0" title="Retry start">
+                  <RotateCcw className="w-3 h-3" />
+                </button>
+              )}
             </span>
           )}
         </div>
@@ -170,25 +185,22 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat, isDeletin
         ) : (
           <span className="text-[13px] muted">Unassigned</span>
         )}
-        {task.sessionId ? (
+        <span className="flex items-center gap-1">
+          {task.status !== 'running' && onMove && (
+            <button onClick={(e) => { e.stopPropagation(); onMove(task, 'running'); }} onPointerDown={(e) => e.stopPropagation()} className="btn p-1" title="Move to In Progress">
+              <Play className="w-3 h-3" />
+            </button>
+          )}
+        {task.status !== 'backlog' && task.sessionId ? (
           <button onClick={(e) => { e.stopPropagation(); onOpenChat(task); }} onPointerDown={(e) => e.stopPropagation()} className="btn p-1" title="Open agent chat">
             <MessageSquare className="w-3 h-3" />
           </button>
-        ) : task.startupPhase === 'error' ? (
-          <button onClick={(e) => { e.stopPropagation(); onOpenChat(task); }} onPointerDown={(e) => e.stopPropagation()} className="btn p-1" title={task.startupError || 'Open — startup failed'} style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }}>
-            <AlertTriangle className="w-3 h-3" />
+        ) : task.status !== 'backlog' && task.startupPhase === 'error' ? (
+          <button onClick={(e) => { e.stopPropagation(); (onRetry ?? onOpenChat)(task); }} onPointerDown={(e) => e.stopPropagation()} className="btn p-1" title={`Retry start${task.startupError ? ` — ${task.startupError}` : ''}`} style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }}>
+            <RotateCcw className="w-3 h-3" />
           </button>
-        ) : task.agentId ? (
-          <button onClick={(e) => { e.stopPropagation(); onOpenChat(task); }} onPointerDown={(e) => e.stopPropagation()} className="btn p-1" title={task.startupPhase ? 'Starting session…' : 'Start session & open chat'}>
-            {task.startupPhase ? <Loader2 className="w-3 h-3 animate-spin" /> : <MessageSquare className="w-3 h-3" />}
-          </button>
-        ) : (
-          // Delegated tasks created by another agent session have no own
-          // session/agent yet — still offer chat: it wires a session on open.
-          <button onClick={(e) => { e.stopPropagation(); onOpenChat(task); }} onPointerDown={(e) => e.stopPropagation()} className="btn p-1" title={task.parentSessionId ? 'Start session & open chat (created by another agent)' : 'Start session & open chat'}>
-            <MessageSquare className="w-3 h-3" />
-          </button>
-        )}
+        ) : null}
+        </span>
       </div>
     </div>
   );

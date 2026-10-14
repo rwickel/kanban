@@ -8,6 +8,7 @@ import { getTaskModelPref, saveTaskModelPref } from '../store/serverConfig';
 export type MobileTaskFormData = {
   title: string;
   description: string;
+  acceptanceCriteria?: string;
   priority: TaskPriority;
   agentId?: string;
   agentName?: string;
@@ -30,6 +31,7 @@ export default function MobileTaskForm({
 }) {
   const [title, setTitle] = useState(task?.title ?? '');
   const [description, setDescription] = useState(task?.description ?? '');
+  const [acceptanceCriteria, setAcceptanceCriteria] = useState(task?.acceptanceCriteria ?? '');
   const [priority, setPriority] = useState<TaskPriority>(task?.priority ?? 'medium');
   const [selectedAgentId, setSelectedAgentId] = useState(task?.agentId ?? '');
   const [models, setModels] = useState<OpenCodeModelInfo[]>([]);
@@ -67,6 +69,7 @@ export default function MobileTaskForm({
     onSave({
       title: title.trim(),
       description: description.trim(),
+      acceptanceCriteria: acceptanceCriteria.trim() || undefined,
       priority,
       agentId: selectedAgentId || undefined,
       agentName: selectedAgent?.name || undefined,
@@ -92,6 +95,12 @@ export default function MobileTaskForm({
           <label className="m-label" htmlFor="mt-title">Title</label>
           <input id="mt-title" type="text" value={title} onChange={(e) => setTitle(e.target.value)}
             placeholder="Task title..." className="input" autoFocus />
+        </div>
+
+        <div className="m-field">
+          <label className="m-label" htmlFor="mt-acceptance">Acceptance criteria <span className="muted">(optional)</span></label>
+          <textarea id="mt-acceptance" value={acceptanceCriteria} onChange={(e) => setAcceptanceCriteria(e.target.value)}
+            placeholder="What must be true for this task to be accepted?" rows={4} className="input resize-none" />
         </div>
 
         <div className="m-field">

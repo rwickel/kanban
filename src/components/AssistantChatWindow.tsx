@@ -4,10 +4,11 @@
 // Feed rendering reuses ChatFeed so styling + tool calls match SessionChatWindow.
 
 import { useEffect, useRef, useState } from 'react';
-import { X, Send, Loader2, Copy, Check, RefreshCw, Plus, Download, Square } from 'lucide-react';
+import { X, Send, Loader2, Copy, Check, RefreshCw, Plus, Download, Square, Mic, MicOff } from 'lucide-react';
 import { Agent, OpenCodeModelInfo, Project } from '../types';
 import { answerTool, createSession, sendPrompt, interruptSession, fetchModels } from '../api/opencode';
 import { useSessionStream } from '../hooks/useSessionStream';
+import { useSpeechInput } from '../hooks/useSpeechInput';
 import { STATUS_DOT, ThinkingBlock, ToolRow, ChatBubble, ChatErrorRow } from './ChatFeed';
 import { chatToMarkdown, ChatMessage } from './chatEvents';
 import FilePreviewModal from './FilePreviewModal';
@@ -41,6 +42,8 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
   });
   const [models, setModels] = useState<OpenCodeModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelSearch, setModelSearch] = useState('');
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [input, setInput] = useState('');
@@ -53,6 +56,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
   const [copied, setCopied] = useState(false);
   const [exported, setExported] = useState(false);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const { supported: speechSupported, listening: speechListening, speechError, toggle: toggleSpeech } = useSpeechInput();
   const bottomRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(() => {
     try {
@@ -62,8 +66,25 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
     } catch { return 400; }
   });
   const draggingRef = useRef(false);
+  const [position, setPosition] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('kanban_assistant_position') || '{"x":0,"y":0}') as { x: number; y: number }; } catch { return { x: 0, y: 0 }; }
+  });
 
-  const { messages, status, session, retry } = useSessionStream(sessionId);
+  const onWindowPointerDown = (e: React.PointerEvent) => {
+    if ((e.target as HTMLElement).closest('button, input, select, textarea')) return;
+    const startX = e.clientX - position.x;
+    const startY = e.clientY - position.y;
+    const move = (ev: PointerEvent) => setPosition({ x: ev.clientX - startX, y: ev.clientY - startY });
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      try { localStorage.setItem('kanban_assistant_position', JSON.stringify(position)); } catch {}
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+
+  const { messages, status, session, sessionError, retry } = useSessionStream(sessionId);
 
   useEffect(() => {
     if (!project) return;
@@ -81,6 +102,11 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
     setModelsLoading(false);
   };
 
+  const filteredModels = models.filter((m) => {
+    const query = modelSearch.trim().toLowerCase();
+    return !query || `${m.providerID}/${m.modelID} ${m.name ?? ''}`.toLowerCase().includes(query);
+  });
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages.length]);
@@ -95,7 +121,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
   // "Busy" means the composer is locked. Only a genuinely live stream
   // should do that — a stale tool row must not lock the input forever.
   const streamActive = status === 'live' || status === 'connecting';
-  const busy = streamActive || stopping || interrupted;
+  const busy = streamActive || sending || stopping || interrupted;
 
   const onHandlePointerDown = (e: React.PointerEvent) => {
     draggingRef.current = true;
@@ -263,11 +289,11 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
 
   return (
     <div className="fixed top-3 right-3 bottom-3 z-50 flex justify-end pointer-events-none">
-      <div data-assistant-width className="relative h-full flex flex-col shrink-0 pointer-events-auto panel overflow-hidden" style={{ width, maxWidth: '90vw', borderRadius: 10, boxShadow: '0 12px 40px rgba(0,0,0,0.25)', background: 'var(--surface)', border: '1px solid var(--border)' }}>
+      <div data-assistant-width className="relative h-full flex flex-col shrink-0 pointer-events-auto panel overflow-hidden" style={{ width, maxWidth: '90vw', borderRadius: 10, boxShadow: '0 12px 40px rgba(0,0,0,0.25)', background: 'var(--surface)', border: '1px solid var(--border)', transform: `translate(${position.x}px, ${position.y}px)` }}>
         <div onPointerDown={onHandlePointerDown} title="Drag to resize"
           className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-violet-500/40 transition-colors z-10"
           style={{ touchAction: 'none' }} />
-        <div className="modal-head px-3.5 py-3">
+        <div onPointerDown={onWindowPointerDown} className="modal-head px-3.5 py-3 cursor-move" title="Drag to move the assistant chat">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5 mb-1">
@@ -308,22 +334,41 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
                 <option key={a.id} value={a.id}>{a.name}</option>
               ))}
             </select>
-            <div className="flex gap-1">
-              <select
-                value={selectedModel}
-                onChange={(e) => handleModelChange(e.target.value)}
-                className="input mono text-[11px] py-1.5 flex-1 min-w-0"
-                title="Assistant model — changing starts a new chat"
+            <div className="flex gap-1 relative">
+              <button
+                type="button"
+                onClick={() => { setModelSearch(''); setModelMenuOpen((open) => !open); }}
+                className="input mono text-[11px] py-1.5 flex-1 min-w-0 text-left truncate"
+                title="Search and select an assistant model — changing starts a new chat"
               >
-                <option value="">Model: default</option>
-                {models.map((m, idx) => {
-                  const key = `${m.providerID}/${m.modelID}`;
-                  return <option key={`${key}__${idx}`} value={key}>{key}</option>;
-                })}
-              </select>
+                {selectedModel || 'Model: default'}
+              </button>
               <button type="button" onClick={loadModels} disabled={modelsLoading} className="btn p-1.5 shrink-0" title="Refresh models">
                 <RefreshCw className={`w-3 h-3 muted ${modelsLoading ? 'animate-spin' : ''}`} />
               </button>
+              {modelMenuOpen && (
+                <div className="absolute top-full right-0 mt-1 panel p-1.5 z-50 w-[min(420px,90vw)]" style={{ background: 'var(--surface)' }}>
+                  <input
+                    autoFocus
+                    value={modelSearch}
+                    onChange={(e) => setModelSearch(e.target.value)}
+                    placeholder="Search models..."
+                    className="input mono text-[11px] py-1.5 w-full mb-1.5"
+                  />
+                  <div className="max-h-64 overflow-y-auto space-y-1">
+                    <button type="button" onClick={() => { handleModelChange(''); setModelMenuOpen(false); }} className="block w-full text-left px-2.5 py-2 mono text-[11px] rounded hoverable" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text)' }}>Model: default</button>
+                    {filteredModels.map((m, idx) => {
+                      const key = `${m.providerID}/${m.modelID}`;
+                      return (
+                        <button type="button" key={`${key}__${idx}`} onClick={() => { handleModelChange(key); setModelMenuOpen(false); }} className="block w-full text-left px-2.5 py-2 mono text-[11px] rounded hoverable" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text)' }} title={m.name ? `${key} — ${m.name}` : key}>
+                          <span className="block truncate"><span className="font-semibold">{key}</span>{m.name && <span style={{ color: 'var(--muted)' }}> — {m.name}</span>}</span>
+                        </button>
+                      );
+                    })}
+                    {filteredModels.length === 0 && <p className="muted mono text-[11px] px-2 py-3 text-center">No models found.</p>}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -357,7 +402,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
             const prev = idx > 0 ? messages[idx - 1] : undefined;
             const startsTurn = msg.kind !== 'user' && (!prev || prev.kind === 'user');
             if (msg.kind === 'tool') return <ToolRow key={msg.id} msg={msg} onFileClick={(p) => setPreviewPath(p)} onAnswered={(id, out) => { answerTool(sessionId!, id, out).then((r) => { if (!r.ok) setSendError(`Could not send the answer — ${r.error ?? 'unknown error'}`); retry(); }); }} />;
-            if (msg.kind === 'error') return <ChatErrorRow key={msg.id} msg={msg} />;
+            if (msg.kind === 'error') return <ChatErrorRow key={msg.id} msg={msg} detail={msg.id.endsWith('-outcome') ? sessionError : null} />;
             if (msg.kind === 'reasoning') return <ThinkingBlock key={msg.id} msg={msg} showAvatar={startsTurn} agentName={agentName} modelName={modelHint} onFileClick={(p) => setPreviewPath(p)} />;
             return <ChatBubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : agentName} modelName={msg.kind === 'user' ? undefined : modelHint} showAvatar={msg.kind === 'user' ? true : startsTurn} onFileClick={(p) => setPreviewPath(p)} />;
           })}
@@ -373,9 +418,23 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
         </div>
 
         {sendError && <div className="px-3.5 pt-2 text-[11px]" style={{ color: 'var(--danger)' }}>{sendError}</div>}
+        {speechError && <div className="px-3.5 pt-2 text-[11px]" style={{ color: 'var(--amber)' }}>{speechError}</div>}
         <form onSubmit={busy ? (e) => { e.preventDefault(); handleStop(); } : handleSend} className="p-3 border-t hairline" style={{ borderTopWidth: 1, borderTopStyle: 'solid', background: 'var(--surface)' }}>
           <div className="flex gap-1.5 items-end">
-            <input type="text" value={input} onChange={(e) => setInput(e.target.value)} placeholder={busy ? 'Assistant running — Stop to interrupt…' : 'Ask the board assistant…  (↵ send)'} className="input" disabled={busy || creating} autoFocus />
+            <input type="text" value={input} onChange={(e) => setInput(e.target.value)} placeholder={speechListening ? 'Listening — speak now…' : busy ? 'Assistant running — Stop to interrupt…' : 'Ask the board assistant…  (↵ send)'} className="input" disabled={busy || creating} autoFocus />
+            {speechSupported && !busy && (
+              <button
+                type="button"
+                onClick={() => toggleSpeech((text) => setInput((prev) => (prev ? `${prev} ${text}` : text).slice(0, 4000)))}
+                disabled={creating}
+                className="btn p-2 shrink-0"
+                title={speechListening ? 'Stop speech input' : 'Use speech input'}
+                aria-pressed={speechListening}
+                style={speechListening ? { color: 'var(--danger)', borderColor: 'var(--danger)' } : undefined}
+              >
+                {speechListening ? <MicOff className="w-4 h-4" strokeWidth={1.75} /> : <Mic className="w-4 h-4" strokeWidth={1.75} />}
+              </button>
+            )}
             {busy ? (
               <button type="submit" disabled={stopping || !sessionId} className="btn p-2 shrink-0" title="Stop running session" style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }}>
                 {stopping ? <Loader2 className="w-4 h-4 animate-spin" strokeWidth={1.75} /> : <Square className="w-4 h-4" strokeWidth={1.75} />}

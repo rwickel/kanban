@@ -38,3 +38,17 @@ test('uses the provider status when the message has no embedded status', () => {
 
   assert.equal(messages[0]?.markdown, 'Provider error [401]: Authentication failed.');
 });
+
+test('shows the terminal connection error for a failed idle session', () => {
+  const messages = toChatMessage({
+    id: 'msg_failed_session',
+    type: 'idle',
+    outcome: 'failed',
+  });
+
+  assert.deepEqual(messages, [{
+    id: 'msg_failed_session-outcome',
+    kind: 'error',
+    markdown: 'ConnectionRefused: Unable to connect. Is the computer able to access the URL?',
+  }]);
+});

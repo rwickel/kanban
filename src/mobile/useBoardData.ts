@@ -13,11 +13,15 @@ import {
   deleteTask,
   moveTask,
   migrateLocalStorageToServer,
+  isServerDown,
   pollDelayMs,
+  replayOfflineQueue,
 } from '../store/kanban';
 import { fetchAgents, createSession, sendPrompt, getServerInfo } from '../api/opencode';
 import { getTaskModelPref } from '../store/serverConfig';
 import { ensureAssistantSession } from '../store/assistantSession';
+import { isQueuedOffline } from '../store/offlineQueue';
+import { useOfflineSync } from '../hooks/useOfflineSync';
 
 // Copied from App.tsx — the desktop file must not change.
 // This copy keeps the same poll delay, optimistic stamps, and auto-start rule.
@@ -30,6 +34,8 @@ export function useBoardData() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [isConnected, setIsConnected] = useState(false);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
+
+  const { offline, queued, replaying, refreshSyncState, replayQueue } = useOfflineSync();
 
   const optimisticRef = useRef<Record<string, { status: TaskStatus; at: number }>>({});
 
@@ -69,7 +75,16 @@ export function useBoardData() {
         await migrateLocalStorageToServer();
         localStorage.setItem('kanban_migrated_v2', '1');
       }
-    } catch { /* server down — fall back to cache */ }
+    } catch (e) {
+      if (!isQueuedOffline(e)) console.warn('migration skipped (server down)', e);
+    }
+    // Reconnect: replay queued creates/updates before reading.
+    try {
+      const { synced } = await replayOfflineQueue();
+      if (synced > 0) refreshSyncState();
+    } catch (e) {
+      if (!isQueuedOffline(e)) console.warn('queue replay skipped (server down)', e);
+    }
 
     let activeId = getActiveProjectId();
     const peek = activeId;
@@ -133,19 +148,35 @@ export function useBoardData() {
     loadAgents();
     getServerInfo().then(info => { if (info) setIsConnected(true); });
 
+    // Each tick refreshes the offline banner state (serverDown clears on
+    // the first successful api() call inside loadData).
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
     const tick = () => {
       if (stopped) return;
       loadData()
-        .catch(() => { /* server down — backoff retries */ })
+        .catch((e) => { console.warn('poll refresh skipped (server down)', e); })
         .finally(() => {
+          refreshSyncState();
           if (!stopped) timer = setTimeout(tick, pollDelayMs());
         });
     };
     timer = setTimeout(tick, pollDelayMs());
     return () => { stopped = true; clearTimeout(timer); };
-  }, [loadData, loadAgents]);
+  }, [loadData, loadAgents, refreshSyncState]);
+
+  // Reconnect: browser back online → replay queued writes, then refresh.
+  useEffect(() => {
+    const onReconnect = () => {
+      void (async () => {
+        await replayQueue();
+        await loadData().catch((e) => { console.warn('refresh skipped (server down)', e); });
+        refreshSyncState();
+      })();
+    };
+    window.addEventListener('online', onReconnect);
+    return () => window.removeEventListener('online', onReconnect);
+  }, [loadData, replayQueue, refreshSyncState]);
 
   const activeProject = projects.find(p => p.id === activeProjectId) || null;
 
@@ -156,7 +187,10 @@ export function useBoardData() {
     : [];
 
   const startTaskExecution = useCallback(async (task: Task) => {
-    if (task.id.startsWith('temp-')) return;
+    if (task.status !== 'running') return;
+    // Temp optimistic cards: local-only until createTask resolves — EXCEPT
+    // offline-queued cards (pendingSync), which carry their final replay id.
+    if (task.id.startsWith('temp-') && !task.pendingSync) return;
     const resolved = task.agentId
       ? { id: task.agentId, name: task.agentName }
       : agents[0] ? { id: agents[0].id, name: agents[0].name } : {};
@@ -201,6 +235,9 @@ export function useBoardData() {
   useEffect(() => {
     const candidates = tasks.running.filter((t) => {
       if (startingRef.current.has(t.id)) return false;
+      // Offline-queued rows aren't on the server yet — replay first; the
+      // next poll picks them up with pendingSync cleared.
+      if (t.pendingSync) return false;
       if (['creating-session', 'sending-prompt', 'error'].includes(t.startupPhase as string)) return false;
       return !t.startupPhase;
     });
@@ -227,22 +264,38 @@ export function useBoardData() {
     try {
       await moveTask(task.id, newStatus);
     } catch (e) {
-      console.error('move failed, reverting', e);
-      moveTaskInState(task.id, task.status);
+      if (isQueuedOffline(e)) {
+        // Offline — keep the card in the new column, flag QUEUED.
+        upsertTaskInState({ ...task, status: newStatus, pendingSync: true });
+      } else {
+        console.warn('move failed, reverting', e);
+        moveTaskInState(task.id, task.status);
+      }
     } finally {
-      loadData().catch(() => {});
+      refreshSyncState();
+      loadData().catch((e) => { console.warn('refresh skipped (server down)', e); });
     }
-  }, [loadData, moveTaskInState]);
+  }, [loadData, moveTaskInState, refreshSyncState, upsertTaskInState]);
 
   const handleSave = useCallback(async (
-    data: { title: string; description: string; priority: TaskPriority; agentId?: string; agentName?: string; modelId?: string; modelProviderID?: string; result?: string; resultContext?: string },
+    data: { title: string; description: string; acceptanceCriteria?: string; priority: TaskPriority; agentId?: string; agentName?: string; modelId?: string; modelProviderID?: string; result?: string; resultContext?: string },
     editingTask?: Task | null,
   ) => {
     if (!activeProjectId) return;
     if (editingTask) {
       upsertTaskInState({ ...editingTask, ...data });
-      await updateTask(editingTask.id, data).catch(() => {});
-      loadData().catch(() => {});
+      try {
+        await updateTask(editingTask.id, data);
+      } catch (e) {
+        if (isQueuedOffline(e)) {
+          upsertTaskInState({ ...editingTask, ...data, pendingSync: true });
+        } else {
+          console.warn('update failed', e);
+        }
+      } finally {
+        refreshSyncState();
+        loadData().catch((e) => { console.warn('refresh skipped (server down)', e); });
+      }
     } else {
       const tempId = `temp-${Date.now()}`;
       const tempTask: Task = {
@@ -250,6 +303,7 @@ export function useBoardData() {
         projectId: activeProjectId,
         title: data.title,
         description: data.description,
+        acceptanceCriteria: data.acceptanceCriteria,
         status: 'backlog',
         priority: data.priority,
         agentId: data.agentId,
@@ -260,17 +314,32 @@ export function useBoardData() {
         updatedAt: new Date().toISOString(),
       };
       upsertTaskInState(tempTask);
+      // Queued-write id: a real id (never temp-*) so replay POSTs a clean
+      // row and the auto-start guard treats the queued card as normal.
+      const queuedId = `q-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       try {
-        await createTask(activeProjectId, data.title, data.description, data.priority, data.agentId, data.agentName, undefined, data.modelId, data.modelProviderID);
-      } catch (e) {
-        console.error('create failed, removing temp card', e);
+        const created = await createTask(activeProjectId, data.title, data.description, data.priority, data.agentId, data.agentName, undefined, data.modelId, data.modelProviderID, undefined, undefined, queuedId, data.acceptanceCriteria);
+        // Online: server echoed its row (same queuedId) — drop the temp card.
         setTasks((prev) => ({ ...prev, backlog: prev.backlog.filter((t) => t.id !== tempId) }));
         delete optimisticRef.current[tempId];
+        upsertTaskInState(created);
+      } catch (e) {
+        if (isQueuedOffline(e)) {
+          // Offline — swap temp card for the queued row (real id, QUEUED badge).
+          setTasks((prev) => ({ ...prev, backlog: prev.backlog.filter((t) => t.id !== tempId) }));
+          delete optimisticRef.current[tempId];
+          upsertTaskInState({ ...tempTask, id: queuedId, pendingSync: true });
+        } else {
+          console.warn('create failed, removing temp card', e);
+          setTasks((prev) => ({ ...prev, backlog: prev.backlog.filter((t) => t.id !== tempId) }));
+          delete optimisticRef.current[tempId];
+        }
       } finally {
-        loadData().catch(() => {});
+        refreshSyncState();
+        loadData().catch((e) => { console.warn('refresh skipped (server down)', e); });
       }
     }
-  }, [activeProjectId, loadData, upsertTaskInState]);
+  }, [activeProjectId, loadData, refreshSyncState, upsertTaskInState]);
 
   const handleDelete = useCallback(async (id: string) => {
     setDeletingIds((prev) => new Set(prev).add(id));
@@ -278,8 +347,8 @@ export function useBoardData() {
       await deleteTask(id);
       await loadData();
     } catch (e) {
-      console.error('delete failed', e);
-      await loadData().catch(() => {});
+      console.warn('delete failed', e);
+      await loadData().catch((e2) => { console.warn('refresh skipped (server down)', e2); });
     } finally {
       setDeletingIds((prev) => {
         const next = new Set(prev);
@@ -324,6 +393,7 @@ export function useBoardData() {
   return {
     projects, activeProjectId, tasks, agents, isConnected, deletingIds,
     activeProject, availableAgents,
+    offline, queued, replaying, refreshSyncState, replayQueue,
     loadData, loadAgents, handleMove, handleSave, handleDelete,
     handleSwitchProject, handleSaveProject, handleDeleteProject,
   };

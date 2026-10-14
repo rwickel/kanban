@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS projects (
     git_url TEXT,
     git_branch TEXT NOT NULL DEFAULT 'main',
     description TEXT NOT NULL DEFAULT '',
+    acceptance_criteria TEXT,
     agent_ids TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL
 );
@@ -154,6 +155,7 @@ def get_conn(db_path: Path) -> sqlite3.Connection:
         ("parent_session_id", "TEXT"),
         ("result", "TEXT"),
         ("result_context", "TEXT"),
+        ("acceptance_criteria", "TEXT"),
         # Delivery ledger: set when a finished task's result has been queued back
         # into its parent session (see vite.config.js reconcileResultsLoop).
         # NULL means "not yet delivered", so restarts retry automatically.
@@ -247,6 +249,7 @@ def row_to_task(r: sqlite3.Row) -> dict:
         "projectId": r["project_id"],
         "title": r["title"],
         "description": r["description"] or "",
+        "acceptanceCriteria": r["acceptance_criteria"] if "acceptance_criteria" in keys else None,
         "status": r["status"],
         "priority": r["priority"],
         "agentId": r["agent_id"],
@@ -515,16 +518,17 @@ def cmd_task_create(args):
                               agent_id, agent_name, session_id, model_id, model_provider_id,
                               startup_phase, startup_error, kind, heartbeat_at,
                               expected_sec, progress, parent_session_id,
-                              result, result_context,
+                               result, result_context, acceptance_criteria,
                               created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (tid, args.project, args.title, args.description or "", status, priority,
          args.agent_id, args.agent_name, args.session_id,
          args.model_id, args.model_provider,
          args.startup_phase, args.startup_error, kind, ts if status == "running" else None,
          expected, getattr(args, "progress", None) or "",
          getattr(args, "parent_session_id", None),
-         getattr(args, "result", None), getattr(args, "result_context", None),
+          getattr(args, "result", None), getattr(args, "result_context", None),
+          getattr(args, "acceptance_criteria", None),
          ts, ts),
     )
     log_event(conn, tid, args.actor, "task.created",
@@ -582,6 +586,7 @@ def cmd_task_update(args):
         ("parent_session_id", getattr(args, "parent_session_id", None)),
         ("result", getattr(args, "result", None)),
         ("result_context", getattr(args, "result_context", None)),
+        ("acceptance_criteria", getattr(args, "acceptance_criteria", None)),
         ("notified_at", getattr(args, "notified_at", None)),
     ]
     for col, val in mapping:
@@ -877,6 +882,7 @@ def main(argv=None):
     tc.add_argument("--parent-session-id", default=None, help="Parent session that created this task (empty = user/board)")
     tc.add_argument("--result", default=None, help="Task result: last message + context on done/blocked")
     tc.add_argument("--result-context", default=None, help="Extra context for the task result")
+    tc.add_argument("--acceptance-criteria", default=None, help="Optional acceptance criteria")
     tc.add_argument("--actor", default="cli")
     tc.set_defaults(func=cmd_task_create)
 
@@ -910,6 +916,7 @@ def main(argv=None):
     tu.add_argument("--parent-session-id", default=None, help="Parent session that created this task (empty when created by user/board)")
     tu.add_argument("--result", default=None)
     tu.add_argument("--result-context", default=None)
+    tu.add_argument("--acceptance-criteria", default=None)
     tu.add_argument("--actor", default="cli")
     tu.set_defaults(func=cmd_task_update)
 

@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { Project, Task } from '../types';
-import { sendPrompt, interruptSession } from '../api/opencode';
+import { sendPrompt, interruptSession, answerTool } from '../api/opencode';
+import { ensureAssistantSession, readAssistantSessionId, readAssistantAgentPref, readAssistantModelPref } from '../store/assistantSession';
 import { useSessionStream } from '../hooks/useSessionStream';
+import { useSpeechInput } from '../hooks/useSpeechInput';
 import { STATUS_DOT, ThinkingBlock, ToolRow, ChatBubble, ChatErrorRow } from '../components/ChatFeed';
 import { ChatMessage } from '../components/chatEvents';
 import FilePreviewModal from '../components/FilePreviewModal';
 import { updateTask } from '../store/kanban';
-import { ArrowLeft, Send, Loader2, Square } from 'lucide-react';
+import { ArrowLeft, Send, Loader2, Square, Mic, MicOff } from 'lucide-react';
 
 const WELCOME: ChatMessage = {
   id: 'welcome',
@@ -25,15 +27,27 @@ export default function MobileChat({
   onBack: () => void;
 }) {
   const sessionId = task?.sessionId ?? null;
-  const { messages, status, outcome, retry } = useSessionStream(sessionId, {
+  const [assistantId, setAssistantId] = useState<string | null>(() =>
+    project && !task ? readAssistantSessionId(project.id) : null,
+  );
+  const activeSessionId = sessionId ?? assistantId;
+  const { messages, status, outcome, retry } = useSessionStream(activeSessionId, {
     taskAgentName: task?.agentName ?? null,
   });
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const { supported: speechSupported, listening: speechListening, speechError, toggle: toggleSpeech } = useSpeechInput();
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (task || !project) return;
+    setAssistantId(readAssistantSessionId(project.id));
+  }, [task, project?.id]);
 
   // Session finished → board column follows: failed/error → blocked,
   // completed/done → done. Result = last assistant message.
@@ -70,21 +84,47 @@ export default function MobileChat({
     : task?.modelId ?? undefined;
 
   const handleStop = async () => {
-    if (!sessionId || stopping) return;
+    if (!activeSessionId || stopping) return;
     setStopping(true);
-    const ok = await interruptSession(sessionId);
+    const ok = await interruptSession(activeSessionId);
     setStopping(false);
     if (ok) retry();
     else setSendError('Stop failed — the session may already be idle.');
   };
 
+  const ensureSession = async (): Promise<string | null> => {
+    if (activeSessionId) return activeSessionId;
+    if (!project) return null;
+    setCreating(true);
+    setCreateError(null);
+    const res = await ensureAssistantSession(project, {
+      agentId: readAssistantAgentPref(project.id),
+      model: readAssistantModelPref(project.id),
+    });
+    setCreating(false);
+    if (!res.id) {
+      setCreateError(res.error ?? 'Failed to create assistant session.');
+      return null;
+    }
+    setAssistantId(res.id);
+    return res.id;
+  };
+
+  useEffect(() => {
+    if (task || !project || activeSessionId) return;
+    void ensureSession();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [task, project?.id, activeSessionId]);
+
   const handleSend = async (e?: React.FormEvent) => {
     e?.preventDefault();
     const text = input.trim();
-    if (!text || !sessionId || sending) return;
+    if (!text || sending) return;
     setSending(true);
     setSendError(null);
-    const res = await sendPrompt(sessionId, text, task?.agentId ?? task?.agentName);
+    const sid = await ensureSession();
+    if (!sid) { setSending(false); return; }
+    const res = await sendPrompt(sid, text, task?.agentId ?? task?.agentName);
     setSending(false);
     if (res.ok) {
       setInput('');
@@ -95,21 +135,32 @@ export default function MobileChat({
   };
 
   return (
-    <div className="m-full is-chat">
-      <header className="m-overlay-head">
+    <div
+      className="m-full is-chat"
+      style={{
+        position: 'fixed',
+        inset: 0,
+        width: 'auto',
+        height: 'auto',
+        display: 'grid',
+        gridTemplateRows: '56px minmax(0, 1fr) 76px',
+        overflow: 'hidden',
+      }}
+    >
+      <header className="m-overlay-head" style={{ gridRow: 1, height: 56, minHeight: 0, overflow: 'hidden' }}>
         <button className="m-icon-btn" onClick={onBack} aria-label="Back to board">
           <ArrowLeft className="w-4 h-4" strokeWidth={1.75} />
         </button>
         <span className={`dot`} style={{ background: st.bg }} />
         <span className="m-overlay-title">{task ? task.title : project?.name}</span>
         <span className="pill p-neutral" style={{ fontSize: 10, padding: '2px 7px' }}>
-          {agentName} · {sessionId ? st.label : 'no session'}
+          {agentName} · {activeSessionId ? st.label : creating ? 'creating…' : 'no session'}
         </span>
       </header>
 
-      <div className="m-chat-feed">
+      <div className="m-chat-feed" style={{ gridRow: 2, minHeight: 0, overflowY: 'auto' }}>
         {!task && <ChatBubble msg={WELCOME} agentName={agentName} modelName={modelHint} showAvatar onFileClick={setPreviewPath} />}
-        {(status === 'connecting' || status === 'idle') && messages.length === 0 && sessionId && (
+        {(status === 'connecting' || status === 'idle') && messages.length === 0 && activeSessionId && (
           <div className="muted" style={{ textAlign: 'center', fontSize: 12 }}>
             <Loader2 className="w-4 h-4 animate-spin" strokeWidth={1.75} /> Connecting…
           </div>
@@ -118,6 +169,16 @@ export default function MobileChat({
           <div className="muted" style={{ textAlign: 'center', fontSize: 12 }}>
             No agent activity yet.{' '}
             <button type="button" className="underline t-strong" onClick={retry}>Check again</button>
+          </div>
+        )}
+        {creating && messages.length === 0 && !activeSessionId && (
+          <div className="muted" style={{ textAlign: 'center', fontSize: 12 }}>
+            <Loader2 className="w-4 h-4 animate-spin" strokeWidth={1.75} /> Creating assistant session…
+          </div>
+        )}
+        {createError && messages.length === 0 && !activeSessionId && (
+          <div className="m-readonly" style={{ color: 'var(--danger)', textAlign: 'center' }}>
+            {createError}
           </div>
         )}
         {status === 'error' && messages.length === 0 && (
@@ -148,23 +209,55 @@ export default function MobileChat({
         <div ref={bottomRef} />
       </div>
 
-      {sendError && <div className="px-3 pt-2 text-[11px]" style={{ color: 'var(--danger)' }}>{sendError}</div>}
+      {sendError && (
+        <div
+          className="px-3 py-2 text-[11px]"
+          style={{ position: 'absolute', right: 0, bottom: 76, left: 0, color: 'var(--danger)', background: 'var(--surface)' }}
+        >
+          {sendError}
+        </div>
+      )}
 
-      <form className="m-chat-foot" onSubmit={busy ? (e) => { e.preventDefault(); handleStop(); } : handleSend}>
+      {speechError && (
+        <div
+          className="px-3 py-2 text-[11px]"
+          style={{ position: 'absolute', right: 0, bottom: 76, left: 0, color: 'var(--amber)', background: 'var(--surface)' }}
+        >
+          {speechError}
+        </div>
+      )}
+
+      <form className="m-chat-foot" style={{ gridRow: 3, height: 76, minHeight: 0, overflow: 'hidden', alignItems: 'center' }} onSubmit={busy ? (e) => { e.preventDefault(); handleStop(); } : handleSend}>
         <input
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder={busy ? 'Session running — Stop to interrupt…' : 'Reply to agent…'}
+          placeholder={speechListening ? 'Listening — speak now…' : busy ? 'Session running — Stop to interrupt…' : 'Reply to agent…'}
           className="input"
-          disabled={busy || !sessionId}
+          style={{ height: 44, minHeight: 44, maxHeight: 44 }}
+          disabled={busy || creating || (!activeSessionId && !project)}
         />
+        {speechSupported && !busy && (
+          <button
+            type="button"
+            onClick={() => toggleSpeech((text) => setInput((prev) => (prev ? `${prev} ${text}` : text).slice(0, 4000)))}
+            disabled={creating || (!activeSessionId && !project)}
+            className="m-chat-send"
+            style={speechListening
+              ? { background: 'var(--danger)', width: 44, height: 44, minHeight: 44, flexShrink: 0 }
+              : { width: 44, height: 44, minHeight: 44, flexShrink: 0 }}
+            aria-label={speechListening ? 'Stop speech input' : 'Use speech input'}
+            aria-pressed={speechListening}
+          >
+            {speechListening ? <MicOff className="w-4 h-4" strokeWidth={1.75} /> : <Mic className="w-4 h-4" strokeWidth={1.75} />}
+          </button>
+        )}
         {busy ? (
-          <button type="submit" disabled={stopping || !sessionId} className="m-chat-send" style={{ background: 'var(--danger)' }} aria-label="Stop session">
+          <button type="submit" disabled={stopping || !activeSessionId} className="m-chat-send" style={{ background: 'var(--danger)', width: 44, height: 44, minHeight: 44, flexShrink: 0 }} aria-label="Stop session">
             {stopping ? <Loader2 className="w-4 h-4 animate-spin" strokeWidth={1.75} /> : <Square className="w-4 h-4" strokeWidth={1.75} />}
           </button>
         ) : (
-          <button type="submit" disabled={!input.trim() || sending || !sessionId} className="m-chat-send" aria-label="Send">
+          <button type="submit" disabled={!input.trim() || sending || creating || (!activeSessionId && !project)} className="m-chat-send" style={{ width: 44, height: 44, minHeight: 44, flexShrink: 0 }} aria-label="Send">
             {sending ? <Loader2 className="w-4 h-4 animate-spin" strokeWidth={1.75} /> : <Send className="w-4 h-4" strokeWidth={1.75} />}
           </button>
         )}

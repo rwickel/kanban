@@ -86,7 +86,12 @@ export default function TaskSheet({
         </div>
 
         <footer className="m-overlay-foot">
-          <button className="m-btn" onClick={() => onOpenChat(task)}>
+          <button
+            className="m-btn"
+            onClick={() => onOpenChat(task)}
+            disabled={!task.sessionId}
+            title={task.sessionId ? 'Open task chat' : 'Chat unavailable until the task is running'}
+          >
             <MessageSquare className="w-4 h-4" strokeWidth={1.75} /> Chat
           </button>
           <button className="m-btn" onClick={() => onEdit(task)}>

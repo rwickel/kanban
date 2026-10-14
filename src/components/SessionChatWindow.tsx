@@ -2,13 +2,14 @@
 
 import { useEffect, useRef, useState } from 'react';
 import {
-  X, Send, Loader2, ExternalLink, Copy, Check, Download, Square,
+  X, Send, Loader2, ExternalLink, Copy, Check, Download, Square, RefreshCw, Mic, MicOff,
 } from 'lucide-react';
 import { Task } from '../types';
-import { answerTool, sendPrompt, interruptSession } from '../api/opencode';
+import { answerTool, sendPrompt, interruptSession, fetchModels } from '../api/opencode';
 import { useSessionStream } from '../hooks/useSessionStream';
 import { chatToMarkdown } from './chatEvents';
 import { STATUS_DOT, ThinkingBlock, ToolRow, ChatBubble, ChatErrorRow } from './ChatFeed';
+import { useSpeechInput } from '../hooks/useSpeechInput';
 import FilePreviewModal from './FilePreviewModal';
 
 interface SessionChatWindowProps {
@@ -20,9 +21,35 @@ interface SessionChatWindowProps {
 
 export default function SessionChatWindow({ task, onClose, standalone }: SessionChatWindowProps) {
   const sessionId = task?.sessionId ?? null;
-  const { messages, status, outcome, retry } = useSessionStream(sessionId, {
+  const [models, setModels] = useState<Awaited<ReturnType<typeof fetchModels>>>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelSearch, setModelSearch] = useState('');
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [selectedModel, setSelectedModel] = useState(() => task?.modelProviderID && task?.modelId ? `${task.modelProviderID}/${task.modelId}` : '');
+  const { messages, status, outcome, sessionError, retry } = useSessionStream(sessionId, {
     taskAgentName: task?.agentName ?? null,
   });
+  useEffect(() => {
+    setSelectedModel(task?.modelProviderID && task?.modelId ? `${task.modelProviderID}/${task.modelId}` : '');
+    if (task) void loadModels();
+  }, [task?.id]);
+  const loadModels = async () => {
+    setModelsLoading(true);
+    setModels(await fetchModels());
+    setModelsLoading(false);
+  };
+  const filteredModels = models.filter((m) => {
+    const query = modelSearch.trim().toLowerCase();
+    return !query || `${m.providerID}/${m.modelID} ${m.name ?? ''}`.toLowerCase().includes(query);
+  });
+  const changeModel = (value: string) => {
+    setSelectedModel(value);
+    const [providerID, ...parts] = value.split('/');
+    import('../store/kanban').then(({ updateTask }) => updateTask(task!.id, {
+      modelProviderID: providerID || undefined,
+      modelId: parts.join('/') || undefined,
+    } as Partial<Task>)).catch(() => {});
+  };
   const autoMovedRef = useRef(false);
   const infraFixRef = useRef(false);
   // Infra self-healing: stream/proxy unreachable (e.g. 502) → backlog fix task.
@@ -61,7 +88,11 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
     autoMovedRef.current = true;
     const patch: Partial<Task> = { status: next };
     if (!task.result && lastResultRef.current) (patch as Record<string, unknown>).result = lastResultRef.current;
-    if (!task.resultContext && next === 'blocked' && outcome) (patch as Record<string, unknown>).resultContext = `session outcome: ${outcome}`;
+    if (!task.resultContext && next === 'blocked' && outcome) {
+      (patch as Record<string, unknown>).resultContext = sessionError
+        ? `session outcome: ${outcome}; error: ${sessionError}`
+        : `session outcome: ${outcome}; error: ConnectionRefused: Unable to connect. Is the computer able to access the URL?`;
+    }
     import('../store/kanban').then(({ updateTask }) => updateTask(task.id, patch)).catch(() => { autoMovedRef.current = false; });
   }, [task?.id, task?.status, status, outcome]);
   useEffect(() => { autoMovedRef.current = false; }, [task?.id]);
@@ -75,6 +106,7 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
   const [interrupted, setInterrupted] = useState(false);
   const [copied, setCopied] = useState(false);
   const [exported, setExported] = useState(false);
+  const { supported: speechSupported, listening: speechListening, speechError, toggle: toggleSpeech } = useSpeechInput();
   const bottomRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(() => {
     try {
@@ -216,6 +248,28 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
               <span className="truncate">{sessionId}</span>
               {copied ? <Check className="w-3 h-3" strokeWidth={1.75} /> : <Copy className="w-3 h-3" strokeWidth={1.75} />}
             </button>
+            <div className="flex items-center gap-1.5 mt-1.5 relative">
+              <span className="text-[10px] muted mono shrink-0">model</span>
+              <button type="button" onClick={() => { setModelSearch(''); setModelMenuOpen((open) => !open); }} className="input mono text-[10px] py-1.5 flex-1 min-w-0 text-left truncate" title="Model used for the next task run">
+                {selectedModel || 'Model: default'}
+              </button>
+              <button type="button" onClick={loadModels} disabled={modelsLoading} className="btn p-1.5 shrink-0" title="Refresh models">
+                <RefreshCw className={`w-3 h-3 muted ${modelsLoading ? 'animate-spin' : ''}`} />
+              </button>
+              {modelMenuOpen && (
+                <div className="absolute top-full right-0 mt-1 panel p-1.5 z-50 w-[min(420px,90vw)]" style={{ background: 'var(--surface)' }}>
+                  <input autoFocus value={modelSearch} onChange={(e) => setModelSearch(e.target.value)} placeholder="Search models..." className="input mono text-[11px] py-1.5 w-full mb-1.5" />
+                  <div className="max-h-64 overflow-y-auto space-y-1">
+                    <button type="button" onClick={() => { changeModel(''); setModelMenuOpen(false); }} className="block w-full text-left px-2.5 py-2 mono text-[11px] rounded hoverable" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text)' }}>Model: default</button>
+                    {filteredModels.map((m, idx) => {
+                      const key = `${m.providerID}/${m.modelID}`;
+                      return <button type="button" key={`${key}__${idx}`} onClick={() => { changeModel(key); setModelMenuOpen(false); }} className="block w-full text-left px-2.5 py-2 mono text-[11px] rounded hoverable" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text)' }} title={m.name ? `${key} — ${m.name}` : key}><span className="block truncate"><span className="font-semibold">{key}</span>{m.name && <span style={{ color: 'var(--muted)' }}> — {m.name}</span>}</span></button>;
+                    })}
+                    {filteredModels.length === 0 && <p className="muted mono text-[11px] px-2 py-3 text-center">No models found.</p>}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
           <div className="flex items-center gap-1 shrink-0">
             <button onClick={exportMarkdown} className="btn p-1.5" title="Export chat as Markdown">
@@ -251,7 +305,7 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
           const startsTurn = msg.kind !== 'user' && (!prev || prev.kind === 'user');
           const modelHint = task.modelProviderID && task.modelId ? `${task.modelProviderID}/${task.modelId}` : task.modelId ?? undefined;
           if (msg.kind === 'tool') return <ToolRow key={msg.id} msg={msg} onFileClick={(p) => setPreviewPath(p)} onAnswered={handleAnswer} />;
-          if (msg.kind === 'error') return <ChatErrorRow key={msg.id} msg={msg} />;
+          if (msg.kind === 'error') return <ChatErrorRow key={msg.id} msg={msg} detail={msg.id.endsWith('-outcome') ? sessionError : null} />;
           if (msg.kind === 'reasoning') return <ThinkingBlock key={msg.id} msg={msg} showAvatar={startsTurn} agentName={task.agentName} modelName={modelHint} onFileClick={(p) => setPreviewPath(p)} />;
           return <ChatBubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : task.agentName} modelName={msg.kind === 'user' ? undefined : modelHint} showAvatar={msg.kind === 'user' ? true : startsTurn} onFileClick={(p) => setPreviewPath(p)} />;
         })}
@@ -267,10 +321,23 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
       </div>
 
       {sendError && <div className="px-3.5 pt-2 text-[11px]" style={{ color: 'var(--danger)' }}>{sendError}</div>}
+      {speechError && <div className="px-3.5 pt-2 text-[11px]" style={{ color: 'var(--amber)' }}>{speechError}</div>}
       <form onSubmit={busy ? (e) => { e.preventDefault(); handleStop(); } : handleSend} className="p-3 border-t hairline" style={{ borderTopWidth: 1, borderTopStyle: 'solid', background: 'var(--surface)' }}>
         <div className="flex gap-1.5 items-end">
           <input type="text" value={input} onChange={(e) => setInput(e.target.value)}
-            placeholder={busy ? 'Session running — Stop to interrupt…' : 'Reply to agent…  (↵ send)'} className="input" disabled={busy} />
+            placeholder={speechListening ? 'Listening — speak now…' : busy ? 'Session running — Stop to interrupt…' : 'Reply to agent…  (↵ send)'} className="input" disabled={busy} />
+          {speechSupported && !busy && (
+            <button
+              type="button"
+              onClick={() => toggleSpeech((text) => setInput((prev) => (prev ? `${prev} ${text}` : text).slice(0, 4000)))}
+              className="btn p-2 shrink-0"
+              title={speechListening ? 'Stop speech input' : 'Use speech input'}
+              aria-pressed={speechListening}
+              style={speechListening ? { color: 'var(--danger)', borderColor: 'var(--danger)' } : undefined}
+            >
+              {speechListening ? <MicOff className="w-4 h-4" strokeWidth={1.75} /> : <Mic className="w-4 h-4" strokeWidth={1.75} />}
+            </button>
+          )}
           {busy ? (
             <button type="submit" disabled={stopping || !sessionId} className="btn p-2 shrink-0" title="Stop running session" style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }}>
               {stopping ? <Loader2 className="w-4 h-4 animate-spin" strokeWidth={1.75} /> : <Square className="w-4 h-4" strokeWidth={1.75} />}

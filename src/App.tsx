@@ -14,16 +14,14 @@ import {
   Server,
   Moon,
   Sun,
-  Search,
-  FlaskConical,
 } from 'lucide-react';
-import { useTheme } from './hooks/useTheme';
+import { Theme, useTheme } from './hooks/useTheme';
+import { usePreferences } from './hooks/usePreferences';
 import { Task, TaskStatus, TaskPriority, Project, Agent, OpenCodeAgentInfo } from './types';
 import {
   getProjects,
   getActiveProjectId,
   setActiveProjectId,
-  createProject,
   updateProject,
   deleteProject,
   getTasks,
@@ -34,7 +32,11 @@ import {
   migrateLocalStorageToServer,
   isServerDown,
   pollDelayMs,
+  replayOfflineQueue,
 } from './store/kanban';
+import { isQueuedOffline } from './store/offlineQueue';
+import { useOfflineSync } from './hooks/useOfflineSync';
+import OfflineBanner from './components/OfflineBanner';
 import { fetchAgents, createSession, sendPrompt, getServerInfo } from './api/opencode';
 import { getTaskModelPref } from './store/serverConfig';
 import { ensureAssistantSession } from './store/assistantSession';
@@ -46,7 +48,6 @@ import ProjectModal from './components/ProjectModal';
 import AgentTeamModal from './components/AgentTeamModal';
 import ServerConfigModal from './components/ServerConfigModal';
 import TaskCard from './components/TaskCard';
-import ApiExplorer from './components/ApiExplorer';
 
 const COLUMNS: { status: TaskStatus; title: string }[] = [
   { status: 'backlog', title: 'Backlog' },
@@ -54,8 +55,6 @@ const COLUMNS: { status: TaskStatus; title: string }[] = [
   { status: 'done', title: 'Complete' },
   { status: 'blocked', title: 'Blocked' },
 ];
-
-type View = 'board' | 'api';
 
 // Customizable agent style (prompts/final-message-style.md), loaded once.
 // Edit the file + refresh the page to change what agents are told.
@@ -72,7 +71,6 @@ void loadStyleGuide();
 
 export default function App() {
   // State
-  const [view, setView] = useState<View>('board');
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectIdState] = useState<string | null>(null);
   const [tasks, setTasks] = useState<Record<TaskStatus, Task[]>>({
@@ -95,6 +93,9 @@ export default function App() {
 
   // Drag state
   const [activeTask, setActiveTask] = useState<Task | null>(null);
+
+  // Offline banner + queued writes: browser flag, server health, replay.
+  const { offline, queued, replaying, refreshSyncState, replayQueue } = useOfflineSync();
 
   // Chat window state
   const [chatTask, setChatTask] = useState<Task | null>(null);
@@ -123,7 +124,23 @@ export default function App() {
         await migrateLocalStorageToServer();
         localStorage.setItem('kanban_migrated_v2', '1');
       }
-    } catch { /* server down — fall back to cache */ }
+    } catch (e) {
+      if (!isQueuedOffline(e)) console.warn('migration skipped (server down)', e);
+    }
+    // Reconnect: replay queued creates/updates before reading, so the board
+    // reflects what the user already did offline.
+    // Reads must NEVER throw: getProjects/getTasks already fall back to the
+    // local cache on network failure, and loadData is called from handlers
+    // whose catch blocks replaced silent failures — a poll tick must not crash
+    // the board because the server went down.
+    let replayErr: unknown = null;
+    try {
+      const { synced } = await replayOfflineQueue();
+      if (synced > 0) refreshSyncState();
+    } catch (e) {
+      replayErr = e;
+    }
+    if (replayErr && !isQueuedOffline(replayErr)) console.warn('queue replay skipped (server down)', replayErr);
 
     let activeId = getActiveProjectId();
     const peek = activeId;
@@ -213,25 +230,48 @@ export default function App() {
 
     // Check server connection
     getServerInfo().then(info => {
-      if (info) setIsConnected(true);
-    });
+      if (info) { setIsConnected(true); refreshSyncState(); }
+    }).catch(() => { refreshSyncState(); });
 
     // Option B: agents write straight to SQLite — just refresh from the store.
     // Backoff: 5s healthy, doubling per failure up to 60s so a dead
     // server doesn't spam the console with ERR_CONNECTION_REFUSED.
+    // Every tick refreshes the offline banner state (server may have recovered).
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
     const tick = () => {
       if (stopped) return;
       loadData()
-        .catch(() => { /* server down — backoff retries */ })
+        .catch((e) => { console.warn('poll skipped (server down)', e); })
         .finally(() => {
+          refreshSyncState();
           if (!stopped) timer = setTimeout(tick, pollDelayMs());
         });
     };
     timer = setTimeout(tick, pollDelayMs());
     return () => { stopped = true; clearTimeout(timer); };
-  }, [loadData, loadAgents]);
+  }, [loadData, loadAgents, refreshSyncState]);
+
+  // Reconnect (browser online event): flush the queue, then reload.
+  // loadData replays internally too — this listener only handles the moment
+  // the network returns, so queued writes don't wait for the next 5s poll.
+  useEffect(() => {
+    const flush = () => {
+      void replayQueue().then(() => {
+        loadData().catch((e) => { console.warn('reconnect refresh skipped (server down)', e); });
+      });
+    };
+    window.addEventListener('online', flush);
+    return () => window.removeEventListener('online', flush);
+  }, [loadData, replayQueue]);
+
+  const handleSyncNow = useCallback(() => {
+    void (async () => {
+      await replayQueue();
+      await loadData().catch((e) => { console.warn('refresh skipped (server down)', e); });
+      refreshSyncState();
+    })();
+  }, [loadData, replayQueue, refreshSyncState]);
 
   // Board assistant chat gets its own assistant session at startup so the
   // id is known right away (pastable in the welcome bubble, usable as
@@ -318,11 +358,18 @@ export default function App() {
       try {
         await moveTask(task.id, newStatus);
       } catch (e) {
-        console.error('move failed, reverting', e);
-        moveTaskInState(task.id, task.status);
+        if (isQueuedOffline(e)) {
+          // Server unreachable — keep the card in the new column, flag it
+          // QUEUED, reconcile on the next loadData/replay.
+          upsertTaskInState({ ...task, status: newStatus, pendingSync: true });
+        } else {
+          console.warn('move failed, reverting', e);
+          moveTaskInState(task.id, task.status);
+        }
       } finally {
         // 2. Reconcile in background (don't block the drag animation).
-        loadData().catch(() => {});
+        refreshSyncState();
+        loadData().catch((e) => { console.warn('refresh skipped (server down)', e); });
       }
     }
   };
@@ -403,10 +450,13 @@ export default function App() {
   };
 
   const startTaskExecution = async (task: Task) => {
+    if (task.status !== 'running') return;
     // Temp optimistic cards (temp-*) are local-only until createTask resolves
     // with the server row. Never send them to the server — the watcher may
     // pick them up mid-create and PATCH would 404 + flip them to error.
-    if (task.id.startsWith('temp-')) return;
+    // Offline-queued cards (pendingSync) already carry their final replay id,
+    // so they may proceed on reconnect.
+    if (task.id.startsWith('temp-') && !task.pendingSync) return;
     // Infra self-healing: startup failures (session create, prompt send,
     // branch mismatch) auto-create a fix task in backlog so the issue is
     // tracked. Fix tasks themselves never spawn follow-ups (no recursion).
@@ -542,6 +592,10 @@ export default function App() {
   useEffect(() => {
     const candidates = tasks.running.filter((t) => {
       if (startingRef.current.has(t.id)) return false;
+      // Offline-queued rows aren't on the server yet — replay first, and the
+      // next poll picks them up with pendingSync cleared. Starting now would
+      // create a session for a task id the server doesn't know.
+      if (t.pendingSync) return false;
       if (['creating-session', 'sending-prompt', 'error'].includes(t.startupPhase as string)) return false;
       // Fresh (never started, or server reset on move): start.
       if (!t.startupPhase) return true;
@@ -557,24 +611,48 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tasks.running]);
 
-  const handleOpenChat = (task: Task) => {
-    if (task.sessionId) {
-      setChatTask(task);
-      return;
+  const handleMoveTask = async (task: Task, newStatus: TaskStatus) => {
+    if (task.status === newStatus) return;
+    moveTaskInState(task.id, newStatus);
+    try {
+      await moveTask(task.id, newStatus);
+    } catch (e) {
+      if (isQueuedOffline(e)) {
+        upsertTaskInState({ ...task, status: newStatus, pendingSync: true });
+      } else {
+        console.warn('move failed, reverting', e);
+        moveTaskInState(task.id, task.status);
+      }
+    } finally {
+      refreshSyncState();
+      loadData().catch((e) => { console.warn('refresh skipped (server down)', e); });
     }
-    // No session yet (e.g. creation failed, task never went through running,
-    // or delegated by another agent session): wire it up now so the icon
-    // always opens something. startTaskExecution resolves the agent itself.
-    startTaskExecution(task).then(async () => {
-      const all = await getTasks(task.projectId);
-      const fresh = all.find(t => t.id === task.id);
-      if (fresh?.sessionId) setChatTask(fresh);
+  };
+
+  const handleOpenChat = (task: Task) => {
+    // Opening chat must never start execution or send the task prompt.
+    // A task chat exists only after the task has its own server session.
+    if (task.sessionId) setChatTask(task);
+  };
+
+  // One-click retry for error-phase cards: calls startTaskExecution directly
+  // with a cleared session id (forces a fresh session) — no chat open.
+  // In-flight guard prevents double-taps; auto-start skips error-phase so
+  // this is the only path that restarts a failed card.
+  const handleRetryTask = (task: Task) => {
+    if (startingRef.current.has(task.id)) return;
+    startingRef.current.add(task.id);
+    const fresh = { ...task, sessionId: undefined, startupPhase: undefined, startupError: undefined } as Task;
+    upsertTaskInState({ ...fresh, startupPhase: 'creating-session' } as Task);
+    void startTaskExecution(fresh).finally(() => {
+      startingRef.current.delete(task.id);
     });
   };
 
   const handleSaveTask = async (data: {
     title: string;
     description: string;
+    acceptanceCriteria?: string;
     priority: TaskPriority;
     agentId?: string;
     agentName?: string;
@@ -586,37 +664,52 @@ export default function App() {
     if (!activeProjectId) return;
 
     if (editingTask) {
+      const modelChanged = data.modelId !== editingTask.modelId || data.modelProviderID !== editingTask.modelProviderID;
+      const sessionReset = modelChanged && Boolean(editingTask.sessionId);
+      const updatedTask = {
+        ...editingTask,
+        ...data,
+        ...(sessionReset ? { sessionId: undefined, startupPhase: undefined, startupError: undefined } : {}),
+      } as Task;
       // Optimistic: reflect edit instantly, persist in background.
-      upsertTaskInState({ ...editingTask, ...data });
+      upsertTaskInState(updatedTask);
       setEditingTask(null);
       try {
         await updateTask(editingTask.id, {
           title: data.title,
           description: data.description,
+          acceptanceCriteria: data.acceptanceCriteria,
           priority: data.priority,
           agentId: data.agentId,
           agentName: data.agentName,
           modelId: data.modelId,
           modelProviderID: data.modelProviderID,
+          ...(sessionReset ? { sessionId: null, startupPhase: null, startupError: null } : {}),
           result: data.result,
           resultContext: data.resultContext,
-        });
+        } as unknown as Partial<Task>);
       } catch (e) {
-        console.error('update failed', e);
+        if (isQueuedOffline(e)) {
+          upsertTaskInState({ ...editingTask, ...data, pendingSync: true });
+        } else {
+          console.warn('update failed', e);
+        }
       } finally {
-        loadData().catch(() => {});
+        refreshSyncState();
+        loadData().catch((e) => { console.warn('refresh skipped (server down)', e); });
       }
     } else {
       // Optimistic: insert a temp card instantly, swap in server row after.
-      // The temp row is keyed temp-<ts> and dropped on refresh — but a stale
-      // row (e.g. create threw after the card rendered) must never reach the
-      // server: PATCH /tasks/temp-* would 404 and mark it error. Guard by id.
+      // Online: server assigns the id — swap temp card for the real row.
+      // Offline (queued): replace the temp card with the queued row (real
+      // replay id, QUEUED badge). Replay POSTs it on reconnect.
       const tempId = `temp-${Date.now()}`;
       const tempTask: Task = {
         id: tempId,
         projectId: activeProjectId,
         title: data.title,
-        description: data.description,
+         description: data.description,
+         acceptanceCriteria: data.acceptanceCriteria,
         status: 'backlog',
         priority: data.priority,
         agentId: data.agentId,
@@ -628,8 +721,11 @@ export default function App() {
       };
       upsertTaskInState(tempTask);
       setEditingTask(null);
+      // Queued-write id: a real id (never temp-*) so replay POSTs a clean row
+      // and the auto-start guard treats the queued card as a normal task.
+      const queuedId = `q-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       try {
-        await createTask(
+        const created = await createTask(
           activeProjectId,
           data.title,
           data.description,
@@ -638,17 +734,41 @@ export default function App() {
           data.agentName,
           undefined,
           data.modelId,
-          data.modelProviderID
+           data.modelProviderID,
+           undefined,
+           undefined,
+           data.acceptanceCriteria,
+            queuedId
         );
-      } catch (e) {
-        console.error('create failed, removing temp card', e);
+        // Online path: server echoed its row (same queuedId) — drop the temp
+        // card and show the confirmed row.
         setTasks((prev) => ({
           ...prev,
           backlog: prev.backlog.filter((t) => t.id !== tempId),
         }));
         delete optimisticRef.current[tempId];
+        upsertTaskInState(created);
+      } catch (e) {
+        if (isQueuedOffline(e)) {
+          // Server unreachable — swap temp card for the queued row (real id,
+          // QUEUED badge). Survives refresh via localStorage until replay.
+          setTasks((prev) => ({
+            ...prev,
+            backlog: prev.backlog.filter((t) => t.id !== tempId),
+          }));
+          delete optimisticRef.current[tempId];
+          upsertTaskInState({ ...tempTask, id: queuedId, pendingSync: true });
+        } else {
+          console.warn('create failed, removing temp card', e);
+          setTasks((prev) => ({
+            ...prev,
+            backlog: prev.backlog.filter((t) => t.id !== tempId),
+          }));
+          delete optimisticRef.current[tempId];
+        }
       } finally {
-        loadData().catch(() => {});
+        refreshSyncState();
+        loadData().catch((e) => { console.warn('refresh skipped (server down)', e); });
       }
     }
   };
@@ -663,8 +783,8 @@ export default function App() {
       await deleteTask(id);
       await loadData();
     } catch (e) {
-      console.error('delete failed', e);
-      await loadData().catch(() => {});
+      console.warn('delete failed', e);
+      await loadData().catch((e2) => { console.warn('refresh skipped (server down)', e2); });
     } finally {
       setDeletingIds((prev) => {
         const next = new Set(prev);
@@ -715,35 +835,16 @@ export default function App() {
   const handleSaveProject = async (data: { name: string; folder: string; description: string; gitUrl?: string; gitBranch?: string; mkdir?: boolean }) => {
     const targetId = editingProject?.id ?? null;
     const folder = data.folder.trim();
-    // Clone into the new folder if a URL was given (server does git clone).
-    if (data.gitUrl && data.mkdir && folder) {
-      try {
-        const { cloneRepo } = await import('./store/kanban');
-        await cloneRepo(data.gitUrl, folder, data.gitBranch);
-      } catch (e: unknown) {
-        alert(`Clone failed: ${String((e as Error)?.message ?? e).slice(0, 400)}`);
-        return;
+    try {
+      const { saveProject } = await import('./store/kanban');
+      const saved = await saveProject(data, targetId);
+      if (!editingProject && saved) setActiveProjectId(saved.id);
+      if (saved && (saved.folder ?? '') !== folder) {
+        alert(`Project saved, but stored folder differs:\ntyped: ${folder}\nstored: ${saved.folder ?? saved.path}`);
       }
-    }
-    const projPayload: Partial<import('./types').Project> = {
-      folder,
-      description: data.description,
-      name: data.name,
-      gitUrl: data.gitUrl,
-      gitBranch: data.gitBranch,
-    };
-    if (editingProject) {
-      const updated = await updateProject(editingProject.id, projPayload);
-      if (updated && (updated.folder ?? '') !== folder) {
-        alert(`Project saved, but stored folder differs:\ntyped: ${folder}\nstored: ${updated.folder ?? updated.path}`);
-      }
-    } else {
-      const newProject = await createProject(data.name, folder, data.description);
-      // Persist git link if provided on create (createProject only knows name/folder).
-      if (data.gitUrl || data.gitBranch) {
-        await updateProject(newProject.id, { gitUrl: data.gitUrl, gitBranch: data.gitBranch });
-      }
-      setActiveProjectId(newProject.id);
+    } catch (e: unknown) {
+      alert(`Save failed: ${String((e as Error)?.message ?? e).slice(0, 400)}`);
+      return;
     }
     setEditingProject(null);
     await loadData();
@@ -858,7 +959,7 @@ export default function App() {
                 </div>
                 <div>
                   <h1 className="text-[15px] font-semibold t-strong leading-tight">Kanban Board</h1>
-                  <p className="text-[11px] muted mono -mt-px">OPENCODE · V2</p>
+                  <p className="text-[11px] muted mono -mt-px">{isConnected ? 'CONNECTED' : 'DEMO'} · {projects.length} project{projects.length === 1 ? '' : 's'}</p>
                 </div>
               </div>
 
@@ -868,16 +969,8 @@ export default function App() {
                 title="Configure server connection"
                 className={`pill ${isConnected ? 'p-green' : 'p-amber'}`}
               >
-                <span className="dot" style={{ background: isConnected ? 'var(--emerald)' : 'var(--amber)' }} />
                 {isConnected ? <Wifi className="w-3 h-3" strokeWidth={1.75} /> : <WifiOff className="w-3 h-3" strokeWidth={1.75} />}
-                <span>{isConnected ? 'CONNECTED' : 'DEMO'}</span>
               </button>
-              {/* Search hint */}
-              <span className="hidden md:flex items-center gap-1.5 pill p-neutral">
-                <Search className="w-3 h-3" strokeWidth={1.75} />
-                <span>Search</span>
-                <span className="kbd">⌘K</span>
-              </span>
             </div>
 
             {/* Center: Project Selector */}
@@ -962,30 +1055,14 @@ export default function App() {
 
             {/* Right: Actions */}
             <div className="flex items-center gap-1.5">
+              
+              
               <button
-                onClick={toggle}
-                className="btn flex items-center gap-1.5 px-3 py-2 text-[13px]"
-                title={theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme'}
-              >
-                {theme === 'light' ? <Moon className="w-3.5 h-3.5" strokeWidth={1.75} /> : <Sun className="w-3.5 h-3.5" strokeWidth={1.75} />}
-                <span className="hidden sm:inline mono">{theme === 'light' ? 'DARK' : 'LIGHT'}</span>
-              </button>
-              <button
-                onClick={() => setView(view === 'api' ? 'board' : 'api')}
-                className="btn flex items-center gap-1.5 px-3 py-2 text-[13px]"
-                title={view === 'api' ? 'Back to board' : 'API explorer — test the endpoints'}
-              >
-                {view === 'api'
-                  ? <LayoutGrid className="w-3.5 h-3.5" strokeWidth={1.75} />
-                  : <FlaskConical className="w-3.5 h-3.5" strokeWidth={1.75} />}
-                <span className="hidden sm:inline mono">{view === 'api' ? 'BOARD' : 'API'}</span>
-              </button>
-              <button
-                onClick={() => setShowServerModal(true)}
+                onClick={() => { window.location.href = '/settings?from=desktop'; }}
                 className="btn flex items-center px-2.5 py-1.5"
-                title="Server connection"
+                title="Settings — theme, view, font size"
               >
-                <Server className="w-3.5 h-3.5" strokeWidth={1.75} />
+                <Settings className="w-3.5 h-3.5" strokeWidth={1.75} />
               </button>
               {activeProject && (
                 <>
@@ -1014,7 +1091,7 @@ export default function App() {
                   >
                     <Plus className="w-3.5 h-3.5" strokeWidth={1.75} />
                     <span>New Task</span>
-                    <span className="kbd" style={{ color: 'inherit', borderColor: 'currentColor', opacity: 0.7 }}>N</span>
+                    
                   </button>
                 </>
               )}
@@ -1036,10 +1113,9 @@ export default function App() {
       </header>
 
       {/* Main Content */}
+      <OfflineBanner offline={offline} queued={queued} retrying={replaying} onRetry={handleSyncNow} />
       <main className="p-4">
-        {view === 'api' ? (
-          <ApiExplorer projectId={activeProjectId} />
-        ) : !activeProject ? (
+        {!activeProject ? (
           <div className="flex flex-col items-center justify-center h-[calc(100vh-120px)]">
             <div className="w-12 h-12 panel flex items-center justify-center mb-4">
               <FolderKanban className="w-5 h-5 muted" strokeWidth={1.5} />
@@ -1077,6 +1153,8 @@ export default function App() {
                   onDeleteTask={handleDeleteTask}
                   onOpenChat={handleOpenChat}
                   onAddTask={handleAddTask}
+                  onMove={handleMoveTask}
+                  onRetry={handleRetryTask}
                   deletingIds={deletingIds}
                 />
               ))}

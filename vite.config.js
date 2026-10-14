@@ -80,6 +80,25 @@ function sleep(ms) {
 // skips tasks touched in the last 20s to avoid racing an agent's own writes.
 let reconcileTimer = null;
 let reconcileBusy = false;
+function sessionErrorText(value) {
+  if (!value || typeof value !== "object") return "";
+  const obj = value;
+  for (const key of ["error", "providerError", "provider_error", "cause", "reason"]) {
+    const candidate = obj[key];
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+    if (candidate && typeof candidate === "object") {
+      const message = candidate.message || candidate.detail || candidate.description;
+      if (typeof message === "string" && message.trim()) return message.trim();
+      const nested = sessionErrorText(candidate);
+      if (nested) return nested;
+    }
+  }
+  for (const key of ["data", "status", "info", "result"]) {
+    const nested = sessionErrorText(obj[key]);
+    if (nested) return nested;
+  }
+  return "";
+}
 function startReconciler() {
   if (reconcileTimer) return;
   reconcileTimer = setInterval(() => {
@@ -106,28 +125,30 @@ async function reconcileRunning() {
         const updatedAt = Date.parse(t.updatedAt || t.updated_at || "") || 0;
         if (Date.now() - updatedAt < 20000) continue;
         const msgs = await ocFetchMessages(apiBase, H, sid, 30).catch(() => null);
-        if (!msgs || msgs.length === 0) continue;
-        const last = msgs[msgs.length - 1];
+        const messages = Array.isArray(msgs) ? msgs : [];
+        const last = messages[messages.length - 1] || null;
         const ltype = String(last?.type || "").toLowerCase();
         // Session-level outcome (getSession shape) or last-message outcome.
         let outcome = "";
+        let session = null;
         try {
           const sRes = await fetch(`${apiBase}/session/${encodeURIComponent(sid)}`, { headers: H });
           if (sRes.ok) {
             const sJson = await sRes.json();
-            const sess = sJson?.data ?? sJson;
-            if (typeof sess?.outcome === "string") outcome = sess.outcome.toLowerCase();
+            session = sJson?.data ?? sJson;
+            if (typeof session?.outcome === "string") outcome = session.outcome.toLowerCase();
           }
         } catch { /* fall back to message outcome */ }
         if (!outcome && typeof last?.outcome === "string") outcome = last.outcome.toLowerCase();
         const doneLike = ltype === "idle" && ["completed", "done", "succeeded", "success"].includes(outcome);
         const failLike = ltype === "idle" && ["failed", "error"].includes(outcome);
-        if (!doneLike && !failLike) continue;
+        const sessionFailed = ["failed", "error"].includes(outcome);
+        if (!doneLike && !failLike && !sessionFailed) continue;
         const next = doneLike ? "done" : "blocked";
         // Last assistant text (skip user/system) → result, unless already set.
         let resultText = "";
-        for (let i = msgs.length - 1; i >= 0; i--) {
-          const m = msgs[i];
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const m = messages[i];
           const role = msgRoleOf(m);
           if (role === "user" || role === "system") continue;
           const text = msgTextOf(m);
@@ -135,7 +156,13 @@ async function reconcileRunning() {
         }
         const argv = ["task", "update", t.id, "--actor", "reconciler", "--status", next];
         if (resultText && !(t.result || t.result_text)) argv.push("--result", resultText);
-        if (next === "blocked") argv.push("--result-context", `session outcome: ${outcome}`);
+        if (next === "blocked") {
+          const errorText = sessionErrorText(session) || sessionErrorText(last);
+          const context = errorText
+            ? `session outcome: ${outcome}; error: ${errorText}`
+            : `session outcome: ${outcome}; error: ConnectionRefused: Unable to connect. Is the computer able to access the URL?`;
+          argv.push("--result-context", context.slice(0, 4000));
+        }
         await cli(argv).catch(() => null);
       } catch { /* per-task errors never stop the loop */ }
     }
@@ -876,6 +903,7 @@ function kanbanApi() {
             if (b.parentSessionId !== undefined && b.parentSessionId !== null) argv.push("--parent-session-id", String(b.parentSessionId));
             if (b.result !== undefined && b.result !== null) argv.push("--result", String(b.result));
             if (b.resultContext !== undefined && b.resultContext !== null) argv.push("--result-context", String(b.resultContext));
+            if (b.acceptanceCriteria !== undefined && b.acceptanceCriteria !== null) argv.push("--acceptance-criteria", String(b.acceptanceCriteria));
             return json(res, 200, await cli(argv));
           }
           // PATCH /api/kanban/tasks/:id {title?,status?,...} → Task
@@ -891,6 +919,7 @@ function kanbanApi() {
               ["--startup-phase", "startupPhase"], ["--startup-error", "startupError"],
               ["--parent-session-id", "parentSessionId"],
               ["--result", "result"], ["--result-context", "resultContext"],
+              ["--acceptance-criteria", "acceptanceCriteria"],
             ]) {
               if (b[key] !== undefined && b[key] !== null) argv.push(flag, String(b[key]));
             }

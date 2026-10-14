@@ -10,6 +10,17 @@ import type { OpenCodeSessionInfo, SessionUsage } from '../types';
 
 export type ChatStatus = 'connecting' | 'live' | 'closed' | 'error' | 'idle' | 'no-run';
 
+function sessionErrorText(session: OpenCodeSessionInfo | null): string | null {
+  if (!session) return null;
+  const raw = session.error ?? session.providerError ?? session.provider_error;
+  if (typeof raw === 'string' && raw.trim()) return raw.trim();
+  if (raw && typeof raw === 'object') {
+    const message = (raw as Record<string, unknown>).message;
+    if (typeof message === 'string' && message.trim()) return message.trim();
+  }
+  return null;
+}
+
 const POLL_MS = 2500;
 
 function num(v: unknown): number | undefined {
@@ -243,13 +254,12 @@ export function useSessionStream(sessionId: string | null, opts?: { taskAgentNam
           if (sess) setSession(sess);
         } else {
           missCount = 0;
-          let sessOutcome = '';
           if (sess) {
             setSession(sess);
             const so = typeof (sess as Record<string, unknown>)?.outcome === 'string'
               ? ((sess as Record<string, unknown>).outcome as string).toLowerCase()
               : null;
-            if (so) { sessOutcome = so; setOutcome(so); }
+            if (so) setOutcome(so);
           }
           if (list) {
             merge(list as unknown[]);
@@ -260,21 +270,18 @@ export function useSessionStream(sessionId: string | null, opts?: { taskAgentNam
             // otherwise a brand new board assistant idles as "live" forever and
             // locks the input before the first prompt.
             const arr = Array.isArray(list) ? list : [];
-            const hasChat = arr.some((mm) => {
-              const rr = mm as Record<string, unknown>;
-              const tt = typeof rr?.type === 'string' ? (rr.type as string).toLowerCase() : '';
-              return tt !== 'idle' && tt !== 'compaction' && !(Array.isArray(rr?.content) && (rr.content as unknown[]).length === 0);
-            });
-            let ltype = '';
-            let outcomeVal = sessOutcome || '';
-            for (const m of arr) {
+            let lastChatIndex = -1;
+            let lastIdleIndex = -1;
+            for (let i = 0; i < arr.length; i++) {
+              const m = arr[i];
               const r = m as Record<string, unknown>;
               const t = typeof r?.type === 'string' ? (r.type as string).toLowerCase() : '';
-              if (t === 'idle') ltype = 'idle';
+              if (t === 'idle') lastIdleIndex = i;
+              else if (t !== 'compaction' && !(Array.isArray(r?.content) && (r.content as unknown[]).length === 0)) lastChatIndex = i;
               const o = typeof r?.outcome === 'string' ? (r.outcome as string).toLowerCase() : '';
-              if (o) { outcomeVal = o; setOutcome(o); }
+              if (o) setOutcome(o);
             }
-            const idleLike = !hasChat || ltype === 'idle' || ['interrupted', 'completed', 'succeeded', 'done', 'success', 'aborted', 'failed', 'error'].includes(outcomeVal);
+            const idleLike = lastChatIndex < 0 || lastIdleIndex > lastChatIndex;
             setStatus(idleLike ? 'closed' : 'live');
           }
         }
@@ -303,20 +310,18 @@ export function useSessionStream(sessionId: string | null, opts?: { taskAgentNam
               if (s2) setSession(s2);
               if (list) {
                 merge(list as unknown[]);
-                let ltype2 = '';
-                let outcome2 = '';
                 const arr2 = Array.isArray(list) ? (list as unknown as Record<string, unknown>[]) : [];
-                const hasChat2 = arr2.some((mm2) => {
-                  const tt2 = typeof mm2?.type === 'string' ? (mm2.type as string).toLowerCase() : '';
-                  return tt2 !== 'idle' && tt2 !== 'compaction' && !(Array.isArray(mm2?.content) && (mm2.content as unknown[]).length === 0);
-                });
-                for (const m2 of arr2) {
+                let lastChatIndex2 = -1;
+                let lastIdleIndex2 = -1;
+                for (let i = 0; i < arr2.length; i++) {
+                  const m2 = arr2[i];
                   const t2 = typeof (m2 as Record<string, unknown>)?.type === 'string' ? ((m2 as Record<string, unknown>).type as string).toLowerCase() : '';
-                  if (t2 === 'idle') ltype2 = 'idle';
+                  if (t2 === 'idle') lastIdleIndex2 = i;
+                  else if (t2 !== 'compaction' && !(Array.isArray(m2?.content) && (m2.content as unknown[]).length === 0)) lastChatIndex2 = i;
                   const o2 = typeof (m2 as Record<string, unknown>)?.outcome === 'string' ? ((m2 as Record<string, unknown>).outcome as string).toLowerCase() : '';
-                  if (o2) outcome2 = o2;
+                  if (o2) setOutcome(o2);
                 }
-                const idleLike2 = !hasChat2 || ltype2 === 'idle' || ['interrupted', 'completed', 'succeeded', 'success', 'aborted', 'failed', 'error', 'done'].includes(outcome2);
+                const idleLike2 = lastChatIndex2 < 0 || lastIdleIndex2 > lastChatIndex2;
                 setStatus(idleLike2 ? 'closed' : 'live');
               }
             }).catch(() => {});
@@ -336,5 +341,5 @@ export function useSessionStream(sessionId: string | null, opts?: { taskAgentNam
   }, [sessionId, attempt, merge]);
 
   const usage = buildUsage(session, rawList, opts?.taskAgentName ?? null);
-  return { messages, status, session, usage, outcome, retry: () => setAttempt((a) => a + 1) };
+  return { messages, status, session, sessionError: sessionErrorText(session), usage, outcome, retry: () => setAttempt((a) => a + 1) };
 }
