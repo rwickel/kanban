@@ -14,6 +14,22 @@ export const LINKBACK_RESULT_CHARS = 2000;
 /** Blocker context quoted per blocked task in the message body. */
 export const LINKBACK_CONTEXT_CHARS = 400;
 
+/** Extract a readable blocker from plain text or a JSON error envelope. */
+export function blockerText(task) {
+  const raw = String(
+    task?.resultContext ?? task?.result_context ?? task?.startupError ?? task?.startup_error ?? task?.progress ?? "",
+  ).trim();
+  if (!raw) return "";
+  try {
+    const parsed = JSON.parse(raw);
+    const message = parsed?.error ?? parsed?.message ?? parsed?.task?.startupError;
+    if (typeof message === "string" && message.trim()) return message.trim();
+  } catch {
+    // Plain text is already suitable for the parent message.
+  }
+  return raw;
+}
+
 /** Kill switch: KANBAN_RESULT_LINKBACK=0 (or off/false/no) disables delivery. */
 export function linkbackEnabled(envValue) {
   const v = String(envValue ?? "1").trim().toLowerCase();
@@ -69,18 +85,25 @@ export function buildLinkbackPrompt(tasks) {
   const lines = list.map((t) => {
     const title = String(t.title || "(untitled)").slice(0, 200);
     const status = String(t.status || "?").toUpperCase();
+    const taskId = String(t.id || "(missing)");
+    const sessionId = String(t.sessionId ?? t.session_id ?? "(missing)");
     const result = String(t.result ?? t.result_text ?? "").trim().slice(0, LINKBACK_RESULT_CHARS);
-    const ctx = String(t.resultContext ?? t.result_context ?? "").trim().slice(0, LINKBACK_CONTEXT_CHARS);
-    let line = `- "${title}" (${String(t.id || "").slice(0, 8)}…) is now ${status}.`;
-    if (result) line += ` Result: ${result}`;
-    if (ctx && status === "BLOCKED") line += ` Context: ${ctx}`;
-    return line;
+    const ctx = blockerText(t).slice(0, LINKBACK_CONTEXT_CHARS);
+    const detail = [
+      `## ${title}`,
+      ``,
+      `- **Status:** ${status}`,
+      `- **Task ID:** \`${taskId}\``,
+      `- **Session ID:** \`${sessionId}\``,
+    ];
+    if (result) detail.push(`- **Result:** ${result}`);
+    if (ctx && status === "BLOCKED") detail.push(`- **Blocker:** ${ctx}`);
+    return detail.join("\n");
   });
-  const n = list.length;
   return (
-    `[Board] finished task${n === 1 ? "" : "s"} reporting back:\n` +
-    lines.join("\n") +
-    `\n\nTell the user what finished and what it means. Start no new work unless asked.`
+    `[Board] Delegated task update\n\n` +
+    lines.join("\n\n---\n\n") +
+    `\n\nReport the task title, status, task ID, session ID, result, and blocker. Start no new work unless asked.`
   );
 }
 

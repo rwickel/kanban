@@ -6,6 +6,7 @@ import {
   parentKeyOf,
   selfIdOf,
   groupPending,
+  blockerText,
   buildLinkbackPrompt,
   planDeliveries,
 } from "./linkback.mjs";
@@ -74,34 +75,54 @@ describe("buildLinkbackPrompt", () => {
     const text = buildLinkbackPrompt([
       { id: "abcdef123456", title: "Fix login", status: "done", result: "Token refresh fixed." },
     ]);
-    assert.match(text, /\[Board\] finished task reporting back:/);
-    assert.match(text, /"Fix login" \(abcdef12…\) is now DONE\./);
-    assert.match(text, /Result: Token refresh fixed\./);
-    assert.match(text, /Tell the user what finished/);
+    assert.match(text, /\[Board\] Delegated task update/);
+    assert.match(text, /## Fix login/);
+    assert.match(text, /\*\*Status:\*\* DONE/);
+    assert.match(text, /\*\*Task ID:\*\* `abcdef123456`/);
+    assert.match(text, /\*\*Session ID:\*\* `\(missing\)`/);
+    assert.match(text, /\*\*Result:\*\* Token refresh fixed\./);
+    assert.match(text, /Report the task title, status, task ID, session ID/);
   });
   it("pluralises, quotes context on blocked, and skips context on done", () => {
     const text = buildLinkbackPrompt([
       { id: "t1", title: "Done one", status: "done", result: "r1", resultContext: "c1" },
       { id: "t2", title: "Stuck one", status: "blocked", result: "r2", resultContext: "hit the quota" },
     ]);
-    const lineFor = (title) => text.split("\n").find((l) => l.includes(`"${title}"`));
-    assert.match(text, /finished tasks reporting back/);
-    assert.ok(lineFor("Done one"), "done line present");
-    assert.doesNotMatch(lineFor("Done one"), /Context:/);
-    assert.match(lineFor("Stuck one"), /^.*is now BLOCKED\. Result: r2 Context: hit the quota$/);
+    const blockFor = (title) => text.split("---").find((block) => block.includes(`## ${title}`));
+    assert.match(text, /Delegated task update/);
+    assert.ok(blockFor("Done one"), "done block present");
+    assert.doesNotMatch(blockFor("Done one"), /Blocker:/);
+    assert.match(blockFor("Stuck one"), /\*\*Status:\*\* BLOCKED[\s\S]*\*\*Result:\*\* r2[\s\S]*\*\*Blocker:\*\* hit the quota/);
   });
   it("caps result and context length, tolerates missing fields", () => {
     const text = buildLinkbackPrompt([
       { id: "t9", title: "", status: "", result: "x".repeat(3000), resultContext: "y".repeat(600) },
     ]);
-    const line = text.split("\n").find((l) => l.startsWith("- "));
-    assert.ok(line.includes('"(untitled)" (t9…) is now ?.'), line.slice(0, 80));
-    assert.ok(line.includes("x".repeat(2000)), "result capped at 2000 chars");
-    assert.ok(!line.includes("x".repeat(2001)), "result not longer than cap");
-    assert.doesNotMatch(line, /Context:/);
+    assert.match(text, /## \(untitled\)/);
+    assert.match(text, /\*\*Status:\*\* \?/);
+    assert.match(text, /\*\*Task ID:\*\* `t9`/);
+    assert.ok(text.includes("x".repeat(2000)), "result capped at 2000 chars");
+    assert.ok(!text.includes("x".repeat(2001)), "result not longer than cap");
+    assert.doesNotMatch(text, /Blocker:/);
   });
   it("handles an empty list", () => {
-    assert.match(buildLinkbackPrompt([]), /finished tasks reporting back/);
+    assert.match(buildLinkbackPrompt([]), /Delegated task update/);
+  });
+  it("uses startupError when a blocked task has no result context", () => {
+    const text = buildLinkbackPrompt([{
+      id: "t10",
+      title: "Timed out",
+      status: "blocked",
+      startupError: JSON.stringify({ error: "delegate timed out after 600s - still running" }),
+    }]);
+    assert.match(text, /\*\*Blocker:\*\* delegate timed out after 600s - still running/);
+  });
+});
+
+describe("blockerText", () => {
+  it("prefers result context and extracts JSON error messages", () => {
+    assert.equal(blockerText({ resultContext: "approval required", startupError: "ignored" }), "approval required");
+    assert.equal(blockerText({ startupError: '{"error":"connection failed"}' }), "connection failed");
   });
 });
 
@@ -116,8 +137,8 @@ describe("planDeliveries", () => {
     const plan = planDeliveries(new Map([["ses_p", list]]));
     const d = plan.get("ses_p");
     assert.equal(d.ids.length, LINKBACK_CAP_PER_PARENT);
-    assert.match(d.text, /"T0"/);
-    assert.doesNotMatch(d.text, /"T5"|"T6"|"T7"/);
+    assert.match(d.text, /## T0/);
+    assert.doesNotMatch(d.text, /## T5|## T6|## T7/);
   });
   it("keeps parents independent", () => {
     const plan = planDeliveries(new Map([
@@ -125,6 +146,6 @@ describe("planDeliveries", () => {
       ["ses_b", [{ id: "b1", title: "B", status: "blocked", result: "stuck" }]],
     ]));
     assert.equal(plan.size, 2);
-    assert.match(plan.get("ses_b").text, /BLOCKED\. Result: stuck/);
+    assert.match(plan.get("ses_b").text, /\*\*Status:\*\* BLOCKED[\s\S]*\*\*Result:\*\* stuck/);
   });
 });
