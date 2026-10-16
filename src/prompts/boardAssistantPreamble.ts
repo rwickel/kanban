@@ -37,7 +37,8 @@ const FALLBACK_TEMPLATE = [
   'Session id: {{sessionId}}',
   'Pass `"parentSessionId": "{{sessionId}}"` when you delegate work so results link back here.',
   '',
-  'Board API: http://localhost:3001/api (spec: /api/kanban/docs)',
+   'Board server: {{serverUrl}}/',
+   'Board API: {{serverUrl}}/api (spec: {{serverUrl}}/api/kanban/docs)',
   '',
   '## Team for this project',
   '',
@@ -55,6 +56,7 @@ export interface PreambleVars {
   sessionId: string;
   teamLines: string;
   styleGuide: string;
+  serverUrl: string;
 }
 
 /** Roster lines in the same format the task prompt uses (App.tsx buildTaskPrompt). */
@@ -126,6 +128,7 @@ export async function buildAssistantPreamble(
     sessionId,
     teamLines: buildTeamLines(project, agents),
     styleGuide: styleGuide || 'Use short, clear sentences. State what changed in the code.',
+    serverUrl: typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3001',
   });
 }
 

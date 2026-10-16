@@ -17,7 +17,7 @@ import {
   pollDelayMs,
   replayOfflineQueue,
 } from '../store/kanban';
-import { fetchAgents, createSession, sendPrompt, getServerInfo } from '../api/opencode';
+import { fetchAgents, createSession, sendPrompt, getServerInfo, putSessionInstruction } from '../api/opencode';
 import { getTaskModelPref } from '../store/serverConfig';
 import { ensureAssistantSession } from '../store/assistantSession';
 import { isQueuedOffline } from '../store/offlineQueue';
@@ -220,7 +220,9 @@ export function useBoardData() {
       upsertTaskInState({ ...task, startupPhase: 'sending-prompt', startupError: undefined } as Task);
     }
     const desc = task.description?.trim() || '(no description provided)';
-    const sent = await sendPrompt(sessionId, `# ${task.title}\n\n${desc}`, resolved.id);
+    const prompt = `# ${task.title}\n\n${desc}`;
+    await putSessionInstruction(sessionId, 'task-agent', prompt);
+    const sent = await sendPrompt(sessionId, prompt, resolved.id);
     if (!sent.ok) {
       await updateTask(task.id, { startupPhase: 'error', startupError: sent.error } as Partial<Task>).catch(() => {});
       upsertTaskInState({ ...task, startupPhase: 'error', startupError: sent.error } as Task);

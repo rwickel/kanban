@@ -37,7 +37,7 @@ import {
 import { isQueuedOffline } from './store/offlineQueue';
 import { useOfflineSync } from './hooks/useOfflineSync';
 import OfflineBanner from './components/OfflineBanner';
-import { fetchAgents, createSession, sendPrompt, getServerInfo } from './api/opencode';
+import { fetchAgents, createSession, sendPrompt, getServerInfo, putSessionInstruction } from './api/opencode';
 import { getTaskModelPref } from './store/serverConfig';
 import { ensureAssistantSession } from './store/assistantSession';
 import KanbanColumn, { columnIcons } from './components/KanbanColumn';
@@ -59,6 +59,7 @@ const COLUMNS: { status: TaskStatus; title: string }[] = [
 // Customizable agent style (prompts/final-message-style.md), loaded once.
 // Edit the file + refresh the page to change what agents are told.
 let styleGuideCache: string | null = null;
+let taskPreambleCache: string | null = null;
 async function loadStyleGuide(): Promise<string> {
   if (styleGuideCache !== null) return styleGuideCache;
   try {
@@ -68,6 +69,22 @@ async function loadStyleGuide(): Promise<string> {
   return styleGuideCache;
 }
 void loadStyleGuide();
+
+async function loadTaskPreamble(): Promise<string> {
+  if (taskPreambleCache !== null) return taskPreambleCache;
+  try {
+    const r = await fetch('/api/kanban/prompts/task-agent-preamble.md');
+    if (r.ok) {
+      const text = (await r.text()).trim();
+      // Resolve the placeholder to the actual HTTP/HTTPS origin used by Vite.
+      const serverUrl = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3001';
+      taskPreambleCache = text.replaceAll('{{serverUrl}}', serverUrl);
+    } else taskPreambleCache = '';
+  } catch { taskPreambleCache = ''; }
+  return taskPreambleCache;
+}
+
+void loadTaskPreamble();
 
 export default function App() {
   // State
@@ -375,6 +392,7 @@ export default function App() {
   };
 
   const buildTaskPrompt = (task: Task): string => {
+    const taskPreamble = taskPreambleCache?.trim() || '# Task agent instructions\n\nExecute this task autonomously from start to finish.';
     const styleSnippet = styleGuideCache?.trim() || '- Use Simplified Technical English (ASD-STE100) in your final message: approved simple verbs (add, remove, update, move, rename, fix, replace), one instruction per sentence, maximum 20 words per sentence, no jargon.';
     const languageNames: Record<string, string> = { en: 'English', de: 'German', fr: 'French', es: 'Spanish', it: 'Italian', pt: 'Portuguese', nl: 'Dutch' };
     const configuredLanguage = languageNames[readSpeechLang()] ?? 'English';
@@ -398,6 +416,8 @@ export default function App() {
         ? teamIds.map((id) => `- (id: ${id})`).join('\n')
         : '(no project team configured — all agents available)';
     const headerLines = [
+      taskPreamble,
+      '',
       `# ${title}`,
       '',
       `**Project:** ${projectName ? `${projectName}${projectPath ? ` (${projectPath})` : ''}` : '(unknown)'}`,
@@ -575,6 +595,8 @@ export default function App() {
     // Execute the task: title + description go out as the prompt message
     // on EVERY transition to running — including re-drops of an existing session.
     const prompt = buildTaskPrompt(task);
+    // Durable task contract, matching the board assistant preamble behavior.
+    await putSessionInstruction(sessionId, 'task-agent', prompt);
     console.log('startTaskExecution: sending prompt for task', task.id, '→ session', sessionId);
     const sent = await sendPrompt(sessionId, prompt, resolved.id);
     if (!sent.ok) {
@@ -679,12 +701,9 @@ export default function App() {
     if (!activeProjectId) return;
 
     if (editingTask) {
-      const modelChanged = data.modelId !== editingTask.modelId || data.modelProviderID !== editingTask.modelProviderID;
-      const sessionReset = modelChanged && Boolean(editingTask.sessionId);
       const updatedTask = {
         ...editingTask,
         ...data,
-        ...(sessionReset ? { sessionId: undefined, startupPhase: undefined, startupError: undefined } : {}),
       } as Task;
       // Optimistic: reflect edit instantly, persist in background.
       upsertTaskInState(updatedTask);
@@ -699,7 +718,6 @@ export default function App() {
           agentName: data.agentName,
           modelId: data.modelId,
           modelProviderID: data.modelProviderID,
-          ...(sessionReset ? { sessionId: null, startupPhase: null, startupError: null } : {}),
           result: data.result,
           resultContext: data.resultContext,
         } as unknown as Partial<Task>);
@@ -814,6 +832,15 @@ export default function App() {
     setShowTaskModal(true);
   };
 
+  const handleChatReference = async (kind: 'task' | 'session', id: string) => {
+    const all = Object.values(tasks).flat();
+    const found = all.find((task) => kind === 'task' ? task.id === id : task.sessionId === id)
+      ?? (await getTasks().catch(() => [])).find((task) => kind === 'task' ? task.id === id : task.sessionId === id);
+    if (!found) return;
+    if (kind === 'task') handleEditTask(found);
+    else setChatTask(found);
+  };
+
   // Deep-link / pop-out window: support both hash and path (e.g. /#session/<id> or /session/<id>)
   // Pop-out renders chat-only (no board) via the standalone flag.
   const [popoutSessionId, setPopoutSessionId] = useState<string | null>(() => {
@@ -823,6 +850,10 @@ export default function App() {
       window.location.pathname.match(/\/session\/([\w-]+)/)?.[1] ??
       null
     );
+  });
+  const [popoutAssistantProjectId, setPopoutAssistantProjectId] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    return window.location.hash.match(/#assistant\/([^/?]+)/)?.[1] ?? null;
   });
   useEffect(() => {
     if (!popoutSessionId) return;
@@ -895,7 +926,12 @@ export default function App() {
 
   const handleSaveAgentTeam = async (agentIds: string[]) => {
     if (activeProjectId) {
-      await updateProject(activeProjectId, { agentIds });
+      const saved = await updateProject(activeProjectId, { agentIds });
+      if (saved) {
+        setProjects((current) => current.map((project) => (
+          project.id === saved.id ? saved : project
+        )));
+      }
       await loadData();
     }
   };
@@ -942,6 +978,7 @@ export default function App() {
         <SessionChatWindow
           task={chatTask}
           standalone
+          onTaskClick={handleChatReference}
           onClose={() => {
             if (window.opener) window.close();
             else {
@@ -954,6 +991,32 @@ export default function App() {
         {!chatTask && (
           <div className="flex-1 flex items-center justify-center p-8 muted text-[13px] text-center">
             Loading session {popoutSessionId}…
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (popoutAssistantProjectId) {
+    const popoutProject = projects.find((project) => project.id === decodeURIComponent(popoutAssistantProjectId)) ?? null;
+    return (
+      <div className="app-shell">
+        <AssistantChatWindow
+          project={popoutProject}
+          availableAgents={availableAgents}
+          standalone
+          onClose={() => {
+            if (window.opener) window.close();
+            else {
+              history.replaceState(null, '', window.location.pathname);
+              setPopoutAssistantProjectId(null);
+            }
+          }}
+          onTaskClick={handleChatReference}
+        />
+        {!popoutProject && (
+          <div className="flex-1 flex items-center justify-center p-8 muted text-[13px] text-center">
+            Loading assistant…
           </div>
         )}
       </div>
@@ -1227,12 +1290,13 @@ export default function App() {
       />
 
       {/* Session chat — in-app side panel + deep-linkable pop-out window */}
-      <SessionChatWindow task={chatTask} onClose={() => setChatTask(null)} />
+      <SessionChatWindow task={chatTask} onClose={() => setChatTask(null)} onTaskClick={handleChatReference} />
       {showAssistant && (
         <AssistantChatWindow
           project={activeProject}
           availableAgents={availableAgents}
           onClose={() => setShowAssistant(false)}
+          onTaskClick={handleChatReference}
         />
       )}
     </div>
