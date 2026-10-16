@@ -8,18 +8,19 @@ import { Task } from '../types';
 import { answerTool, sendPrompt, interruptSession, fetchModels } from '../api/opencode';
 import { useSessionStream } from '../hooks/useSessionStream';
 import { chatToMarkdown } from './chatEvents';
-import { STATUS_DOT, ThinkingBlock, ToolRow, ChatBubble, ChatErrorRow } from './ChatFeed';
+import { STATUS_DOT, ThinkingBlock, ToolRow, ChatBubble, ChatErrorRow, ReviewTarget } from './ChatFeed';
 import { useSpeechInput } from '../hooks/useSpeechInput';
 import FilePreviewModal from './FilePreviewModal';
 
 interface SessionChatWindowProps {
   task: Task | null;
   onClose: () => void;
+  onTaskClick?: (kind: 'task' | 'session', id: string) => void;
   /** Standalone mode: full-window chat (pop-out), no overlay/drag/popout buttons. */
   standalone?: boolean;
 }
 
-export default function SessionChatWindow({ task, onClose, standalone }: SessionChatWindowProps) {
+export default function SessionChatWindow({ task, onClose, standalone, onTaskClick }: SessionChatWindowProps) {
   const sessionId = task?.sessionId ?? null;
   const [models, setModels] = useState<Awaited<ReturnType<typeof fetchModels>>>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -106,6 +107,7 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
   const [interrupted, setInterrupted] = useState(false);
   const [copied, setCopied] = useState(false);
   const [exported, setExported] = useState(false);
+  const [reviewing, setReviewing] = useState<string | null>(null);
   const { supported: speechSupported, listening: speechListening, transcribing: speechTranscribing, downloadPct: speechPct, speechError, toggle: toggleSpeech } = useSpeechInput();
   const bottomRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(() => {
@@ -198,6 +200,16 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
     const res = await answerTool(sessionId, toolCallId, answer);
     if (!res.ok) setSendError(`Could not send the answer — ${res.error ?? 'unknown error'}`);
     retry();
+  };
+
+  const handleReview = async (target: ReviewTarget) => {
+    if (!task || !sessionId || reviewing) return;
+    setReviewing(target.messageId);
+    try {
+      const response = await fetch('/api/kanban/delegate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId: task.projectId, title: `Review: ${target.kind} ${target.messageId.slice(0, 12)}`, agentId: 'code-reviewer', agentName: 'Code Reviewer', priority: 'medium', parentSessionId: sessionId, description: `Review session ${sessionId}, message ${target.messageId}. Return simple Pros and Cons. For every con explain why it is bad, what is expected, and the likely reason. Check duplicate tasks, missing acceptance criteria, empty progress, null results, priority changes, and wrong tool direction. Include event IDs and timestamps. Source: ${JSON.stringify(target).slice(0, 12000)}`, wait: false }) });
+      if (!response.ok) throw new Error((await response.json().catch(() => null))?.error || 'Could not create review task');
+    } catch (error) { setSendError(`Review failed — ${(error as Error).message}`); }
+    finally { setReviewing(null); }
   };
 
   const copySessionId = async () => {
@@ -304,10 +316,10 @@ export default function SessionChatWindow({ task, onClose, standalone }: Session
           const prev = idx > 0 ? messages[idx - 1] : undefined;
           const startsTurn = msg.kind !== 'user' && (!prev || prev.kind === 'user');
           const modelHint = task.modelProviderID && task.modelId ? `${task.modelProviderID}/${task.modelId}` : task.modelId ?? undefined;
-          if (msg.kind === 'tool') return <ToolRow key={msg.id} msg={msg} onFileClick={(p) => setPreviewPath(p)} onAnswered={handleAnswer} />;
-          if (msg.kind === 'error') return <ChatErrorRow key={msg.id} msg={msg} detail={msg.id.endsWith('-outcome') ? sessionError : null} />;
+           if (msg.kind === 'tool') return <ToolRow key={msg.id} msg={msg} onFileClick={(p) => setPreviewPath(p)} onAnswered={handleAnswer} onReview={handleReview} />;
+           if (msg.kind === 'error') return <ChatErrorRow key={msg.id} msg={msg} detail={msg.id.endsWith('-outcome') ? sessionError : null} onReview={handleReview} />;
           if (msg.kind === 'reasoning') return <ThinkingBlock key={msg.id} msg={msg} showAvatar={startsTurn} agentName={task.agentName} modelName={modelHint} onFileClick={(p) => setPreviewPath(p)} />;
-          return <ChatBubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : task.agentName} modelName={msg.kind === 'user' ? undefined : modelHint} showAvatar={msg.kind === 'user' ? true : startsTurn} onFileClick={(p) => setPreviewPath(p)} />;
+           return <ChatBubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : task.agentName} modelName={msg.kind === 'user' ? undefined : modelHint} showAvatar={msg.kind === 'user' ? true : startsTurn} onFileClick={(p) => setPreviewPath(p)} onTaskClick={onTaskClick} onReview={handleReview} />;
         })}
         <div ref={bottomRef} />
         {busy && msgCount > 0 && (

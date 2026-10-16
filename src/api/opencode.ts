@@ -159,13 +159,18 @@ export async function getSession(sessionId: string): Promise<OpenCodeSessionInfo
 export async function sendPrompt(
   sessionId: string,
   text: string,
-  _agentId?: string
+  model?: string
 ): Promise<{ ok: boolean; error?: string }> {
   // v2: POST /api/session/{id}/prompt { text, ... } → { data: Session.Inbox.User }
   // NOTE: session is already created with its agent — sending `agents` again
   // can 500 the server (unknown id, stale display name). Text-only is safest.
   try {
     const body: Record<string, unknown> = { text };
+    if (model) {
+      const [providerID, ...rest] = model.split('/');
+      const modelID = rest.join('/');
+      if (providerID && modelID) body.model = { providerID, id: modelID };
+    }
     const res = await fetch(`${baseUrl()}/session/${sessionId}/prompt`, {
       method: 'POST',
       headers: headers({ 'Content-Type': 'application/json' }),
@@ -185,6 +190,46 @@ export async function sendPrompt(
   } catch (error) {
     console.error('Error sending prompt:', error);
     return { ok: false, error: `network error — is the OpenCode server running at ${baseUrl()}?` };
+  }
+}
+
+export async function switchSessionModel(sessionId: string, model: string): Promise<boolean> {
+  const [providerID, ...rest] = model.split('/');
+  const id = rest.join('/');
+  if (!providerID || !id) return false;
+  try {
+    const response = await fetch(`${baseUrl()}/session/${sessionId}/model`, {
+      method: 'POST',
+      headers: headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ model: { providerID, id } }),
+    });
+    if (!response.ok) {
+      console.error('switchSessionModel failed:', response.status, await response.text().catch(() => ''));
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.error('Error switching session model:', error);
+    return false;
+  }
+}
+
+export async function switchSessionAgent(sessionId: string, agent: string): Promise<boolean> {
+  if (!agent.trim()) return false;
+  try {
+    const response = await fetch(`${baseUrl()}/session/${sessionId}/agent`, {
+      method: 'POST',
+      headers: headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ agent: agent.trim() }),
+    });
+    if (!response.ok) {
+      console.error('switchSessionAgent failed:', response.status, await response.text().catch(() => ''));
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.error('Error switching session agent:', error);
+    return false;
   }
 }
 

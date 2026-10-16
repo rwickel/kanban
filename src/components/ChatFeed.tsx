@@ -5,10 +5,16 @@
 import { useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Bot, User, ChevronDown, Wrench, Check, Copy, AlertTriangle } from 'lucide-react';
+import { Bot, User, ChevronDown, Wrench, Check, Copy, AlertTriangle, Search } from 'lucide-react';
 import type { ChatStatus } from '../hooks/useSessionStream';
 import type { ChatMessage, QuestionItem } from './chatEvents';
 import { linkifyFilePaths, parsePreviewHref } from './filePaths';
+
+function linkifyKanbanRefs(markdown: string): string {
+  return markdown
+    .replace(/(Task ID:\s*)([0-9a-f]{8}-[0-9a-f-]{27,})/gi, '$1[$2](kanban-task:$2)')
+    .replace(/(Session ID:\s*)(ses_[A-Za-z0-9_-]+)/g, '$1[$2](kanban-session:$2)');
+}
 
 export const STATUS_DOT: Record<ChatStatus, { bg: string; label: string; pulse: boolean }> = {
   idle: { bg: 'var(--muted)', label: 'idle', pulse: false },
@@ -406,7 +412,8 @@ function QuestionCard({
   );
 }
 
-export function ToolRow({ msg, onFileClick, onAnswered }: { msg: ChatMessage; onFileClick: (absPath: string) => void; onAnswered?: (toolCallId: string, answer: Record<string, string | string[]>) => void }) {
+export interface ReviewTarget { messageId: string; kind: 'tool' | 'assistant'; tool?: string; input?: string; output?: string; markdown?: string }
+export function ToolRow({ msg, onFileClick, onAnswered, onReview }: { msg: ChatMessage; onFileClick: (absPath: string) => void; onAnswered?: (toolCallId: string, answer: Record<string, string | string[]>) => void; onReview?: (target: ReviewTarget) => void }) {
   const t = msg.tool;
   const executed = (t?.status ?? '').toLowerCase() === 'executed';
   const hasDiff = !!t?.diff && t.diff.length > 0;
@@ -435,6 +442,7 @@ export function ToolRow({ msg, onFileClick, onAnswered }: { msg: ChatMessage; on
               {statusLabel}
             </span>
           )}
+          {executed && onReview && <span role="button" tabIndex={0} onClick={(e) => { e.stopPropagation(); onReview({ messageId: msg.id, kind: 'tool', tool: t?.tool, input: t?.input, output: t?.output }); }} className="btn p-1 shrink-0" title="Review this tool result" aria-label="Review this tool result"><Search className="w-3 h-3" strokeWidth={1.75} /></span>}
           <ChevronDown className={`w-3 h-3 shrink-0 muted transition-transform ${open ? 'rotate-180' : ''}`} strokeWidth={1.75} />
         </button>
         {open && (
@@ -498,7 +506,7 @@ export function ToolRow({ msg, onFileClick, onAnswered }: { msg: ChatMessage; on
   );
 }
 
-export function ChatBubble({ msg, agentName, modelName, showAvatar = true, onFileClick }: { msg: ChatMessage; agentName?: string; modelName?: string; showAvatar?: boolean; onFileClick: (absPath: string) => void }) {
+export function ChatBubble({ msg, agentName, modelName, showAvatar = true, onFileClick, onTaskClick, onReview }: { msg: ChatMessage; agentName?: string; modelName?: string; showAvatar?: boolean; onFileClick: (absPath: string) => void; onTaskClick?: (kind: 'task' | 'session', id: string) => void; onReview?: (target: ReviewTarget) => void }) {
   const [copied, setCopied] = useState(false);
   const isUser = msg.kind === 'user';
   const metaAgent = msg.meta?.agent ?? agentName;
@@ -568,6 +576,12 @@ export function ChatBubble({ msg, agentName, modelName, showAvatar = true, onFil
             remarkPlugins={[remarkGfm]}
             components={{
               a: ({ href, children, ...props }) => {
+                if (href?.startsWith('kanban-task:') || href?.startsWith('kanban-session:')) {
+                  const kind = href.startsWith('kanban-task:') ? 'task' : 'session';
+                  const prefix = kind === 'task' ? 'kanban-task:' : 'kanban-session:';
+                  const id = href.slice(prefix.length);
+                  return <button type="button" className="underline mono break-all" style={{ color: 'var(--info)', cursor: 'pointer' }} onClick={() => onTaskClick?.(kind, id)} title={`Open ${kind} ${id}`}>{children}</button>;
+                }
                 const abs = parsePreviewHref(href);
                 if (abs) {
                   return (
@@ -585,7 +599,8 @@ export function ChatBubble({ msg, agentName, modelName, showAvatar = true, onFil
                 return <a href={href} target="_blank" rel="noreferrer" {...props}>{children}</a>;
               },
             }}
-          >{linkifyFilePaths(msg.markdown)}</Markdown>
+          >{linkifyKanbanRefs(linkifyFilePaths(msg.markdown))}</Markdown>
+          {onReview && !isUser && msg.markdown.trim() && <button type="button" onClick={() => onReview({ messageId: msg.id, kind: 'assistant', markdown: msg.markdown })} className="btn absolute right-7 bottom-1 inline-flex items-center justify-center p-1" title="Review this message" aria-label="Review this message"><Search className="w-3 h-3" strokeWidth={1.75} /></button>}
           <button
             type="button"
             onClick={copyMessage}
@@ -611,15 +626,16 @@ export function ChatBubble({ msg, agentName, modelName, showAvatar = true, onFil
   );
 }
 
-export function ChatErrorRow({ msg, detail }: { msg: ChatMessage; detail?: string | null }) {
+export function ChatErrorRow({ msg, detail, onReview }: { msg: ChatMessage; detail?: string | null; onReview?: (target: ReviewTarget) => void }) {
   return (
     <div className="flex gap-2 justify-start animate-fadeIn">
       <div className="w-6 h-6 flex items-center justify-center shrink-0" style={{ border: '1px solid var(--border)', borderRadius: 6, background: 'var(--surface)' }}>
         <AlertTriangle className="w-3.5 h-3.5" style={{ color: 'var(--danger)' }} strokeWidth={1.75} />
       </div>
-      <div className="min-w-0 max-w-[88%] panel px-2.5 py-2 text-[12px] leading-relaxed whitespace-pre-wrap break-words" style={{ color: 'var(--danger)' }}>
+      <div className="min-w-0 max-w-[88%] panel px-2.5 py-2 text-[12px] leading-relaxed whitespace-pre-wrap break-words relative" style={{ color: 'var(--danger)' }}>
         {msg.markdown}
         {detail && <><br />{detail}</>}
+        {onReview && <button type="button" onClick={() => onReview({ messageId: msg.id, kind: 'tool', tool: msg.tool?.tool, input: msg.tool?.input, output: msg.markdown })} className="btn inline-flex items-center justify-center p-1 ml-2" title="Review failed tool call" aria-label="Review failed tool call"><Search className="w-3 h-3" strokeWidth={1.75} /></button>}
       </div>
     </div>
   );
