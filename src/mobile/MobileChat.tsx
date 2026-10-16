@@ -4,6 +4,8 @@ import { sendPrompt, interruptSession, answerTool, fetchModels } from '../api/op
 import { ensureAssistantSession, clearAssistantSession, readAssistantSessionId, readAssistantAgentPref, readAssistantModelPref, saveAssistantPrefs } from '../store/assistantSession';
 import { useSessionStream } from '../hooks/useSessionStream';
 import { useSpeechInput } from '../hooks/useSpeechInput';
+import { useAutoContinue } from '../hooks/useAutoContinue';
+import { autoContinueMinToMs, hasUserHistory, readAutoContinueIdleMin, readAutoContinuePref, saveAutoContinuePref } from '../hooks/autoContinue';
 import { STATUS_DOT, ThinkingBlock, ToolRow, ChatBubble, ChatErrorRow } from '../components/ChatFeed';
 import { ChatMessage, chatToMarkdown } from '../components/chatEvents';
 import FilePreviewModal from '../components/FilePreviewModal';
@@ -93,11 +95,51 @@ export default function MobileChat({
     if (status === 'closed' || status === 'idle') setInterrupted(false);
   }, [status]);
 
+  // Opt-in auto-continue (desktop parity). Assistant chats only — a task
+  // chat is excluded by `isAssistant`. Same fixed prompt, same session.
+  // busyAuto mirrors `busy` below; computed before the null guard because
+  // useAutoContinue must run unconditionally.
+  const busyAuto = status === 'live' || status === 'connecting' || sending || stopping || interrupted;
+  const autoContinueIdleMin = readAutoContinueIdleMin();
+  const [autoContinue, setAutoContinue] = useState<boolean>(() =>
+    isAssistant ? readAutoContinuePref(project!.id) : false);
+  const lastMsg = messages[messages.length - 1];
+  const activityToken = lastMsg ? `${lastMsg.id}:${lastMsg.kind}:${status}` : `empty:${status}`;
+  const sendAutoContinue = async (text: string): Promise<boolean> => {
+    if (!activeSessionId) return false;
+    const res = await sendPrompt(activeSessionId, text, selectedModel);
+    if (!res.ok) {
+      setSendError(`Auto-continue failed — ${res.error ?? 'unknown error'}`);
+      return false;
+    }
+    setSendError(null);
+    retry();
+    return true;
+  };
+  useAutoContinue({
+    enabled: autoContinue,
+    isAssistant,
+    sessionId: activeSessionId,
+    status,
+    busy: busyAuto,
+    hasHistory: hasUserHistory(messages),
+    activityToken,
+    send: sendAutoContinue,
+    idleMs: autoContinueMinToMs(autoContinueIdleMin),
+  });
+  const toggleAutoContinue = () => {
+    if (!project) return;
+    const next = !autoContinue;
+    setAutoContinue(next);
+    saveAutoContinuePref(project.id, next);
+  };
+
   if (!task && !project) return null;
 
   const st = STATUS_DOT[status];
   const streamActive = status === 'live' || status === 'connecting';
   const busy = streamActive || sending || stopping || interrupted;
+
   const selectedAgent = agents.find((a) => a.id === selectedAgentId);
   const sessionAgent = (session as { agent?: unknown } | null)?.agent
     ? (typeof (session as { agent?: unknown }).agent === 'string'
@@ -336,6 +378,23 @@ export default function MobileChat({
       </header>
 
       <div className="m-chat-feed" style={{ gridRow: 2, minHeight: 0, overflowY: 'auto' }}>
+        {/* Opt-in auto-continue — same behavior as the desktop chat. */}
+        {isAssistant && (
+          <label
+            className="flex items-center gap-2 px-3.5 py-2 border-b hairline cursor-pointer select-none"
+            style={{ background: 'var(--surface)', position: 'sticky', top: 0, zIndex: 1 }}
+          >
+            <input
+              type="checkbox"
+              checked={autoContinue}
+              onChange={toggleAutoContinue}
+              className="accent-violet-500 w-3.5 h-3.5"
+              aria-label="Automatisch fortsetzen"
+              title={`Sendet nach ${autoContinueIdleMin} Minuten ohne Aktivität eine Fortsetzung in dieselbe Session.`}
+            />
+            <span className="text-[11px] muted mono" title={`Sendet nach ${autoContinueIdleMin} Minuten ohne Aktivität eine Fortsetzung in dieselbe Session.`}>Automatisch fortsetzen</span>
+          </label>
+        )}
         {!task && <ChatBubble msg={{ ...WELCOME, markdown: isAssistant ? `Board assistant for ${project?.name ?? ''} (${who}). Ask about the board or delegate work. Finished tasks report back here.` : WELCOME.markdown }} agentName={agentName} modelName={modelHint} showAvatar onFileClick={setPreviewPath} />}
         {(status === 'connecting' || status === 'idle') && messages.length === 0 && activeSessionId && (
           <div className="muted" style={{ textAlign: 'center', fontSize: 12 }}>

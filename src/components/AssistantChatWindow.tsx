@@ -4,12 +4,14 @@
 // Feed rendering reuses ChatFeed so styling + tool calls match SessionChatWindow.
 
 import { useEffect, useRef, useState } from 'react';
-import { X, Send, Loader2, Copy, Check, RefreshCw, Plus, Download, Square, Mic, MicOff } from 'lucide-react';
+import { X, Send, Loader2, Copy, Check, RefreshCw, Plus, Download, Square, Mic, MicOff, ExternalLink } from 'lucide-react';
 import { Agent, OpenCodeModelInfo, Project } from '../types';
-import { answerTool, createSession, sendPrompt, interruptSession, fetchModels } from '../api/opencode';
+import { answerTool, createSession, sendPrompt, switchSessionAgent, switchSessionModel, interruptSession, fetchModels } from '../api/opencode';
 import { useSessionStream } from '../hooks/useSessionStream';
 import { useSpeechInput } from '../hooks/useSpeechInput';
-import { STATUS_DOT, ThinkingBlock, ToolRow, ChatBubble, ChatErrorRow } from './ChatFeed';
+import { useAutoContinue } from '../hooks/useAutoContinue';
+import { autoContinueMinToMs, hasUserHistory, readAutoContinueIdleMin, readAutoContinuePref, saveAutoContinuePref } from '../hooks/autoContinue';
+import { STATUS_DOT, ThinkingBlock, ToolRow, ChatBubble, ChatErrorRow, ReviewTarget } from './ChatFeed';
 import { chatToMarkdown, ChatMessage } from './chatEvents';
 import FilePreviewModal from './FilePreviewModal';
 import {
@@ -25,9 +27,11 @@ interface AssistantChatWindowProps {
   project: Project | null;
   availableAgents: Agent[];
   onClose: () => void;
+  onTaskClick?: (kind: 'task' | 'session', id: string) => void;
+  standalone?: boolean;
 }
 
-export default function AssistantChatWindow({ project, availableAgents, onClose }: AssistantChatWindowProps) {
+export default function AssistantChatWindow({ project, availableAgents, onClose, onTaskClick, standalone = false }: AssistantChatWindowProps) {
   const [sessionId, setSessionId] = useState<string | null>(() => {
     if (!project) return null;
     return readAssistantSessionId(project.id);
@@ -56,6 +60,13 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
   const [copied, setCopied] = useState(false);
   const [exported, setExported] = useState(false);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const [reviewing, setReviewing] = useState<string | null>(null);
+  // Opt-in auto-continue: default OFF. Persisted per project so desktop and
+  // mobile stay in sync. The 5-minute idle timer sends one fixed prompt into
+  // the SAME session — no new session, no board task.
+  const [autoContinue, setAutoContinue] = useState<boolean>(() =>
+    project ? readAutoContinuePref(project.id) : false,
+  );
   const { supported: speechSupported, listening: speechListening, transcribing: speechTranscribing, downloadPct: speechPct, speechError, toggle: toggleSpeech } = useSpeechInput();
   const bottomRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(() => {
@@ -86,6 +97,54 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
 
   const { messages, status, session, sessionError, retry } = useSessionStream(sessionId);
 
+  // "Busy" means the composer is locked. Mirrors the busy used by the send
+  // form below; computed early so the auto-continue hook can read it.
+  const streamActiveEarly = status === 'live' || status === 'connecting';
+  const busyEarly = streamActiveEarly || sending || stopping || interrupted;
+
+  // Keep auto-continue pref in sync when the project changes.
+  useEffect(() => {
+    if (!project) return;
+    setAutoContinue(readAutoContinuePref(project.id));
+  }, [project?.id]);
+
+  const toggleAutoContinue = () => {
+    if (!project) return;
+    const next = !autoContinue;
+    setAutoContinue(next);
+    saveAutoContinuePref(project.id, next);
+  };
+
+  // Board-assistant only. The last message id + status form the activity
+  // token; every new visible activity restarts the idle window. The idle
+  // time itself is configurable on the Settings page (default 5 minutes).
+  const isAssistantChat = true;
+  const autoContinueIdleMin = readAutoContinueIdleMin();
+  const lastMsg = messages[messages.length - 1];
+  const activityToken = lastMsg ? `${lastMsg.id}:${lastMsg.kind}:${status}` : `empty:${status}`;
+  const sendAutoContinue = async (text: string): Promise<boolean> => {
+    if (!sessionId) return false;
+    const res = await sendPrompt(sessionId, text, selectedModel);
+    if (!res.ok) {
+      setSendError(`Auto-continue failed — ${res.error ?? 'unknown error'}`);
+      return false;
+    }
+    setSendError(null);
+    retry();
+    return true;
+  };
+  useAutoContinue({
+    enabled: autoContinue,
+    isAssistant: isAssistantChat,
+    sessionId,
+    status,
+    busy: busyEarly,
+    hasHistory: hasUserHistory(messages),
+    activityToken,
+    send: sendAutoContinue,
+    idleMs: autoContinueMinToMs(autoContinueIdleMin),
+  });
+
   useEffect(() => {
     if (!project) return;
     setSessionId(readAssistantSessionId(project.id));
@@ -114,9 +173,6 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
   useEffect(() => {
     if (status === 'closed' || status === 'idle') setInterrupted(false);
   }, [status]);
-
-  if (!project) return null;
-  const st = STATUS_DOT[status];
 
   // "Busy" means the composer is locked. Only a genuinely live stream
   // should do that — a stale tool row must not lock the input forever.
@@ -149,31 +205,63 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
     window.addEventListener('pointerup', onUp);
   };
 
-  // Changing agent/model always works: with an active session it starts a
-  // fresh chat so the next send uses the new picks (session pins them at create).
-  const handleAgentChange = (v: string) => {
+  // Agent changes start a fresh session because the session owns its agent.
+  // Save the pref only after the switch succeeds — otherwise a failed
+  // switch leaves a stale pref and reload shows the wrong agent.
+  const handleAgentChange = async (v: string) => {
+    const prev = selectedAgentId;
     setSelectedAgentId(v);
-    saveAssistantPrefs(project.id, v, selectedModel);
     if (sessionId) {
-      clearAssistantSession(project.id);
-      setSessionId(null);
-      setInterrupted(false);
-      setSendError(null);
-      setCreateError(null);
+      const switched = v ? await switchSessionAgent(sessionId, v) : false;
+      if (!switched && v) {
+        setSelectedAgentId(prev);
+        setSendError('Agent switch failed — the current session kept its previous agent.');
+        return;
+      }
     }
+    saveAssistantPrefs(project.id, v, selectedModel);
   };
 
-  const handleModelChange = (v: string) => {
+  const handleModelChange = async (v: string) => {
+    const prev = selectedModel;
     setSelectedModel(v);
-    saveAssistantPrefs(project.id, selectedAgentId, v);
-    if (sessionId) {
-      clearAssistantSession(project.id);
-      setSessionId(null);
-      setInterrupted(false);
-      setSendError(null);
-      setCreateError(null);
+    if (sessionId && v) {
+      const switched = await switchSessionModel(sessionId, v);
+      if (!switched) {
+        setSelectedModel(prev);
+        setSendError('Model switch failed — the current session kept its previous model.');
+        return;
+      }
     }
+    saveAssistantPrefs(project.id, selectedAgentId, v);
   };
+
+  // Reconcile the dropdowns with the session's actual agent/model.
+  // The selections initialize from localStorage prefs, which go stale when
+  // the session was switched elsewhere (another tab/client) or a switch
+  // failed. The session is the source of truth — adopt it and persist it.
+  useEffect(() => {
+    if (!project || !session) return;
+    const m = (session as Record<string, unknown>).model as
+      | string
+      | { providerID?: string; modelID?: string; id?: string }
+      | undefined;
+    const actualModel =
+      typeof m === 'string'
+        ? m
+        : m && (m.providerID || (m as Record<string, unknown>).provider)
+          ? `${m.providerID ?? (m as Record<string, unknown>).provider as string}/${m.modelID ?? m.id ?? ''}`.replace(/\/$/, '')
+          : '';
+    if (actualModel && actualModel !== selectedModel) setSelectedModel(actualModel);
+    const actualAgent = typeof (session as Record<string, unknown>).agent === 'string'
+      ? ((session as Record<string, unknown>).agent as string)
+      : '';
+    if (actualAgent && actualAgent !== selectedAgentId) setSelectedAgentId(actualAgent);
+    if ((actualModel && actualModel !== selectedModel) || (actualAgent && actualAgent !== selectedAgentId)) {
+      saveAssistantPrefs(project.id, actualAgent || selectedAgentId, actualModel || selectedModel);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.id, JSON.stringify((session as Record<string, unknown> | null)?.model ?? null), (session as Record<string, unknown> | null)?.agent]);
 
   const ensureSession = async (): Promise<string | null> => {
     if (sessionId) return sessionId;
@@ -198,6 +286,9 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project?.id, sessionId, selectedAgentId, selectedModel]);
 
+  if (!project) return null;
+  const st = STATUS_DOT[status];
+
   const handleNewChat = async () => {
     if (sessionId && (status === 'live' || status === 'connecting')) {
       try { await interruptSession(sessionId); } catch {}
@@ -214,6 +305,10 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
     // Hide only: keep the stored session id so reopen resumes the same
     // chat. A fresh session starts only via "+" (handleNewChat).
     onClose();
+  };
+
+  const popOut = () => {
+    window.open(`${window.location.pathname}#assistant/${encodeURIComponent(project.id)}`, '_blank', 'width=480,height=720');
   };
 
   const copySessionId = async () => {
@@ -248,7 +343,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
       setInterrupted(true);
       retry();
     }
-    else setSendError('Stop failed — session may already be idle.');
+    else { retry(); setSendError('Stop failed — session may already be idle.'); }
   };
 
   const handleSend = async (e?: React.FormEvent) => {
@@ -260,7 +355,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
     setSendError(null);
     const sid = await ensureSession();
     if (!sid) { setSending(false); return; }
-    const res = await sendPrompt(sid, text);
+    const res = await sendPrompt(sid, text, selectedModel);
     setSending(false);
     if (res.ok) {
       setInput('');
@@ -268,6 +363,16 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
     } else {
       setSendError(`Failed to send — ${res.error ?? 'unknown error'}`);
     }
+  };
+
+  const handleReview = async (target: ReviewTarget) => {
+    if (!project || !sessionId || reviewing) return;
+    setReviewing(target.messageId);
+    try {
+      const response = await fetch('/api/kanban/delegate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId: project.id, title: `Review: ${target.kind} ${target.messageId.slice(0, 12)}`, agentId: 'code-reviewer', agentName: 'Code Reviewer', priority: 'medium', parentSessionId: sessionId, description: `Review session ${sessionId}, message ${target.messageId}. Return simple Pros and Cons. For every con explain why it is bad, what is expected, and the likely reason. Check duplicate tasks, missing acceptance criteria, empty progress, null results, priority changes, and wrong tool direction. Include event IDs and timestamps. Source: ${JSON.stringify(target).slice(0, 12000)}`, wait: false }) });
+      if (!response.ok) throw new Error((await response.json().catch(() => null))?.error || 'Could not create review task');
+    } catch (error) { setSendError(`Review failed — ${(error as Error).message}`); }
+    finally { setReviewing(null); }
   };
 
   const selectedAgent = availableAgents.find((a) => a.id === selectedAgentId);
@@ -284,16 +389,16 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
   const welcomeMsg: ChatMessage = {
     id: 'welcome',
     kind: 'assistant',
-    markdown: `Board assistant for ${project.name} (${who}). Ask about the board or delegate work. Finished tasks report back here.`,
+    markdown: `Board assistant for ${project.name}. Ask about the board or delegate work. Finished tasks report back here.`,
   };
 
   return (
-    <div className="fixed top-3 right-3 bottom-3 z-50 flex justify-end pointer-events-none">
-      <div data-assistant-width className="relative h-full flex flex-col shrink-0 pointer-events-auto panel overflow-hidden" style={{ width, maxWidth: '90vw', borderRadius: 10, boxShadow: '0 12px 40px rgba(0,0,0,0.25)', background: 'var(--surface)', border: '1px solid var(--border)', transform: `translate(${position.x}px, ${position.y}px)` }}>
-        <div onPointerDown={onHandlePointerDown} title="Drag to resize"
+    <div className={standalone ? 'fixed inset-0 z-50 flex pointer-events-none' : 'fixed top-3 right-3 bottom-3 z-50 flex justify-end pointer-events-none'}>
+      <div data-assistant-width className="relative h-full w-full flex flex-col shrink-0 pointer-events-auto panel overflow-hidden" style={{ width: standalone ? '100%' : width, maxWidth: standalone ? '100%' : '90vw', borderRadius: standalone ? 0 : 10, boxShadow: standalone ? 'none' : '0 12px 40px rgba(0,0,0,0.25)', background: 'var(--surface)', border: '1px solid var(--border)', transform: standalone ? undefined : `translate(${position.x}px, ${position.y}px)` }}>
+        {!standalone && <div onPointerDown={onHandlePointerDown} title="Drag to resize"
           className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-violet-500/40 transition-colors z-10"
-          style={{ touchAction: 'none' }} />
-        <div onPointerDown={onWindowPointerDown} className="modal-head px-3.5 py-3 cursor-move" title="Drag to move the assistant chat">
+          style={{ touchAction: 'none' }} />}
+        <div onPointerDown={standalone ? undefined : onWindowPointerDown} className={`modal-head px-3.5 py-3 ${standalone ? '' : 'cursor-move'}`} title={standalone ? undefined : 'Drag to move the assistant chat'}>
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5 mb-1">
@@ -318,6 +423,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
               {sessionId && (
                 <button onClick={handleNewChat} className="btn p-1.5" title="New assistant chat"><Plus className="w-3.5 h-3.5" strokeWidth={1.75} /></button>
               )}
+              {!standalone && <button onClick={popOut} className="btn p-1.5" title="Open assistant in a separate window"><ExternalLink className="w-3.5 h-3.5" strokeWidth={1.75} /></button>}
               <button onClick={handleClose} className="btn p-1.5" title="Close — chat stays, reopen resumes"><X className="w-3.5 h-3.5" strokeWidth={1.75} /></button>
             </div>
           </div>
@@ -375,7 +481,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
 
         <div className="flex-1 overflow-y-auto p-3.5 space-y-3" style={{ background: 'var(--bg)' }}>
           {/* Welcome message — same bubble styling as task chat */}
-          <ChatBubble msg={welcomeMsg} agentName={agentName} modelName={modelHint} showAvatar onFileClick={(p) => setPreviewPath(p)} />
+          <ChatBubble msg={welcomeMsg} agentName={agentName} modelName={modelHint} showAvatar onFileClick={(p) => setPreviewPath(p)} onTaskClick={onTaskClick} onReview={handleReview} />
           {(status === 'connecting' || status === 'idle') && msgCount === 0 && sessionId && (
             <div className="flex flex-col items-center justify-center h-20 gap-2 muted">
               <Loader2 className="w-4 h-4 animate-spin" strokeWidth={1.75} />
@@ -401,10 +507,10 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
           {messages.map((msg, idx) => {
             const prev = idx > 0 ? messages[idx - 1] : undefined;
             const startsTurn = msg.kind !== 'user' && (!prev || prev.kind === 'user');
-            if (msg.kind === 'tool') return <ToolRow key={msg.id} msg={msg} onFileClick={(p) => setPreviewPath(p)} onAnswered={(id, out) => { answerTool(sessionId!, id, out).then((r) => { if (!r.ok) setSendError(`Could not send the answer — ${r.error ?? 'unknown error'}`); retry(); }); }} />;
-            if (msg.kind === 'error') return <ChatErrorRow key={msg.id} msg={msg} detail={msg.id.endsWith('-outcome') ? sessionError : null} />;
+             if (msg.kind === 'tool') return <ToolRow key={msg.id} msg={msg} onFileClick={(p) => setPreviewPath(p)} onAnswered={(id, out) => { answerTool(sessionId!, id, out).then((r) => { if (!r.ok) setSendError(`Could not send the answer — ${r.error ?? 'unknown error'}`); retry(); }); }} onReview={handleReview} />;
+             if (msg.kind === 'error') return <ChatErrorRow key={msg.id} msg={msg} detail={msg.id.endsWith('-outcome') ? sessionError : null} onReview={handleReview} />;
             if (msg.kind === 'reasoning') return <ThinkingBlock key={msg.id} msg={msg} showAvatar={startsTurn} agentName={agentName} modelName={modelHint} onFileClick={(p) => setPreviewPath(p)} />;
-            return <ChatBubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : agentName} modelName={msg.kind === 'user' ? undefined : modelHint} showAvatar={msg.kind === 'user' ? true : startsTurn} onFileClick={(p) => setPreviewPath(p)} />;
+             return <ChatBubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : agentName} modelName={msg.kind === 'user' ? undefined : modelHint} showAvatar={msg.kind === 'user' ? true : startsTurn} onFileClick={(p) => setPreviewPath(p)} onTaskClick={onTaskClick} onReview={handleReview} />;
           })}
           <div ref={bottomRef} />
           {busy && msgCount > 0 && (
@@ -419,6 +525,20 @@ export default function AssistantChatWindow({ project, availableAgents, onClose 
 
         {sendError && <div className="px-3.5 pt-2 text-[11px]" style={{ color: 'var(--danger)' }}>{sendError}</div>}
         {speechError && <div className="px-3.5 pt-2 text-[11px]" style={{ color: 'var(--amber)' }}>{speechError}</div>}
+        <div className="px-3.5 py-2 border-t hairline flex items-center gap-2" style={{ borderTopWidth: 1, borderTopStyle: 'solid', background: 'var(--surface)' }}>
+          <input
+            id="assistant-auto-continue"
+            type="checkbox"
+            checked={autoContinue}
+            onChange={toggleAutoContinue}
+            className="accent-violet-500 w-3.5 h-3.5"
+            aria-label="Automatisch fortsetzen"
+            title={`Sendet nach ${autoContinueIdleMin} Minuten ohne Aktivität eine Fortsetzung in dieselbe Session.`}
+          />
+          <label htmlFor="assistant-auto-continue" className="text-[11px] muted mono cursor-pointer select-none" title={`Sendet nach ${autoContinueIdleMin} Minuten ohne Aktivität eine Fortsetzung in dieselbe Session.`}>
+            Automatisch fortsetzen
+          </label>
+        </div>
         <form onSubmit={busy ? (e) => { e.preventDefault(); handleStop(); } : handleSend} className="p-3 border-t hairline" style={{ borderTopWidth: 1, borderTopStyle: 'solid', background: 'var(--surface)' }}>
           <div className="flex gap-1.5 items-end">
             <input type="text" value={input} onChange={(e) => setInput(e.target.value)} placeholder={speechTranscribing ? 'Transcribing locally…' : speechListening ? (speechPct != null && speechPct >= 0 ? `Loading voice model ${Math.min(100, Math.round(speechPct * 100))}%…` : 'Listening — speak now…') : busy ? 'Assistant running — Stop to interrupt…' : 'Ask the board assistant…  (↵ send)'} className="input" disabled={busy || creating} autoFocus />

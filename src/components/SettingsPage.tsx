@@ -1,7 +1,8 @@
-import { ArrowLeft, Check, Languages, Monitor, Moon, Smartphone, Sun, Type } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { ArrowLeft, Check, Languages, Monitor, Moon, Smartphone, Sun, Timer, Type } from 'lucide-react';
+import { useState, type ReactNode } from 'react';
 import { Theme, useTheme } from '../hooks/useTheme';
 import { FontSize, PreferredView, SPEECH_LANGS, usePreferences } from '../hooks/usePreferences';
+import { AUTO_CONTINUE_MIN_OPTIONS, readAutoContinueIdleMin, saveAutoContinueIdleMin } from '../hooks/autoContinue';
 
 const FONT_SIZES: { value: FontSize; label: string }[] = [
   { value: 13, label: 'Compact' },
@@ -13,7 +14,13 @@ const FONT_SIZES: { value: FontSize; label: string }[] = [
 export default function SettingsPage() {
   const { theme, setTheme } = useTheme();
   const { preferredView, setPreferredView, fontSize, setFontSize, speechLang, setSpeechLang } = usePreferences();
+  const [autoContinueIdleMin, setAutoContinueIdleMinState] = useState<number>(() => readAutoContinueIdleMin());
   const backPath = window.location.search.includes('from=mobile') ? '/m' : '/';
+
+  const chooseAutoContinueIdle = (min: number) => {
+    saveAutoContinueIdleMin(min);
+    setAutoContinueIdleMinState(min);
+  };
 
   const chooseView = (value: PreferredView) => {
     setPreferredView(value);
@@ -64,6 +71,21 @@ export default function SettingsPage() {
               icon={Languages}
               selected={speechLang === option.value}
               onClick={() => setSpeechLang(option.value)}
+            />
+          ))}
+        </SettingSection>
+
+        <SettingSection
+          title="Auto-continue idle time"
+          description={`Board assistant sends one continue prompt into the same session after this idle time. Only runs when "Automatisch fortsetzen" is enabled. Default: ${AUTO_CONTINUE_MIN_OPTIONS[1]} minutes.`}
+        >
+          {AUTO_CONTINUE_MIN_OPTIONS.map((min) => (
+            <Choice
+              key={min}
+              label={min === 1 ? '1 minute' : `${min} minutes`}
+              icon={Timer}
+              selected={autoContinueIdleMin === min}
+              onClick={() => chooseAutoContinueIdle(min)}
             />
           ))}
         </SettingSection>
