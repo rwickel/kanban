@@ -17,11 +17,15 @@ export default function AgentTeamModal({ isOpen, onClose, onSave, selectedAgentI
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (isOpen) {
-      setCheckedIds(selectedAgentIds);
-      loadAgents();
-    }
-  }, [isOpen, selectedAgentIds]);
+    if (!isOpen) return;
+
+    // Initialize once when the modal opens. Do not reset local choices when
+    // the parent refreshes the project while the user is selecting agents.
+    setCheckedIds(selectedAgentIds);
+    loadAgents();
+    // selectedAgentIds is the initial value for this modal session.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
 
   const loadAgents = async () => {
     setLoading(true);
