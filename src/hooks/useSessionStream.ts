@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { fetchSessionMessages, getSession, subscribeSessionEvents } from '../api/opencode';
-import { toChatMessages, type ChatMessage } from '../components/chatEvents';
+import { messageTimestamp, toChatMessages, type ChatMessage } from '../components/chatEvents';
 import type { OpenCodeSessionInfo, SessionUsage } from '../types';
 
 export type ChatStatus = 'connecting' | 'live' | 'closed' | 'error' | 'idle' | 'no-run';
@@ -22,6 +22,39 @@ function sessionErrorText(session: OpenCodeSessionInfo | null): string | null {
 }
 
 const POLL_MS = 2500;
+
+/**
+ * Scan the raw message list for live/closed status and the session outcome.
+ * Array position is NOT chronological (an idle marker can sit mid-array), so
+ * the idle check compares the idle marker's timestamp against the last chat
+ * message's timestamp; it falls back to the old index comparison only when
+ * either side lacks a timestamp (REQ-TIME-05).
+ */
+function scanSessionList(list: unknown[]): { idleLike: boolean; outcome: string | null } {
+  let lastChatIndex = -1;
+  let lastIdleIndex = -1;
+  let lastChatTime = Number.NEGATIVE_INFINITY;
+  let lastIdleTime = Number.NEGATIVE_INFINITY;
+  let outcome: string | null = null;
+  for (let i = 0; i < list.length; i++) {
+    const r = (list[i] ?? {}) as Record<string, unknown>;
+    const t = typeof r.type === 'string' ? (r.type as string).toLowerCase() : '';
+    const ts = messageTimestamp(r);
+    if (t === 'idle') {
+      lastIdleIndex = i;
+      if (ts != null) lastIdleTime = Math.max(lastIdleTime, ts);
+    } else if ((t === 'user' || t === 'assistant') && !(Array.isArray(r.content) && (r.content as unknown[]).length === 0)) {
+      lastChatIndex = i;
+      if (ts != null) lastChatTime = Math.max(lastChatTime, ts);
+    }
+    const o = typeof r.outcome === 'string' ? (r.outcome as string).toLowerCase() : '';
+    if (o) outcome = o;
+  }
+  const timeKnown = Number.isFinite(lastChatTime) && Number.isFinite(lastIdleTime);
+  const idleLike =
+    lastChatIndex < 0 || (timeKnown ? lastIdleTime >= lastChatTime : lastIdleIndex > lastChatIndex);
+  return { idleLike, outcome };
+}
 
 function num(v: unknown): number | undefined {
   if (typeof v === 'number' && Number.isFinite(v)) return v;
@@ -263,26 +296,16 @@ export function useSessionStream(sessionId: string | null, opts?: { taskAgentNam
           }
           if (list) {
             merge(list as unknown[]);
-            // Idle detection: server does not guarantee asc order (idle marker
-            // can arrive first), so scan the whole list + session outcome.
-            // Any idle/completed marker means the agent parked — show closed.
+            // Idle detection: the server list is not guaranteed chronological
+            // (idle marker can arrive first / sit mid-array), so compare
+            // timestamps instead of array indices. Any non-benign idle
+            // outcome or missing chat message means the agent parked.
             // A fresh session with zero chat messages is always idle-ready,
-            // otherwise a brand new board assistant idles as "live" forever and
-            // locks the input before the first prompt.
-            const arr = Array.isArray(list) ? list : [];
-            let lastChatIndex = -1;
-            let lastIdleIndex = -1;
-            for (let i = 0; i < arr.length; i++) {
-              const m = arr[i];
-              const r = m as Record<string, unknown>;
-              const t = typeof r?.type === 'string' ? (r.type as string).toLowerCase() : '';
-              if (t === 'idle') lastIdleIndex = i;
-              else if (t !== 'compaction' && !(Array.isArray(r?.content) && (r.content as unknown[]).length === 0)) lastChatIndex = i;
-              const o = typeof r?.outcome === 'string' ? (r.outcome as string).toLowerCase() : '';
-              if (o) setOutcome(o);
-            }
-            const idleLike = lastChatIndex < 0 || lastIdleIndex > lastChatIndex;
-            setStatus(idleLike ? 'closed' : 'live');
+            // otherwise a brand new board assistant idles as "live" forever
+            // and locks the input before the first prompt.
+            const scan = scanSessionList(Array.isArray(list) ? list : []);
+            if (scan.outcome) setOutcome(scan.outcome);
+            setStatus(scan.idleLike ? 'closed' : 'live');
           }
         }
       } catch {
@@ -310,19 +333,9 @@ export function useSessionStream(sessionId: string | null, opts?: { taskAgentNam
               if (s2) setSession(s2);
               if (list) {
                 merge(list as unknown[]);
-                const arr2 = Array.isArray(list) ? (list as unknown as Record<string, unknown>[]) : [];
-                let lastChatIndex2 = -1;
-                let lastIdleIndex2 = -1;
-                for (let i = 0; i < arr2.length; i++) {
-                  const m2 = arr2[i];
-                  const t2 = typeof (m2 as Record<string, unknown>)?.type === 'string' ? ((m2 as Record<string, unknown>).type as string).toLowerCase() : '';
-                  if (t2 === 'idle') lastIdleIndex2 = i;
-                  else if (t2 !== 'compaction' && !(Array.isArray(m2?.content) && (m2.content as unknown[]).length === 0)) lastChatIndex2 = i;
-                  const o2 = typeof (m2 as Record<string, unknown>)?.outcome === 'string' ? ((m2 as Record<string, unknown>).outcome as string).toLowerCase() : '';
-                  if (o2) setOutcome(o2);
-                }
-                const idleLike2 = lastChatIndex2 < 0 || lastIdleIndex2 > lastChatIndex2;
-                setStatus(idleLike2 ? 'closed' : 'live');
+                const scan2 = scanSessionList(Array.isArray(list) ? (list as unknown[]) : []);
+                if (scan2.outcome) setOutcome(scan2.outcome);
+                setStatus(scan2.idleLike ? 'closed' : 'live');
               }
             }).catch(() => {});
           }

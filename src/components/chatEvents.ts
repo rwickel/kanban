@@ -60,12 +60,63 @@ export interface ChatMessage {
   tool?: ToolCallInfo;
   /** Per-message provenance: agent/model/timing/tokens when the server reports them. */
   meta?: MessageMeta;
+  /** Wall-clock ms for the source message — all rows derived from one raw
+   *  message share it; the feed sorts by it (see toChatMessages). */
+  createdAtMs?: number;
 }
 
 type Payload = Record<string, unknown>;
 
 function str(value: unknown): string {
   return typeof value === 'string' ? value : '';
+}
+
+/** Normalize a raw time value (ms, seconds, or date string) to epoch ms. */
+function timeToMs(v: unknown): number | undefined {
+  if (typeof v === 'number' && Number.isFinite(v)) return v < 1e11 ? v * 1000 : v;
+  if (typeof v === 'string' && v.trim()) {
+    const parsed = Date.parse(v);
+    if (Number.isFinite(parsed)) return parsed;
+    const asNum = Number(v);
+    if (Number.isFinite(asNum)) return asNum < 1e11 ? asNum * 1000 : asNum;
+  }
+  return undefined;
+}
+
+/**
+ * Wall-clock ms for one raw v2 message — the feed orders by this, not by the
+ * message's position in the server JSON array (array order is not guaranteed
+ * chronological; e.g. a provider-error message can sit last while its time
+ * places it earlier). Probes time.created/time.start first, then the same
+ * fields on the message and under info; completion times are a fallback so
+ * error rows still land where the failure happened.
+ */
+export function messageTimestamp(raw: unknown): number | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const m = raw as Payload;
+  const pools: Payload[] = [];
+  if (m.time && typeof m.time === 'object') pools.push(m.time as Payload);
+  pools.push(m);
+  if (m.info && typeof m.info === 'object') {
+    const info = m.info as Payload;
+    if (info.time && typeof info.time === 'object') pools.push(info.time as Payload);
+    pools.push(info);
+  }
+  const startKeys = ['created', 'start', 'started', 'timestamp', 'createdAt'];
+  const endKeys = ['completed', 'end', 'finished', 'updated'];
+  for (const p of pools) {
+    for (const k of startKeys) {
+      const ms = timeToMs(p[k]);
+      if (ms != null) return ms;
+    }
+  }
+  for (const p of pools) {
+    for (const k of endKeys) {
+      const ms = timeToMs(p[k]);
+      if (ms != null) return ms;
+    }
+  }
+  return undefined;
 }
 
 function providerErrorMessage(value: unknown): string | null {
@@ -138,6 +189,29 @@ interface ToolDetail {
   pending?: boolean;
 }
 
+function patchDiff(patchText: string): { diff: DiffLine[]; filePath?: string } {
+  const diff: DiffLine[] = [];
+  let filePath: string | undefined;
+
+  for (const line of patchText.split('\n')) {
+    const file = line.match(/^\*\*\* (?:Update|Add|Delete) File: (.+)$/);
+    if (file) {
+      filePath ??= file[1].trim();
+      diff.push({ type: 'hunk', text: line });
+    } else if (line.startsWith('@@')) {
+      diff.push({ type: 'hunk', text: line });
+    } else if (line.startsWith('+')) {
+      diff.push({ type: 'add', text: line.slice(1) });
+    } else if (line.startsWith('-')) {
+      diff.push({ type: 'del', text: line.slice(1) });
+    } else if (line.startsWith(' ')) {
+      diff.push({ type: 'ctx', text: line.slice(1) });
+    }
+  }
+
+  return { diff: diff.slice(0, 200), filePath };
+}
+
 /** Extract human-readable input/output from a v2 tool part. */
 function toolInput(part: Payload): ToolDetail {
   const state = (part.state as Payload | undefined) ?? {};
@@ -205,7 +279,7 @@ function toolInput(part: Payload): ToolDetail {
   let diff: DiffLine[] | undefined;
   let questions: QuestionItem[] | undefined;
   let todos: TodoItem[] | undefined;
-  const filePath = path || undefined;
+  let filePath = path || undefined;
 
   // question tool: rawInput.questions = [{header, question, options:[{label,description}], multiple}]
   // options: [] means the user must type a free-text answer for that question.
@@ -248,6 +322,16 @@ function toolInput(part: Payload): ToolDetail {
       ...news.map((l): DiffLine => ({ type: 'add', text: l })),
     ].slice(0, 60);
   }
+  // apply_patch: rawInput.patchText contains the patch envelope and hunks.
+  const patchText = str((rawInput as Payload).patchText);
+  if (!questions && !todos && patchText && toolName.includes('patch')) {
+    const parsed = patchDiff(patchText);
+    if (parsed.diff.length > 0) {
+      render = 'diff';
+      diff = parsed.diff;
+      filePath = parsed.filePath;
+    }
+  }
 
   // Full details: command or path+content, then output
   // When we have a diff render (edit/write) the diff panel already shows the
@@ -259,7 +343,7 @@ function toolInput(part: Payload): ToolDetail {
   if (path) inputLines.push(path);
   if (!command && !path && pattern) inputLines.push(pattern);
   if (!hasDiff && text && text !== command) inputLines.push(text.length > 2000 ? `${text.slice(0, 2000)}\n… (truncated)` : text);
-  if (inputLines.length === 0) {
+  if (!hasDiff && inputLines.length === 0) {
     try {
       const raw = JSON.stringify(rawInput);
       if (raw && raw !== '{}') inputLines.push(raw.length > 2000 ? `${raw.slice(0, 2000)}…` : raw);
@@ -269,18 +353,18 @@ function toolInput(part: Payload): ToolDetail {
   return { action, brief, input, output: output.length > 4000 ? `${output.slice(0, 4000)}\n… (truncated)` : output, render, diff, filePath, questions, todos, toolCallId, pending };
 }
 
-function contentToMessages(id: string, kind: 'user' | 'assistant', part: Payload, meta?: MessageMeta): ChatMessage[] {
+function contentToMessages(id: string, kind: 'user' | 'assistant', part: Payload, meta?: MessageMeta, createdAtMs?: number): ChatMessage[] {
   const type = str(part.type);
   switch (type) {
     case 'text': {
       const text = str(part.text).trim();
       if (!text) return [];
-      return [{ id, kind, markdown: text, ...(meta ? { meta } : {}) }];
+      return [{ id, kind, markdown: text, ...(meta ? { meta } : {}), ...(createdAtMs != null ? { createdAtMs } : {}) }];
     }
     case 'reasoning': {
       const text = str(part.text).trim();
       if (!text) return [];
-      return [{ id: `${id}-reasoning`, kind: 'reasoning', markdown: text, ...(meta ? { meta } : {}) }];
+      return [{ id: `${id}-reasoning`, kind: 'reasoning', markdown: text, ...(meta ? { meta } : {}), ...(createdAtMs != null ? { createdAtMs } : {}) }];
     }
     case 'tool': {
       const state = (part.state as Payload | undefined) ?? {};
@@ -292,6 +376,7 @@ function contentToMessages(id: string, kind: 'user' | 'assistant', part: Payload
           id: `${id}-tool`,
           kind: 'error',
           markdown: execErr || toolSummary(part) || 'Tool call failed.',
+          ...(createdAtMs != null ? { createdAtMs } : {}),
         }];
       }
       // Code Mode `execute` wrapper: { type:"tool", name:"execute", ...,
@@ -302,29 +387,55 @@ function contentToMessages(id: string, kind: 'user' | 'assistant', part: Payload
         const meta = (part.metadata ?? (state as Payload).metadata) as Payload | undefined;
         const calls = meta && Array.isArray(meta.toolCalls) ? (meta.toolCalls as Payload[]) : [];
         const innerInput = ((state.input as Payload | undefined) ?? {}) as Payload;
-        const code = str(innerInput.code).slice(0, 2000);
+        const codeFull = str(innerInput.code);
+        const innerOut = (state.content as Payload[] | undefined) ?? [];
+        const wrapperOut = Array.isArray(innerOut)
+          ? innerOut.map((c) => str((c as Payload).text)).filter(Boolean).join('\n')
+          : '';
+        const toRowStatus = (s: string, execFlag: boolean | undefined) =>
+          execFlag === true || s === 'completed' ? 'executed' : (s || 'pending');
+        const outerStatus = toRowStatus(status, exec);
         if (calls.length > 0) {
-          // The wrapper result lives in state.content, not on the inner
-          // calls — attach it to the last row so Result is not empty.
-          const innerOut = (state.content as Payload[] | undefined) ?? [];
-          const wrapperOut = Array.isArray(innerOut)
-            ? innerOut.map((c) => str((c as Payload).text)).filter(Boolean).join('\n')
-            : '';
-          return calls.map((c, i) => ({
+          // Keep the outer `execute` row (code + result) AND the inner
+          // subcalls — dropping either hides input or content.
+          const codeFirst = codeFull ? (codeFull.split('\n')[0] ?? '').trim().slice(0, 120) : '';
+          const briefOut = wrapperOut.replace(/\s+/g, ' ').trim().slice(0, 120);
+          const outer = {
+            id: `${id}-tool`,
+            kind: 'tool' as const,
+            markdown: '',
+            ...(createdAtMs != null ? { createdAtMs } : {}),
+            tool: {
+              tool: 'execute',
+              status: outerStatus,
+              summary: [codeFirst || 'execute', briefOut].filter(Boolean).join(' → ').slice(0, 200),
+              input: codeFull ? (codeFull.length > 2000 ? `${codeFull.slice(0, 2000)}\n… (truncated)` : codeFull) : '',
+              output: wrapperOut ? (wrapperOut.length > 4000 ? `${wrapperOut.slice(0, 4000)}\n… (truncated)` : wrapperOut) : '',
+              render: 'generic' as const,
+            },
+          };
+          const inners = calls.map((c, i) => ({
             id: `${id}-tool-${i}`,
             kind: 'tool' as const,
             markdown: '',
+            ...(createdAtMs != null ? { createdAtMs } : {}),
             tool: {
               tool: str(c.tool) || 'subcall',
-              status: str(c.status) || 'completed',
+              status: toRowStatus(str(c.status), undefined),
               summary: summarizeCallInput(str(c.tool), (c.input ?? {}) as Payload),
               input: summarizeCallInput(str(c.tool), (c.input ?? {}) as Payload, true),
-              output: i === calls.length - 1 ? wrapperOut.slice(0, 4000) : '',
+              // A single nested call owns the wrapper result unambiguously.
+              // Show it on both rows so opening the named tool is not empty.
+              output: calls.length === 1 && wrapperOut
+                ? (wrapperOut.length > 4000 ? `${wrapperOut.slice(0, 4000)}\n… (truncated)` : wrapperOut)
+                : '',
               render: 'generic' as const,
             },
           }));
+          return [outer, ...inners];
         }
-        void code;
+        // No inner calls yet (running or plain execute): fall through to
+        // the generic path, which already renders state.input.code.
       }
       const detail = toolInput(part);
       // Treat both executed:true and status:completed as "executed" (v2 sends completed)
@@ -334,6 +445,7 @@ function contentToMessages(id: string, kind: 'user' | 'assistant', part: Payload
         id: `${id}-tool`,
         kind: 'tool',
         markdown: '',
+        ...(createdAtMs != null ? { createdAtMs } : {}),
         tool: {
           tool: partToolName(part),
           status: st,
@@ -352,7 +464,7 @@ function contentToMessages(id: string, kind: 'user' | 'assistant', part: Payload
     }
     case 'file': {
       const name = str(part.filename) || str(part.url) || 'file';
-      return [{ id: `${id}-file`, kind: 'assistant', markdown: `📎 ${name}`, ...(meta ? { meta } : {}) }];
+      return [{ id: `${id}-file`, kind: 'assistant', markdown: `📎 ${name}`, ...(meta ? { meta } : {}), ...(createdAtMs != null ? { createdAtMs } : {}) }];
     }
     // step-start, step-finish, snapshot, patch, compaction etc.: protocol noise
     default:
@@ -483,12 +595,15 @@ export function toChatMessage(raw: unknown): ChatMessage[] {
   const id = str(m.id) || str(m.messageID);
   if (!id) return [];
   const type = str(m.type);
+  // Chronology key for every row derived from this message (REQ-TIME-04).
+  const createdAtMs = messageTimestamp(m);
+  const at = createdAtMs != null ? { createdAtMs } : {};
 
   // user / synthetic / system: text lives directly on the message
   if (type === 'user' || type === 'synthetic' || type === 'system') {
     const text = str(m.text).trim();
     if (!text) return [];
-    return [{ id, kind: type === 'user' ? 'user' : 'assistant', markdown: text }];
+    return [{ id, kind: type === 'user' ? 'user' : 'assistant', markdown: text, ...at }];
   }
 
   // compaction: silent when ok, visible error row when failed so the
@@ -498,7 +613,7 @@ export function toChatMessage(raw: unknown): ChatMessage[] {
     if (status === 'failed' || m.error) {
       const err = m.error as Payload | undefined;
       const msg = str((err as Payload)?.message) || str(m.reason) || 'Compaction failed.';
-      return [{ id, kind: 'error', markdown: `Compaction failed (${status || 'error'}): ${msg}`.slice(0, 2000) }];
+      return [{ id, kind: 'error', markdown: `Compaction failed (${status || 'error'}): ${msg}`.slice(0, 2000), ...at }];
     }
     return [];
   }
@@ -513,7 +628,7 @@ export function toChatMessage(raw: unknown): ChatMessage[] {
       const markdown = outcome === 'failed'
         ? 'ConnectionRefused: Unable to connect. Is the computer able to access the URL?'
         : `Session ended: ${outcome}.`;
-      return [{ id: `${id}-outcome`, kind: 'error', markdown }];
+      return [{ id: `${id}-outcome`, kind: 'error', markdown, ...at }];
     }
     return [];
   }
@@ -528,7 +643,7 @@ export function toChatMessage(raw: unknown): ChatMessage[] {
       const message = providerErrorMessage(error);
       if (message) {
         const attempt = typeof retry?.attempt === 'number' ? ` Retry attempt ${retry.attempt}.` : '';
-        return [{ id: `${id}-error`, kind: 'error', markdown: `${message}${attempt}`.slice(0, 2000) }];
+        return [{ id: `${id}-error`, kind: 'error', markdown: `${message}${attempt}`.slice(0, 2000), ...at }];
       }
     }
   }
@@ -540,7 +655,7 @@ export function toChatMessage(raw: unknown): ChatMessage[] {
   const out: ChatMessage[] = [];
   const meta = extractMeta(m);
   for (const part of content) {
-    if (part && typeof part === 'object') out.push(...contentToMessages(id, 'assistant', part, meta));
+    if (part && typeof part === 'object') out.push(...contentToMessages(id, 'assistant', part, meta, createdAtMs));
   }
   // Keep server content order (reasoning / text / tools as they arrived).
   return out;
@@ -558,7 +673,19 @@ export function toChatMessages(rawList: unknown): ChatMessage[] {
       out.push(msg);
     }
   }
-  return out;
+  // Chronological order (REQ-TIME-01/02/03): the server JSON array is not
+  // guaranteed chronological — e.g. a provider error can be the last array
+  // element while its timestamp places it earlier. Rows sort ascending by
+  // their message timestamp; unstamped rows sort last; ties and unstamped
+  // runs keep server order via the explicit index tiebreak.
+  return out
+    .map((msg, index) => ({ msg, index }))
+    .sort((a, b) => {
+      const at = a.msg.createdAtMs ?? Number.POSITIVE_INFINITY;
+      const bt = b.msg.createdAtMs ?? Number.POSITIVE_INFINITY;
+      return at === bt ? a.index - b.index : at - bt;
+    })
+    .map(({ msg }) => msg);
 }
 
 /** Serialize the current chat feed to Markdown (user/assistant text, thinking, tool calls). */
