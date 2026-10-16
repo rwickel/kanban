@@ -10,7 +10,7 @@
 // through the running server's own ctx.session client, so no extra
 // `opencode serve` and no port or password is needed for delegation.
 
-import { callingSessionId, cliResult, jsonResult, runCli, toolError } from "./core.js"
+import { callingSessionId, cliResult, jsonResult, ocBase, ocH, runCli, toolError } from "./core.js"
 import { delegateTool, messageToTool } from "./delegate.js"
 
 // Optional arguments are expressed by leaving the key out of `required`,
@@ -45,7 +45,21 @@ export default {
         options: { namespace: "kanban" },
         execute: async () => {
           try {
-            const response = await ctx.client.provider.list()
+            // OpenCode client versions expose this endpoint differently. Keep
+            // the native client path, then use the stable HTTP endpoint when
+            // the installed client has no provider namespace.
+            let response
+            if (typeof ctx.client?.provider?.list === "function") {
+              response = await ctx.client.provider.list()
+            } else if (typeof ctx.client?.model?.list === "function") {
+              response = await ctx.client.model.list()
+            } else {
+              const httpResponse = await fetch(`${ocBase()}/model`, {
+                headers: Object.fromEntries(Object.entries(ocH()).filter(([, value]) => value !== undefined)),
+              })
+              if (!httpResponse.ok) throw new Error(`model endpoint returned HTTP ${httpResponse.status}`)
+              response = await httpResponse.json()
+            }
             const data = response?.data ?? response
             return jsonResult(Array.isArray(data) ? data : [])
           } catch (error) {
@@ -380,21 +394,23 @@ export default {
       editor.add({
         name: "kanban_message_to",
         description:
-          "Send a follow-up question into an EXISTING subtask session (same thread, no new task) and WAIT for the next assistant message — returns {sessionId, taskId, resultText}. Use after delegate when you want to ask more in the same session. Pass sessionId (from a delegate return) or taskId (resolves to its sessionId).",
+          "Send a follow-up into an existing subtask session. Fire-and-forget by default. The answer is queued into the calling parent chat. Pass wait:true only when an immediate tool result is required.",
         input: {
           type: "object",
           properties: {
             sessionId: str("Subtask session id (from a delegate return). Either this or taskId."),
             taskId: str("Subtask id — resolves to its sessionId. Either this or sessionId."),
             text: str("Follow-up question/instruction for the teammate"),
-            timeoutSec: { type: "number", description: "Max seconds to wait (default 120, cap 600)" },
-            pollMs: { type: "number", description: "Poll interval in ms (default 1500)" },
+            parentSessionId: str("Override the answer destination (default: this calling session)"),
+            timeoutSec: { type: "number", description: "Max seconds to monitor the answer (default 120, cap 600)" },
+            pollMs: { type: "number", description: "Answer poll interval in ms (default 1500)" },
+            wait: { type: "boolean", description: "Return the answer directly when true. Default false." },
           },
           required: ["text"],
           additionalProperties: false,
         },
         options: { namespace: "kanban" },
-        execute: async (input: any) => messageToTool(input, ctx),
+        execute: async (input: any, context: any) => messageToTool(input, context, ctx),
       })
     })
   },

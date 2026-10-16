@@ -320,30 +320,66 @@ async function detectStuckTool(ctx, sessionId, lastNotifiedAt, taskId) {
   }
 }
 
-/** Ask an existing subtask session a follow-up and wait for its next answer. */
-export async function messageToTool(args, ctx) {
+/** Ask an existing subtask session and queue its answer to the parent by default. */
+export async function messageToTool(args, context, ctx) {
   const text = (args.text || "").trim()
   if (!text) toolError("text required")
 
   let sessionId = (args.sessionId || "").trim()
-  const taskId = args.taskId || null
+  let taskId = args.taskId || null
+  let taskRow = null
 
   if (!sessionId && taskId) {
     const row = runCli(["task", "show", taskId])
     if (!row.ok) toolError(row.text)
-    sessionId = (parseJson(row.text)?.sessionId || "").trim()
+    taskRow = parseJson(row.text)
+    sessionId = (taskRow?.sessionId || "").trim()
     if (!sessionId) toolError(`task ${taskId} has no sessionId yet`)
   }
   if (!sessionId) toolError("sessionId or taskId required")
 
+  if (!taskRow) {
+    const listed = runCli(["task", "list", "--json"])
+    const rows = listed.ok ? parseJson(listed.text) : []
+    taskRow = Array.isArray(rows) ? rows.find((row) => row?.sessionId === sessionId) || null : null
+    if (!taskId) taskId = taskRow?.id || null
+  }
+
   const timeoutMs = clamp(args.timeoutSec, 15, 600, 120) * 1000
   const interval = clamp(args.pollMs, 1000, 10000, 1500)
+  const shouldWait = args.wait === true
+  const parentSessionId = (args.parentSessionId || context?.sessionID || taskRow?.parentSessionId || "").trim()
 
   try {
     const before = await listMessages(ctx, sessionId, 20)
     const beforeId = before[0]?.id ?? null
 
     await ctx.session.prompt({ sessionID: sessionId, text })
+
+    if (!shouldWait) {
+      void (async () => {
+        const deadline = Date.now() + timeoutMs
+        for (;;) {
+          await waitForIdle(ctx, sessionId, Math.min(interval, Math.max(deadline - Date.now(), 1000)))
+          const list = await listMessages(ctx, sessionId, 30)
+          const fresh = list.find((m) => m?.id && m.id !== beforeId && assistantText(m))
+          if (fresh) {
+            if (!parentSessionId || parentSessionId === sessionId) return
+            const full = assistantText(fresh)
+            const result = full.length > 4000 ? full.slice(0, 4000) : full
+            const title = String(taskRow?.title || "(unknown task)").slice(0, 200)
+            await ctx.session.prompt({
+              sessionID: parentSessionId,
+              text: `[Board] Subtask follow-up update:\n- "${title}" returned a follow-up answer.\n  Task ID: ${taskId || "(missing)"}\n  Session ID: ${sessionId}\n  Answer: ${result}\n\nReport the task title, task ID, session ID, and answer. Start no new work unless asked.`,
+              delivery: "queue",
+            })
+            return
+          }
+          if (Date.now() >= deadline) return
+        }
+      })().catch(() => {})
+      return jsonResult({ sessionId, taskId, waited: false, parentSessionId })
+    }
 
     const deadline = Date.now() + timeoutMs
     for (;;) {
