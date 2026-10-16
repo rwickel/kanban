@@ -68,6 +68,52 @@ export default {
         },
       })
 
+      editor.add({
+        name: "kanban_update_project_models",
+        description:
+          "Replace a project's allowed model list after checking it against the current OpenCode model list. Pass an empty array to remove the restriction.",
+        input: {
+          type: "object",
+          properties: {
+            projectId: str("Project uuid"),
+            allowedModels: {
+              type: "array",
+              items: { type: "string" },
+              description: "Current provider/model pairs to allow; [] means unrestricted",
+            },
+          },
+          required: ["projectId", "allowedModels"],
+          additionalProperties: false,
+        },
+        options: { namespace: "kanban" },
+        execute: async (input: any) => {
+          if (!Array.isArray(input.allowedModels)) return toolError("allowedModels must be an array")
+          const requested = input.allowedModels.map((value: unknown) => String(value).trim()).filter(Boolean)
+          if (requested.some((value: string) => !value.includes("/") || value.startsWith("/") || value.endsWith("/"))) {
+            return toolError("allowedModels must contain provider/model pairs")
+          }
+
+          try {
+            const response = await fetch(`${ocBase()}/model`, {
+              headers: Object.fromEntries(Object.entries(ocH()).filter(([, value]) => value !== undefined)),
+            })
+            if (!response.ok) throw new Error(`model endpoint returned HTTP ${response.status}`)
+            const payload = await response.json()
+            const models = Array.isArray(payload) ? payload : (payload?.data ?? [])
+            const available = new Set(models.map((model: any) => `${model.providerID}/${model.modelID}`))
+            const invalid = requested.filter((value: string) => !available.has(value))
+            if (invalid.length > 0) return toolError(`invalid or unavailable models: ${invalid.join(", ")}`)
+
+            const argv = ["project", "update", input.projectId, "--actor", "agent"]
+            if (requested.length === 0) argv.push("--clear-allowed-models")
+            else for (const model of requested) argv.push("--allowed-model", model)
+            return cliResult(runCli(argv))
+          } catch (error) {
+            return toolError(`failed to validate or update project models: ${error instanceof Error ? error.message : String(error)}`)
+          }
+        },
+      })
+
       // --- boards ---------------------------------------------------------
 
       editor.add({

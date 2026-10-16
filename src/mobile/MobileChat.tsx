@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Agent, OpenCodeModelInfo, Project, Task } from '../types';
 import { sendPrompt, interruptSession, answerTool, fetchModels } from '../api/opencode';
 import { ensureAssistantSession, clearAssistantSession, readAssistantSessionId, readAssistantAgentPref, readAssistantModelPref, saveAssistantPrefs } from '../store/assistantSession';
+import { isModelAllowed } from '../store/modelResolution';
 import { useSessionStream } from '../hooks/useSessionStream';
 import { useSpeechInput } from '../hooks/useSpeechInput';
 import { useAutoContinue } from '../hooks/useAutoContinue';
@@ -53,7 +54,7 @@ export default function MobileChat({
   const [selectedAgentId, setSelectedAgentId] = useState<string>(() =>
     isAssistant ? readAssistantAgentPref(project!.id) : '');
   const [selectedModel, setSelectedModel] = useState<string>(() =>
-    isAssistant ? readAssistantModelPref(project!.id) : '');
+    isAssistant ? readAssistantModelPref(project!.id, project) : '');
   const [models, setModels] = useState<OpenCodeModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
@@ -163,15 +164,17 @@ export default function MobileChat({
   useEffect(() => {
     if (isAssistant) {
       setSelectedAgentId(readAssistantAgentPref(project!.id));
-      setSelectedModel(readAssistantModelPref(project!.id));
+      setSelectedModel(readAssistantModelPref(project!.id, project));
       void loadModels();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project?.id]);
 
   const filteredModels = models.filter((m) => {
+    const key = `${m.providerID}/${m.modelID}`;
+    if (!isModelAllowed(key, project?.allowedModels)) return false;
     const query = modelSearch.trim().toLowerCase();
-    return !query || `${m.providerID}/${m.modelID} ${m.name ?? ''}`.toLowerCase().includes(query);
+    return !query || `${key} ${m.name ?? ''}`.toLowerCase().includes(query);
   });
 
   const handleStop = async () => {
@@ -249,7 +252,7 @@ export default function MobileChat({
     if (isAssistant) saveAssistantPrefs(project.id, selectedAgentId, selectedModel);
     const res = await ensureAssistantSession(project, {
       agentId: isAssistant ? selectedAgentId : readAssistantAgentPref(project.id),
-      model: isAssistant ? selectedModel : readAssistantModelPref(project.id),
+      model: isAssistant ? selectedModel : readAssistantModelPref(project.id, project),
     });
     setCreating(false);
     if (!res.id) {

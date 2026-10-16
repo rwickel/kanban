@@ -22,6 +22,7 @@ import {
   readAssistantSessionId,
   saveAssistantPrefs,
 } from '../store/assistantSession';
+import { isModelAllowed } from '../store/modelResolution';
 
 interface AssistantChatWindowProps {
   project: Project | null;
@@ -42,7 +43,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
   });
   const [selectedModel, setSelectedModel] = useState<string>(() => {
     if (!project) return '';
-    return readAssistantModelPref(project.id);
+    return readAssistantModelPref(project.id, project);
   });
   const [models, setModels] = useState<OpenCodeModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -149,7 +150,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
     if (!project) return;
     setSessionId(readAssistantSessionId(project.id));
     setSelectedAgentId(readAssistantAgentPref(project.id));
-    setSelectedModel(readAssistantModelPref(project.id));
+    setSelectedModel(readAssistantModelPref(project.id, project));
     loadModels();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project?.id]);
@@ -162,8 +163,10 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
   };
 
   const filteredModels = models.filter((m) => {
+    const key = `${m.providerID}/${m.modelID}`;
+    if (!isModelAllowed(key, project?.allowedModels)) return false;
     const query = modelSearch.trim().toLowerCase();
-    return !query || `${m.providerID}/${m.modelID} ${m.name ?? ''}`.toLowerCase().includes(query);
+    return !query || `${key} ${m.name ?? ''}`.toLowerCase().includes(query);
   });
 
   useEffect(() => {

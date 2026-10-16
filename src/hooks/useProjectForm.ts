@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
-import { FolderGitInfo, Project } from '../types';
+import { FolderGitInfo, OpenCodeModelInfo, Project } from '../types';
 import { getFolderGit, getRoots } from '../store/kanban';
+import { normalizeAllowedModels } from '../store/modelResolution';
+import { fetchModels } from '../api/opencode';
 
 export const FOLDER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
@@ -11,9 +13,12 @@ export interface ProjectFormData {
   gitUrl?: string;
   gitBranch?: string;
   mkdir?: boolean;
+  /** Models usable in this project ("providerID/modelID").
+   *  Empty array = no restriction (every server model available). */
+  allowedModels?: string[];
 }
 
-/** Shared project form state + folder/git loading. One config, desktop + mobile. */
+/** Shared project form state + folder/git/model loading. One config, desktop + mobile. */
 export function useProjectForm(project?: Project | null) {
   const [name, setName] = useState(project?.name ?? '');
   const [description, setDescription] = useState(project?.description ?? '');
@@ -29,6 +34,27 @@ export function useProjectForm(project?: Project | null) {
   const [gitInfo, setGitInfo] = useState<FolderGitInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Models usable in this project; [] = no restriction.
+  const [allowedModels, setAllowedModels] = useState<string[]>(() =>
+    normalizeAllowedModels(project?.allowedModels)
+  );
+  const [models, setModels] = useState<OpenCodeModelInfo[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+
+  /** Load the provider model list. Never throws — a failed fetch keeps the
+   *  current selection (and its stale entries) instead of wiping it. */
+  const loadModels = async () => {
+    setModelsLoading(true);
+    setModelsError(null);
+    try {
+      const list = await fetchModels();
+      setModels(list);
+      if (list.length === 0) setModelsError('model list unavailable — check the OpenCode server');
+    } finally {
+      setModelsLoading(false);
+    }
+  };
 
   const loadRoots = async () => {
     setLoading(true);
@@ -51,6 +77,7 @@ export function useProjectForm(project?: Project | null) {
     setFolder(p?.folder ?? '');
     setGitUrl(p?.gitUrl ?? '');
     setGitBranch(p?.gitBranch ?? 'main');
+    setAllowedModels(normalizeAllowedModels(p?.allowedModels));
     setNewMode(false);
     setNewFolder('');
     setCloneUrl('');
@@ -98,6 +125,7 @@ export function useProjectForm(project?: Project | null) {
     gitUrl: (newMode ? cloneUrl.trim() : gitUrl.trim()) || undefined,
     gitBranch: gitBranch.trim() || 'main',
     mkdir: newMode,
+    allowedModels: normalizeAllowedModels(allowedModels),
   });
 
   return {
@@ -108,6 +136,7 @@ export function useProjectForm(project?: Project | null) {
     gitUrl, setGitUrl, cloneUrl, setCloneUrl,
     branches, gitBranch, setGitBranch, gitInfo,
     loading, error, loadRoots, reset,
+    allowedModels, setAllowedModels, models, modelsLoading, modelsError, loadModels,
     effectiveFolder, folderValid, isNewOutsideList, resolvedPath,
     toData,
   };

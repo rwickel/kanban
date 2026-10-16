@@ -10,6 +10,7 @@ export type QueuedOp =
   | {
       qid: string; kind: 'create'; at: number;
       clientId: string; projectId: string; title: string; description: string; acceptanceCriteria?: string;
+      blockedByTaskIds?: string[];
       priority: TaskPriority;
       agentId?: string; agentName?: string; sessionId?: string;
       modelId?: string; modelProviderID?: string;

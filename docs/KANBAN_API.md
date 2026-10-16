@@ -149,20 +149,30 @@ Returns `Project[]`:
   "gitBranch": "main",
   "description": "test project for testing the kanban app",
   "agentIds": [],
+  "allowedModels": ["ollama/gemma4:e2b", "openai/gpt-5"],
   "createdAt": "2026-10-09T12:07:17.765559+00:00"
 }
 ```
+
+`allowedModels[]` is the list of models usable in this project
+(`providerID/modelID`, sourced from `GET /api/kanban/oc/model`).
+An **empty** array means *no restriction* — every model the OpenCode server
+offers is available. The list constrains which models can be picked for tasks
+and sessions in this project; an explicit per-task model always wins at run time.
 
 ### `POST /api/kanban/projects`
 
 Body: `name` required; optional `folder` (preferred) or legacy `path`
 (must sit inside `KANBAN_PROJECTS_ROOT`), `gitUrl`, `gitBranch`,
-`noMkdir`, `description`, `id`, `agentIds[]`.
+`noMkdir`, `description`, `id`, `agentIds[]`, `allowedModels[]`
+(`["providerID/modelID", …]`; omit or send `[]` for no restriction).
 
 ### `PATCH` / `PUT /api/kanban/projects/:id`
 
 Optional `name`, `folder` (re-derives `path`) or `path`, `gitUrl`,
-`gitBranch`, `description`, `agentIds[]`.
+`gitBranch`, `description`, `agentIds[]`, `allowedModels[]`
+(sends the whole list, replacing the stored one; `[]` clears the restriction,
+omitting the field leaves it unchanged).
 
 ### `DELETE /api/kanban/projects/:id`
 

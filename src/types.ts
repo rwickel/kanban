@@ -26,6 +26,10 @@ export interface Task {
   /** Delivery ledger: ISO timestamp when the finished result was queued back
    *  into the parent session (null = not yet delivered, keep retrying). */
   notifiedAt?: string | null;
+  /** Predecessor task ids that must be `done` before this task may start.
+   *  Empty/absent = no dependencies (existing tasks stay compatible).
+   *  Server rejects unknown ids, self-references and cycles. */
+  blockedByTaskIds?: string[];
   /** Queued offline, not yet confirmed by the server. Cleared on next server echo. */
   pendingSync?: boolean;
   projectId: string;
@@ -45,6 +49,10 @@ export interface Project {
   gitBranch?: string;
   description: string;
   agentIds: string[];
+  /** Models usable in this project ("providerID/modelID").
+   *  Empty/absent = no restriction (every model available to the OpenCode server).
+   *  Replaces the former single default model (`modelId`/`modelProviderID`). */
+  allowedModels?: string[] | null;
   createdAt: string;
 }
 

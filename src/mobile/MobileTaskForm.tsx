@@ -3,6 +3,7 @@ import { Task, TaskPriority, Agent, OpenCodeModelInfo } from '../types';
 import { X, RefreshCw } from 'lucide-react';
 import { fetchModels } from '../api/opencode';
 import { getTaskModelPref, saveTaskModelPref } from '../store/serverConfig';
+import { formatModelRef, isModelAllowed, resolveSessionModel } from '../store/modelResolution';
 
 // Copied field-by-field from TaskModal. Desktop TaskModal must not change.
 export type MobileTaskFormData = {
@@ -23,11 +24,14 @@ export default function MobileTaskForm({
   availableAgents,
   onClose,
   onSave,
+  allowedModels,
 }: {
   task?: Task | null;
   availableAgents: Agent[];
   onClose: () => void;
   onSave: (data: MobileTaskFormData) => void;
+  /** Models the active project allows ("providerID/modelID"). Empty/absent = no restriction. */
+  allowedModels?: string[] | null;
 }) {
   const [title, setTitle] = useState(task?.title ?? '');
   const [description, setDescription] = useState(task?.description ?? '');
@@ -36,8 +40,11 @@ export default function MobileTaskForm({
   const [selectedAgentId, setSelectedAgentId] = useState(task?.agentId ?? '');
   const [models, setModels] = useState<OpenCodeModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
-  const [selectedModel, setSelectedModel] = useState(
-    task?.modelId && task?.modelProviderID ? `${task.modelProviderID}/${task.modelId}` : (task?.modelId ?? '')
+  const [modelSearch, setModelSearch] = useState('');
+  // Same order as session creation: task pick → browser pref when allowed →
+  // the project's first allowed model → nothing (server default).
+  const [selectedModel, setSelectedModel] = useState(() =>
+    formatModelRef(resolveSessionModel(task, { allowedModels }, getTaskModelPref()))
   );
 
   const loadModels = async () => {
@@ -49,6 +56,16 @@ export default function MobileTaskForm({
   };
 
   useState(() => { void loadModels(); });
+
+  const query = modelSearch.trim().toLowerCase();
+  const visibleModels = models.filter((m) => {
+    const key = `${m.providerID}/${m.modelID}`;
+    if (!isModelAllowed(key, allowedModels)) return false;
+    return !query || `${key} ${m.name ?? ''}`.toLowerCase().includes(query);
+  });
+  // A stored pick outside the pool stays visible (and changeable) instead of vanishing.
+  const selectedOutsidePool = !!selectedModel && !isModelAllowed(selectedModel, allowedModels);
+  const poolSize = (allowedModels ?? []).length;
 
   const prioCls: Record<TaskPriority, string> = {
     low: 'p-green', medium: 'p-blue', high: 'p-amber', critical: 'p-red',
@@ -141,7 +158,7 @@ export default function MobileTaskForm({
           </div>
           <select id="mt-model" value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)} className="input mono">
             <option value="">Server default</option>
-            {models.map((m, idx) => {
+            {visibleModels.map((m, idx) => {
               const key = `${m.providerID}/${m.modelID}`;
               return (
                 <option key={`${key}__${idx}`} value={key}>
@@ -149,7 +166,17 @@ export default function MobileTaskForm({
                 </option>
               );
             })}
+            {selectedOutsidePool && (
+              <option value={selectedModel}>{selectedModel} (not allowed in this project)</option>
+            )}
           </select>
+          <input value={modelSearch} onChange={(e) => setModelSearch(e.target.value)}
+            placeholder="Search models…" className="input mono" style={{ marginTop: 6 }} />
+          {poolSize > 0 && (
+            <p className="m-hint" style={{ color: 'var(--amber)' }}>
+              {poolSize} model{poolSize === 1 ? '' : 's'} allowed in this project — pick from that list or change it in Project settings.
+            </p>
+          )}
         </div>
 
         <div className="m-overlay-foot">

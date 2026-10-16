@@ -1,19 +1,13 @@
 import { useEffect } from 'react';
 import { Project } from '../types';
 import { X, RefreshCw, FolderOpen, GitBranch } from 'lucide-react';
-import { useProjectForm } from '../hooks/useProjectForm';
+import { useProjectForm, ProjectFormData } from '../hooks/useProjectForm';
+import ModelPoolPicker from './ModelPoolPicker';
 
 interface ProjectModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (data: {
-    name: string;
-    folder: string;
-    description: string;
-    gitUrl?: string;
-    gitBranch?: string;
-    mkdir?: boolean;
-  }) => void;
+  onSave: (data: ProjectFormData) => void;
   project?: Project | null;
 }
 
@@ -24,6 +18,7 @@ export default function ProjectModal({ isOpen, onClose, onSave, project }: Proje
     if (!isOpen) return;
     f.reset(project);
     void f.loadRoots();
+    void f.loadModels();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project, isOpen]);
 
@@ -161,6 +156,17 @@ export default function ProjectModal({ isOpen, onClose, onSave, project }: Proje
               placeholder="Brief description of the project..." rows={3}
               className="w-full px-3 py-2.5 bg-gray-800 border border-gray-700 rounded-xl text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 transition-all resize-none" />
           </div>
+
+          {/* Models usable in this project — provider list + model checkboxes.
+              Empty selection = no restriction (every server model). */}
+          <ModelPoolPicker
+            models={f.models}
+            selected={f.allowedModels}
+            onChange={f.setAllowedModels}
+            loading={f.modelsLoading}
+            error={f.modelsError}
+            onRefresh={() => { void f.loadModels(); }}
+          />
 
           <div className="flex items-center justify-end gap-3 pt-2">
             <button type="button" onClick={onClose}

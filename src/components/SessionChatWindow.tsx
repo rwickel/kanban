@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { Task } from '../types';
 import { answerTool, sendPrompt, interruptSession, fetchModels } from '../api/opencode';
+import { isModelAllowed } from '../store/modelResolution';
 import { useSessionStream } from '../hooks/useSessionStream';
 import { chatToMarkdown } from './chatEvents';
 import { STATUS_DOT, ThinkingBlock, ToolRow, ChatBubble, ChatErrorRow, ReviewTarget } from './ChatFeed';
@@ -26,6 +27,7 @@ export default function SessionChatWindow({ task, onClose, standalone, onTaskCli
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelSearch, setModelSearch] = useState('');
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [allowedModels, setAllowedModels] = useState<string[] | null>(null);
   const [selectedModel, setSelectedModel] = useState(() => task?.modelProviderID && task?.modelId ? `${task.modelProviderID}/${task.modelId}` : '');
   const { messages, status, outcome, sessionError, retry } = useSessionStream(sessionId, {
     taskAgentName: task?.agentName ?? null,
@@ -39,9 +41,25 @@ export default function SessionChatWindow({ task, onClose, standalone, onTaskCli
     setModels(await fetchModels());
     setModelsLoading(false);
   };
+  // The picker only offers models the task's project allows. Looked up by id so
+  // the pop-out window (no board state around it) filters the same way.
+  useEffect(() => {
+    let live = true;
+    if (!task?.projectId) { setAllowedModels(null); return; }
+    import('../store/kanban')
+      .then(({ getProjects }) => getProjects())
+      .then((list) => {
+        if (!live) return;
+        setAllowedModels(list.find((p) => p.id === task.projectId)?.allowedModels ?? null);
+      })
+      .catch(() => { if (live) setAllowedModels(null); });
+    return () => { live = false; };
+  }, [task?.projectId]);
   const filteredModels = models.filter((m) => {
+    const key = `${m.providerID}/${m.modelID}`;
+    if (!isModelAllowed(key, allowedModels)) return false;
     const query = modelSearch.trim().toLowerCase();
-    return !query || `${m.providerID}/${m.modelID} ${m.name ?? ''}`.toLowerCase().includes(query);
+    return !query || `${key} ${m.name ?? ''}`.toLowerCase().includes(query);
   });
   const changeModel = (value: string) => {
     setSelectedModel(value);

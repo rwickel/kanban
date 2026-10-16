@@ -11,6 +11,7 @@ import {
 import type { Project } from '../types';
 import { readSpeechLang } from '../hooks/usePreferences';
 import { getTaskModelPref } from './serverConfig';
+import { isModelAllowed, normalizeAllowedModels } from './modelResolution';
 
 const SESSION_PREFIX = 'kanban_assistant_session_';
 const AGENT_PREFIX = 'kanban_assistant_agent_';
@@ -32,13 +33,17 @@ export function readAssistantAgentPref(projectId: string): string {
   try { return localStorage.getItem(`${AGENT_PREFIX}${projectId}`) || ''; } catch { return ''; }
 }
 
-// Model preference: per-project pick first, then the board-wide task model.
-export function readAssistantModelPref(projectId: string): string {
+// Model preference: per-project pick first, then the board-wide task model —
+// both only if the project allows them; otherwise the project's pool decides.
+export function readAssistantModelPref(projectId: string, project?: Pick<Project, 'allowedModels' | 'id'> | null): string {
+  const pool = project && project.id === projectId ? project.allowedModels : null;
   try {
     const stored = localStorage.getItem(`${MODEL_PREFIX}${projectId}`);
-    if (stored) return stored;
+    if (stored && isModelAllowed(stored, pool)) return stored;
     const pref = getTaskModelPref();
-    return pref ? `${pref.providerID}/${pref.modelID}` : '';
+    const board = pref ? `${pref.providerID}/${pref.modelID}` : '';
+    if (isModelAllowed(board, pool)) return board;
+    return normalizeAllowedModels(pool)[0] ?? '';
   } catch { return ''; }
 }
 
@@ -102,7 +107,7 @@ export function ensureAssistantSession(
   const pending = inflight.get(project.id);
   if (pending) return pending;
   const agentId = opts?.agentId ?? readAssistantAgentPref(project.id);
-  const model = opts?.model ?? readAssistantModelPref(project.id);
+  const model = opts?.model ?? readAssistantModelPref(project.id, project);
   const p = createFor(project, agentId, model).finally(() => inflight.delete(project.id));
   inflight.set(project.id, p);
   return p;

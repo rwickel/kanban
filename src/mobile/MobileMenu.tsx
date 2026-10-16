@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Project } from '../types';
 import { FolderOpen, GitBranch, RefreshCw, X } from 'lucide-react';
+import ModelPoolPicker from '../components/ModelPoolPicker';
 import {
   setActiveProjectId as persistActiveProjectId,
   deleteProject,
@@ -26,6 +27,7 @@ export function ProjectDialog({
     setBusy(false);
     setError(null);
     void f.loadRoots();
+    void f.loadModels();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project?.id]);
 
@@ -167,6 +169,16 @@ export function ProjectDialog({
           <textarea id="mp-desc" className="input resize-none" rows={3} value={f.description}
             onChange={(e) => f.setDescription(e.target.value)} placeholder="Optional description" />
         </div>
+
+        {/* Models usable in this project — provider list + model checkboxes. */}
+        <ModelPoolPicker
+          models={f.models}
+          selected={f.allowedModels}
+          onChange={f.setAllowedModels}
+          loading={f.modelsLoading}
+          error={f.modelsError}
+          onRefresh={() => { void f.loadModels(); }}
+        />
         {error && <p className="m-hint" style={{ color: 'var(--danger)' }}>{error}</p>}
         <div className="m-overlay-foot">
           {project && (

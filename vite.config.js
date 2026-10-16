@@ -42,6 +42,29 @@ async function cli(args) {
   return JSON.parse((stdout || "null").trim() || "null");
 }
 
+async function validateTaskModel(projectId, provider, model) {
+  if (!provider && !model) return;
+  if (!provider || !model) throw Object.assign(new Error("modelId and modelProviderID must be provided together"), { status: 400 });
+  const projects = await cli(["project", "list", "--json"]);
+  const project = (projects || []).find((p) => p.id === projectId);
+  if (!project) throw Object.assign(new Error("project not found"), { status: 404 });
+  const base = (process.env.OPENCODE_SERVER_URL || "http://localhost:4096").replace(/\/+$/, "");
+  const response = await fetch(`${base}/api/model`, {
+    headers: process.env.OPENCODE_SERVER_PASSWORD
+      ? { Authorization: `Basic ${Buffer.from(`opencode:${process.env.OPENCODE_SERVER_PASSWORD}`).toString("base64")}` }
+      : {},
+  });
+  if (!response.ok) throw Object.assign(new Error(`model endpoint returned HTTP ${response.status}`), { status: 502 });
+  const payload = await response.json();
+  const models = Array.isArray(payload) ? payload : (payload?.data || []);
+  const key = `${provider}/${model}`;
+  if (!models.some((entry) => `${entry.providerID}/${entry.modelID}` === key))
+    throw Object.assign(new Error(`model is not available: ${key}`), { status: 400 });
+  const allowed = Array.isArray(project.allowedModels) ? project.allowedModels : [];
+  if (allowed.length && !allowed.includes(key))
+    throw Object.assign(new Error(`model is not allowed by project: ${key}`), { status: 400 });
+}
+
 function readBody(req) {
   return new Promise((resolve) => {
     let data = "";
@@ -624,8 +647,9 @@ function kanbanDocs() {
     routes: [
       { method: "GET", path: "/api/kanban/tasks", query: "projectId?, status=backlog|running|done|blocked?", returns: "Task[]" },
       { method: "GET", path: "/api/kanban/tasks/:id", returns: "Task (404 when missing)" },
-      { method: "POST", path: "/api/kanban/tasks", body: "projectId*, title*, description?, status?, priority?, id?, agentId?, agentName?, sessionId?, modelId?, modelProviderID?, startupPhase?, startupError?, parentSessionId?, result?, resultContext?", returns: "Task" },
-      { method: "PATCH", path: "/api/kanban/tasks/:id", body: "title?, description?, status?, priority?, agentId?, agentName?, sessionId?, modelId?, modelProviderID?, startupPhase?, startupError?, parentSessionId?, result?, resultContext?", returns: "Task" },
+      { method: "POST", path: "/api/kanban/tasks", body: "projectId*, title*, description?, status?, priority?, id?, agentId?, agentName?, sessionId?, modelId?, modelProviderID?, startupPhase?, startupError?, parentSessionId?, result?, resultContext?, blockedByTaskIds?[]", returns: "Task" },
+      { method: "PATCH", path: "/api/kanban/tasks/:id", body: "title?, description?, status?, priority?, agentId?, agentName?, sessionId?, modelId?, modelProviderID?, startupPhase?, startupError?, parentSessionId?, result?, resultContext?, blockedByTaskIds?[] (array replaces, [] clears)", returns: "Task" },
+      { method: "GET", path: "/api/kanban/tasks/:id/dependencies", returns: "{id, status, blockedByTaskIds[], predecessors[{id,exists,status,title,done}], dependents[], ready}" },
       { method: "DELETE", path: "/api/kanban/tasks/:id", returns: "{ok:true,deleted}" },
       { method: "GET", path: "/api/kanban/projects", returns: "Project[]" },
       { method: "POST", path: "/api/kanban/projects", body: "name*, folder?|path?, gitUrl?, gitBranch?, noMkdir?, description?, id?, agentIds[]?", returns: "Project" },
@@ -672,6 +696,7 @@ function kanbanOpenApi() {
       parentSessionId: { type: ["string", "null"] },
       result: { type: ["string", "null"] },
       resultContext: { type: ["string", "null"] },
+      blockedByTaskIds: { type: "array", items: { type: "string", format: "uuid" }, description: "Predecessor task ids that must be done first. Self-references, unknown ids, foreign-project ids and cycles are rejected with 400." },
       createdAt: { type: "string", format: "date-time" },
       updatedAt: { type: "string", format: "date-time" },
     },
@@ -726,7 +751,7 @@ function kanbanOpenApi() {
         },
         post: {
           summary: "Create task",
-          requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["projectId", "title"], properties: { projectId: { type: "string" }, title: { type: "string" }, description: { type: "string" }, status: { type: "string" }, priority: { type: "string" }, id: { type: "string" }, agentId: { type: "string" }, agentName: { type: "string" }, sessionId: { type: "string" }, modelId: { type: "string" }, modelProviderID: { type: "string" }, startupPhase: { type: "string" }, startupError: { type: "string" }, parentSessionId: { type: "string" }, result: { type: "string" }, resultContext: { type: "string" } } } } } },
+          requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["projectId", "title"], properties: { projectId: { type: "string" }, title: { type: "string" }, description: { type: "string" }, status: { type: "string" }, priority: { type: "string" }, id: { type: "string" }, agentId: { type: "string" }, agentName: { type: "string" }, sessionId: { type: "string" }, modelId: { type: "string" }, modelProviderID: { type: "string" }, startupPhase: { type: "string" }, startupError: { type: "string" }, parentSessionId: { type: "string" }, result: { type: "string" }, resultContext: { type: "string" }, blockedByTaskIds: { type: "array", items: { type: "string" } } } } } } },
           responses: { 200: { description: "Task", content: { "application/json": { schema: taskSchema } } }, 400: { description: "projectId and title required", content: { "application/json": { schema: errSchema } } } },
         },
       },
@@ -739,13 +764,20 @@ function kanbanOpenApi() {
         patch: {
           summary: "Update task",
           parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-          requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: { title: { type: "string" }, description: { type: "string" }, status: { type: "string" }, priority: { type: "string" }, agentId: { type: "string" }, agentName: { type: "string" }, sessionId: { type: "string" }, modelId: { type: "string" }, modelProviderID: { type: "string" }, startupPhase: { type: "string" }, startupError: { type: "string" }, parentSessionId: { type: "string" }, result: { type: "string" }, resultContext: { type: "string" } } } } } },
-          responses: { 200: { description: "Task", content: { "application/json": { schema: taskSchema } } }, 404: { description: "not found", content: { "application/json": { schema: errSchema } } } },
+          requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: { title: { type: "string" }, description: { type: "string" }, status: { type: "string" }, priority: { type: "string" }, agentId: { type: "string" }, agentName: { type: "string" }, sessionId: { type: "string" }, modelId: { type: "string" }, modelProviderID: { type: "string" }, startupPhase: { type: "string" }, startupError: { type: "string" }, parentSessionId: { type: "string" }, result: { type: "string" }, resultContext: { type: "string" }, blockedByTaskIds: { type: "array", items: { type: "string" } } } } } } },
+          responses: { 200: { description: "Task", content: { "application/json": { schema: taskSchema } } }, 400: { description: "invalid dependencies (unknown id, self-reference, cycle)", content: { "application/json": { schema: errSchema } } }, 404: { description: "not found", content: { "application/json": { schema: errSchema } } } },
         },
         delete: {
           summary: "Delete task",
           parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
           responses: { 200: { description: "{ok,deleted}", content: { "application/json": { schema: { type: "object" } } } } },
+        },
+      },
+      "/api/kanban/tasks/{id}/dependencies": {
+        get: {
+          summary: "Dependency relations of a task (predecessors, dependents, readiness)",
+          parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+          responses: { 200: { description: "{id,status,blockedByTaskIds,predecessors,dependents,ready}", content: { "application/json": { schema: { type: "object" } } } }, 404: { description: "not found", content: { "application/json": { schema: errSchema } } } },
         },
       },
       "/api/kanban/projects": {
@@ -889,6 +921,7 @@ function kanbanApi() {
             const b = await readBody(req);
             if (!b.projectId || !b.title)
               return json(res, 400, { ok: false, error: "projectId and title required" });
+            await validateTaskModel(b.projectId, b.modelProviderID, b.modelId);
             const argv = ["task", "create", "--project", b.projectId, "--title", b.title, "--actor", "board"];
             if (b.description) argv.push("--description", b.description);
             if (b.status) argv.push("--status", b.status);
@@ -905,11 +938,18 @@ function kanbanApi() {
             if (b.result !== undefined && b.result !== null) argv.push("--result", String(b.result));
             if (b.resultContext !== undefined && b.resultContext !== null) argv.push("--result-context", String(b.resultContext));
             if (b.acceptanceCriteria !== undefined && b.acceptanceCriteria !== null) argv.push("--acceptance-criteria", String(b.acceptanceCriteria));
+            if (b.blockedByTaskIds !== undefined && b.blockedByTaskIds !== null) {
+              argv.push("--blocked-by", Array.isArray(b.blockedByTaskIds) ? b.blockedByTaskIds.join(",") : String(b.blockedByTaskIds));
+            }
             return json(res, 200, await cli(argv));
           }
           // PATCH /api/kanban/tasks/:id {title?,status?,...} → Task
           if (req.method === "PATCH" && parts[0] === "tasks" && parts.length === 2) {
             const b = await readBody(req);
+            if (b.modelId !== undefined || b.modelProviderID !== undefined) {
+              const existing = await cli(["task", "show", parts[1]]);
+              await validateTaskModel(existing.projectId, b.modelProviderID, b.modelId);
+            }
             const argv = ["task", "update", parts[1], "--actor", "board"];
             for (const [flag, key] of [
               ["--title", "title"], ["--description", "description"],
@@ -924,7 +964,15 @@ function kanbanApi() {
             ]) {
               if (b[key] !== undefined && b[key] !== null) argv.push(flag, String(b[key]));
             }
+            // blockedByTaskIds: array replaces the list, [] clears it (server validates).
+            if (b.blockedByTaskIds !== undefined && b.blockedByTaskIds !== null) {
+              argv.push("--blocked-by", Array.isArray(b.blockedByTaskIds) ? b.blockedByTaskIds.join(",") : String(b.blockedByTaskIds));
+            }
             return json(res, 200, await cli(argv));
+          }
+          // GET /api/kanban/tasks/:id/dependencies → {id, blockedByTaskIds, predecessors, dependents, ready}
+          if (req.method === "GET" && parts[0] === "tasks" && parts.length === 3 && parts[2] === "dependencies") {
+            return json(res, 200, await cli(["task", "deps", parts[1]]));
           }
           // DELETE /api/kanban/tasks/:id → {ok:true}
           if (req.method === "DELETE" && parts[0] === "tasks" && parts.length === 2) {
@@ -946,12 +994,17 @@ function kanbanApi() {
             if (b.noMkdir) argv.push("--no-mkdir");
             if (b.description) argv.push("--description", b.description);
             if (b.id) argv.push("--id", b.id);
-            if (b.modelId) argv.push("--model-id", String(b.modelId));
-            if (b.modelProviderID) argv.push("--model-provider", String(b.modelProviderID));
+            // Allowed models — one scalar flag per entry (shell-quoting proof).
+            // An empty list means "no restriction", which create takes as default anyway.
+            if (b.allowedModels !== undefined && b.allowedModels !== null) {
+              const list = Array.isArray(b.allowedModels) ? b.allowedModels : [];
+              if (list.length === 0) argv.push("--clear-allowed-models");
+              else for (const m of list) argv.push("--allowed-model", String(m));
+            }
             for (const a of b.agentIds || []) argv.push("--agent-id", a);
             return json(res, 200, await cli(argv));
           }
-          // PATCH /api/kanban/projects/:id {name?,folder?,path?,gitUrl?,gitBranch?,description?,agentIds?} → Project
+          // PATCH /api/kanban/projects/:id {name?,folder?,path?,gitUrl?,gitBranch?,description?,agentIds?,allowedModels?} → Project
           if ((req.method === "PATCH" || req.method === "PUT") && parts[0] === "projects" && parts.length === 2) {
             const b = await readBody(req);
             const argv = ["project", "update", parts[1], "--actor", "board"];
@@ -961,9 +1014,12 @@ function kanbanApi() {
             if (b.gitUrl !== undefined) argv.push("--git-url", String(b.gitUrl || ""));
             if (b.gitBranch !== undefined) argv.push("--git-branch", String(b.gitBranch || "main"));
             if (b.description !== undefined) argv.push("--description", String(b.description));
-            // Default model: empty string clears (server stores NULL) — both halves or neither.
-            if (b.modelId !== undefined) argv.push("--model-id", String(b.modelId || ""));
-            if (b.modelProviderID !== undefined) argv.push("--model-provider", String(b.modelProviderID || ""));
+            // Allowed models — an empty list clears the restriction (server stores '[]').
+            if (b.allowedModels !== undefined && b.allowedModels !== null) {
+              const list = Array.isArray(b.allowedModels) ? b.allowedModels : [];
+              if (list.length === 0) argv.push("--clear-allowed-models");
+              else for (const m of list) argv.push("--allowed-model", String(m));
+            }
             for (const a of b.agentIds || []) argv.push("--agent-id", a);
             return json(res, 200, await cli(argv));
           }
@@ -999,6 +1055,7 @@ function kanbanApi() {
           if (req.method === "POST" && parts[0] === "delegate" && parts.length === 1) {
             const b = await readBody(req);
             try {
+              await validateTaskModel(b.projectId, b.modelProviderID, b.modelId);
               return json(res, 200, await delegateTask(b));
             } catch (err) {
               return json(res, (err && err.status) || 500, {
@@ -1211,6 +1268,9 @@ function kanbanApi() {
           return json(res, 404, { ok: false, error: "unknown kanban route" });
         } catch (err) {
           const msg = String(err?.stderr || err?.message || err);
+          // Dependency validation errors are user input problems → 400, not 500.
+          if (/^(Invalid blocked-by|Self-dependency rejected|Dependency cycle rejected|Too many blocked-by)/.test(msg.trim()))
+            return json(res, 400, { ok: false, error: msg });
           // Only map missing DB rows to 404 — git stderr often contains
           // "Repository not found", which is a 500 (clone failed), not a
           // missing route. Mapping it to 404 masks the real git error.

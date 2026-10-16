@@ -9,7 +9,8 @@ Clone model (NOT kanban.py's T-int model):
          agentId?, agentName?, sessionId?,
          modelId?, modelProviderID?,
          createdAt, updatedAt }
-  Project { id: uuid, name, path, description, agentIds[], createdAt }
+  Project { id: uuid, name, path, description, agentIds[],
+            allowedModels[] ("providerID/modelID", [] = unrestricted), createdAt }
 
 Storage: SQLite file shared between host, Vite dev server, and Docker
 via the /work bind mount:
@@ -20,12 +21,15 @@ Env override: KANBAN_DB (explicit file) or KANBAN_DATA_DIR (directory).
 Usage:
   python server/kanban.py init
   python server/kanban.py project create --name "X" --path "C:/..." [--id <uuid>]
+                                   [--allowed-model ollama/llama3 --allowed-model openai/gpt-5]
+                                   [--clear-allowed-models]
   python server/kanban.py project list
   python server/kanban.py task create --project <projectId> --title "T" [--description D] [--priority high] [--agent-id A] [--id <uuid>]
   python server/kanban.py task list --project <projectId> [--status running]
   python server/kanban.py task show <taskId>
-  python server/kanban.py task update <taskId> [--title T] [--description D] [--priority P] [--agent-id A] [--agent-name N] [--session-id S] [--model-id M] [--model-provider P]
+  python server/kanban.py task update <taskId> [--title T] [--description D] [--priority P] [--agent-id A] [--agent-name N] [--session-id S] [--model-id M] [--model-provider P] [--blocked-by "id1,id2"]
   python server/kanban.py task move <taskId> <backlog|running|done|blocked>
+  python server/kanban.py task deps <taskId>
   python server/kanban.py task delete <taskId>
   python server/kanban.py events list [--task <taskId>] [--limit 50]
 
@@ -81,8 +85,7 @@ CREATE TABLE IF NOT EXISTS projects (
     description TEXT NOT NULL DEFAULT '',
     acceptance_criteria TEXT,
     agent_ids TEXT NOT NULL DEFAULT '[]',
-    model_id TEXT,
-    model_provider_id TEXT,
+    allowed_models TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -105,6 +108,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     expected_sec INTEGER,
     progress TEXT NOT NULL DEFAULT '',
     parent_session_id TEXT,
+    blocked_by_task_ids TEXT NOT NULL DEFAULT '[]',
     result TEXT,
     result_context TEXT,
     notified_at TEXT,
@@ -155,6 +159,7 @@ def get_conn(db_path: Path) -> sqlite3.Connection:
         ("expected_sec", "INTEGER"),
         ("progress", "TEXT NOT NULL DEFAULT ''"),
         ("parent_session_id", "TEXT"),
+        ("blocked_by_task_ids", "TEXT NOT NULL DEFAULT '[]'"),
         ("result", "TEXT"),
         ("result_context", "TEXT"),
         ("acceptance_criteria", "TEXT"),
@@ -171,8 +176,7 @@ def get_conn(db_path: Path) -> sqlite3.Connection:
         ("folder", "TEXT NOT NULL DEFAULT ''"),
         ("git_url", "TEXT"),
         ("git_branch", "TEXT NOT NULL DEFAULT 'main'"),
-        ("model_id", "TEXT"),
-        ("model_provider_id", "TEXT"),
+        ("allowed_models", "TEXT"),
     ):
         if col not in pcols:
             conn.execute(f"ALTER TABLE projects ADD COLUMN {col} {ddl}")
@@ -268,12 +272,35 @@ def row_to_task(r: sqlite3.Row) -> dict:
         "expectedSec": r["expected_sec"] if "expected_sec" in keys else None,
         "progress": r["progress"] if "progress" in keys and r["progress"] else "",
         "parentSessionId": r["parent_session_id"] if "parent_session_id" in keys else None,
+        "blockedByTaskIds": parse_id_list(
+            r["blocked_by_task_ids"] if "blocked_by_task_ids" in keys else None
+        ),
         "result": r["result"] if "result" in keys else None,
         "resultContext": r["result_context"] if "result_context" in keys else None,
         "notifiedAt": r["notified_at"] if "notified_at" in keys else None,
         "createdAt": r["created_at"],
         "updatedAt": r["updated_at"],
     }
+
+
+def project_allowed_models(r) -> list:
+    """Models usable in this project — a JSON list of "providerID/modelID" in
+    allowed_models. An empty list means "no restriction".
+
+    Migration: rows written before allowed_models existed carry the old single
+    default (model_id + model_provider_id) instead. Seed the pool with that one
+    model so the choice survives the switch; as soon as allowed_models holds a
+    value — including '[]' — the legacy columns are ignored for good.
+    """
+    keys = r.keys()
+    raw = r["allowed_models"] if "allowed_models" in keys else None
+    if raw not in (None, ""):
+        return parse_id_list(raw)
+    mid = r["model_id"] if "model_id" in keys else None
+    mpid = r["model_provider_id"] if "model_provider_id" in keys else None
+    if mid and mpid:
+        return [f"{mpid}/{mid}"]
+    return []
 
 
 def row_to_project(r: sqlite3.Row) -> dict:
@@ -298,9 +325,8 @@ def row_to_project(r: sqlite3.Row) -> dict:
         "gitBranch": (r["git_branch"] if "git_branch" in keys and r["git_branch"] else "main"),
         "description": r["description"] or "",
         "agentIds": agent_ids,
-        # Default model for new tasks/sessions in this project (both halves or neither).
-        "modelId": r["model_id"] if "model_id" in keys else None,
-        "modelProviderID": r["model_provider_id"] if "model_provider_id" in keys else None,
+        # Models usable in this project ("providerID/modelID"). [] = unrestricted.
+        "allowedModels": project_allowed_models(r),
         "createdAt": r["created_at"],
     }
 
@@ -340,13 +366,141 @@ def require_kind(v) -> str:
     return v
 
 
-def norm_model_pair(model_id, model_provider):
-    """Default-model pair: both halves or neither. Empty string -> None (clear)."""
-    mid = (model_id or "").strip() or None
-    mpid = (model_provider or "").strip() or None
-    if bool(mid) != bool(mpid):
-        fail("Default model needs BOTH --model-id and --model-provider (or neither).")
-    return mid, mpid
+def norm_allowed_models(args, *, create=False):
+    """Resolve --allowed-model (repeatable) / --clear-allowed-models into the
+    column value.
+
+    Scalar-per-flag rather than one JSON blob so no shell can mangle it while
+    quoting the argument (PowerShell strips embedded double quotes).
+
+    Returns None when nothing was passed: on create that means "no restriction",
+    on update it means "leave the stored value alone".
+    """
+    items = getattr(args, "allowed_models", None)
+    clear = bool(getattr(args, "clear_allowed_models", False))
+    if items and clear:
+        fail("Pass either --allowed-model <provider/model> … or --clear-allowed-models, not both.")
+    if clear:
+        return "[]"
+    if items is None:
+        return "[]" if create else None
+    out = []
+    for it in items:
+        v = str(it).strip() if it is not None else ""
+        if not v:
+            continue  # --allowed-model "" also clears
+        idx = v.find("/")
+        if idx <= 0 or idx == len(v) - 1:
+            fail(f"Invalid model '{v}' — expected \"providerID/modelID\".")
+        if v not in out:
+            out.append(v)
+    return json.dumps(out)
+
+
+# ---------------- task dependencies (blockedByTaskIds) ----------------
+# A task lists the predecessor task ids that must be done before it can start.
+# Stored as a JSON array of uuid strings in tasks.blocked_by_task_ids.
+# Invariants enforced on every write:
+#   * ids are trimmed, deduplicated, capped (MAX_BLOCKED_BY)
+#   * every id exists, belongs to the SAME project, and is not the task itself
+#   * adding edges must not close a dependency cycle (A -> B -> A)
+
+MAX_BLOCKED_BY = 50
+
+
+def parse_id_list(raw) -> list:
+    """Accept a JSON array ('["a","b"]') or a comma list ('a,b') or a list.
+
+    Returns trimmed, de-duplicated id strings. Tolerates legacy/garbage rows
+    (NULL, "", broken JSON) by returning [].
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        items = list(raw)
+    elif isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return []
+        if s.startswith("["):
+            try:
+                items = json.loads(s)
+            except Exception:
+                return []
+            if not isinstance(items, list):
+                return []
+        else:
+            items = s.split(",")
+    else:
+        return []
+    out = []
+    for it in items:
+        s2 = str(it).strip() if it is not None else ""
+        if s2 and s2 not in out:
+            out.append(s2)
+    return out
+
+
+def load_blocked_map(conn) -> dict:
+    """{task_id: [predecessor ids]} over the whole store."""
+    out = {}
+    for r in conn.execute("SELECT id, blocked_by_task_ids FROM tasks").fetchall():
+        keys = r.keys()
+        if "blocked_by_task_ids" not in keys:
+            continue
+        out[r["id"]] = parse_id_list(r["blocked_by_task_ids"])
+    return out
+
+
+def require_blocked_by(conn, task_id, raw, project_id=None) -> list:
+    """Validate a blocked-by list. Fails hard on invalid/self/foreign ids."""
+    ids = parse_id_list(raw)
+    if len(ids) > MAX_BLOCKED_BY:
+        fail(f"Too many blocked-by ids ({len(ids)}). Max {MAX_BLOCKED_BY}.")
+    for dep in ids:
+        if dep == task_id:
+            fail(f"Self-dependency rejected: task {task_id} cannot be blocked by itself.")
+        row = conn.execute("SELECT id, project_id FROM tasks WHERE id = ?", (dep,)).fetchone()
+        if not row:
+            fail(f"Invalid blocked-by task id: {dep} (no such task)")
+        if project_id is not None and row["project_id"] != project_id:
+            fail(f"Invalid blocked-by task id: {dep} (must belong to the same project)")
+    return ids
+
+
+def find_dependency_cycle(conn, task_id, new_ids) -> list:
+    """Return the cycle path when the new edges close a loop, else None.
+
+    Edge direction: T -> each predecessor in blockedBy(T). Only edges OUT of
+    task_id change here, so any new cycle must pass back through task_id —
+    a DFS from task_id over the post-update graph is sufficient.
+    """
+    graph = load_blocked_map(conn)
+    graph[task_id] = list(new_ids)
+    seen = set()
+    stack = [(task_id, [task_id])]
+    while stack:
+        node, path = stack.pop()
+        for dep in graph.get(node, []):
+            if dep == task_id:
+                return path + [dep]
+            if dep in seen:
+                continue
+            seen.add(dep)
+            stack.append((dep, path + [dep]))
+    return None
+
+
+def scrub_dependency_refs(conn, gone_id: str):
+    """Drop gone_id from every other task's blocked-by list (referential cleanup)."""
+    graph = load_blocked_map(conn)
+    ts = now_iso()
+    for tid, deps in graph.items():
+        if tid != gone_id and gone_id in deps:
+            conn.execute(
+                "UPDATE tasks SET blocked_by_task_ids = ?, updated_at = ? WHERE id = ?",
+                (json.dumps([d for d in deps if d != gone_id]), ts, tid),
+            )
 
 
 # ---------------- CLI handlers ----------------
@@ -385,14 +539,12 @@ def cmd_project_create(args):
             fail(f"Invalid path '{raw_path}'. Must be inside {os.getenv('KANBAN_PROJECTS_ROOT')}, or pass --folder <name>.")
     else:
         fail("Missing folder. Pass --folder <name> (inside KANBAN_PROJECTS_ROOT).")
-    model_id, model_provider_id = norm_model_pair(
-        getattr(args, "model_id", None), getattr(args, "model_provider", None)
-    )
+    allowed_models = norm_allowed_models(args, create=True) or "[]"
     conn.execute(
-        "INSERT INTO projects (id, name, path, folder, git_url, git_branch, description, agent_ids, model_id, model_provider_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO projects (id, name, path, folder, git_url, git_branch, description, agent_ids, allowed_models, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (pid, args.name, path, folder, getattr(args, "git_url", None),
          getattr(args, "git_branch", None) or "main",
-         args.description or "", json.dumps(args.agent_ids or []), model_id, model_provider_id, now_iso()),
+         args.description or "", json.dumps(args.agent_ids or []), allowed_models, now_iso()),
     )
     log_event(conn, None, args.actor, "project.created", {"id": pid, "name": args.name, "folder": folder})
     conn.commit()
@@ -431,11 +583,11 @@ def cmd_project_update(args):
         sets.append("git_branch = ?"); params.append(args.git_branch or "main")
     if args.agent_ids is not None:
         sets.append("agent_ids = ?"); params.append(json.dumps(args.agent_ids))
-    # Default model: both halves or neither; empty string clears (server default).
-    if getattr(args, "model_id", None) is not None or getattr(args, "model_provider", None) is not None:
-        mid, mpid = norm_model_pair(args.model_id, args.model_provider)
-        sets.append("model_id = ?"); params.append(mid)
-        sets.append("model_provider_id = ?"); params.append(mpid)
+    # Allowed models: JSON array of "providerID/modelID"; clearing it makes
+    # every model usable again.
+    allowed = norm_allowed_models(args)
+    if allowed is not None:
+        sets.append("allowed_models = ?"); params.append(allowed)
     if not sets:
         fail("Nothing to update.")
     params.append(args.project_id)
@@ -535,6 +687,10 @@ def cmd_task_create(args):
     status = require_status(args.status or "backlog")
     priority = require_priority(args.priority or "medium")
     kind = require_kind(getattr(args, "kind", None) or "oneshot")
+    # Dependencies: validated against the store (existence + project + no self).
+    # A brand-new row cannot close a cycle yet, so only id checks run here.
+    blocked_raw = getattr(args, "blocked_by", None)
+    blocked_ids = require_blocked_by(conn, tid, blocked_raw, project_id=args.project) if blocked_raw is not None else []
     expected = getattr(args, "expected_sec", None)
     ts = now_iso()
     conn.execute(
@@ -543,8 +699,9 @@ def cmd_task_create(args):
                               startup_phase, startup_error, kind, heartbeat_at,
                               expected_sec, progress, parent_session_id,
                                result, result_context, acceptance_criteria,
+                              blocked_by_task_ids,
                               created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (tid, args.project, args.title, args.description or "", status, priority,
          args.agent_id, args.agent_name, args.session_id,
          args.model_id, args.model_provider,
@@ -553,6 +710,7 @@ def cmd_task_create(args):
          getattr(args, "parent_session_id", None),
           getattr(args, "result", None), getattr(args, "result_context", None),
           getattr(args, "acceptance_criteria", None),
+         json.dumps(blocked_ids),
          ts, ts),
     )
     log_event(conn, tid, args.actor, "task.created",
@@ -644,6 +802,21 @@ def cmd_task_update(args):
             changes["expected_sec"] = int(args.expected_sec)
         except (TypeError, ValueError):
             fail(f"Invalid --expected-sec '{args.expected_sec}'. Must be an integer (seconds).")
+    # Dependencies: --blocked-by "a,b" replaces the list; "" clears it.
+    if getattr(args, "blocked_by", None) is not None:
+        raw = args.blocked_by
+        if isinstance(raw, str) and not raw.strip():
+            blocked_ids = []
+        else:
+            blocked_ids = require_blocked_by(
+                conn, args.task_id, raw, project_id=row["project_id"]
+            )
+        cycle = find_dependency_cycle(conn, args.task_id, blocked_ids)
+        if cycle:
+            fail("Dependency cycle rejected: " + " -> ".join(cycle))
+        sets.append("blocked_by_task_ids = ?")
+        params.append(json.dumps(blocked_ids))
+        changes["blockedByTaskIds"] = blocked_ids
     if not sets:
         fail("Nothing to update. Pass --title/--description/--status/--priority/...")
     sets.append("updated_at = ?")
@@ -682,11 +855,43 @@ def cmd_task_move(args):
     conn.close()
 
 
+def cmd_task_deps(args):
+    """Read a task's dependency relations: predecessors, dependents, readiness."""
+    conn = get_conn(args.db)
+    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (args.task_id,)).fetchone()
+    if not row:
+        fail(f"Task not found: {args.task_id}")
+    graph = load_blocked_map(conn)
+    blocked_by = graph.get(args.task_id, [])
+    preds = []
+    for dep in blocked_by:
+        d = conn.execute("SELECT status, title FROM tasks WHERE id = ?", (dep,)).fetchone()
+        preds.append({
+            "id": dep,
+            "exists": bool(d),
+            "status": d["status"] if d else None,
+            "title": d["title"] if d else None,
+            "done": bool(d) and d["status"] == "done",
+        })
+    dependents = sorted(tid for tid, deps in graph.items() if args.task_id in deps)
+    print(json.dumps({
+        "id": args.task_id,
+        "status": row["status"],
+        "blockedByTaskIds": blocked_by,
+        "predecessors": preds,
+        "dependents": dependents,
+        "ready": all(p["done"] for p in preds),
+    }, indent=2))
+    conn.close()
+
+
 def cmd_task_delete(args):
     conn = get_conn(args.db)
     row = conn.execute("SELECT * FROM tasks WHERE id = ?", (args.task_id,)).fetchone()
     if not row:
         fail(f"Task not found: {args.task_id}")
+    # Referential cleanup: other tasks must not keep pointing at a dead id.
+    scrub_dependency_refs(conn, args.task_id)
     conn.execute("DELETE FROM tasks WHERE id = ?", (args.task_id,))
     log_event(conn, None, args.actor, "task.deleted",
               {"id": args.task_id, "title": row["title"]})
@@ -846,8 +1051,10 @@ def main(argv=None):
     pc.add_argument("--description", default="")
     pc.add_argument("--id", default=None)
     pc.add_argument("--agent-id", dest="agent_ids", action="append", default=[])
-    pc.add_argument("--model-id", default=None, help="Default model id for new tasks (needs --model-provider).")
-    pc.add_argument("--model-provider", default=None, help="Default model provider for new tasks (needs --model-id).")
+    pc.add_argument("--allowed-model", dest="allowed_models", action="append", default=None, metavar="MODEL",
+                    help='Model usable in this project, as providerID/modelID. Repeat the flag to allow several; omit for no restriction.')
+    pc.add_argument("--clear-allowed-models", action="store_true",
+                    help="Drop any model restriction (every server model is usable).")
     pc.add_argument("--actor", default="cli")
     pc.set_defaults(func=cmd_project_create)
     pl = psub.add_parser("list", help="List projects.")
@@ -862,8 +1069,10 @@ def main(argv=None):
     pu.add_argument("--git-branch", default=None)
     pu.add_argument("--description", default=None)
     pu.add_argument("--agent-id", dest="agent_ids", action="append", default=None)
-    pu.add_argument("--model-id", default=None, help="Default model id (empty string clears; needs --model-provider).")
-    pu.add_argument("--model-provider", default=None, help="Default model provider (empty string clears; needs --model-id).")
+    pu.add_argument("--allowed-model", dest="allowed_models", action="append", default=None, metavar="MODEL",
+                    help='Model usable in this project, as providerID/modelID. Repeat to allow several; replaces the stored list.')
+    pu.add_argument("--clear-allowed-models", action="store_true",
+                    help="Drop any model restriction (every server model is usable).")
     pu.add_argument("--actor", default="cli")
     pu.set_defaults(func=cmd_project_update)
     pd = psub.add_parser("delete", help="Delete project + its tasks.")
@@ -911,6 +1120,7 @@ def main(argv=None):
     tc.add_argument("--result", default=None, help="Task result: last message + context on done/blocked")
     tc.add_argument("--result-context", default=None, help="Extra context for the task result")
     tc.add_argument("--acceptance-criteria", default=None, help="Optional acceptance criteria")
+    tc.add_argument("--blocked-by", default=None, help="Comma-separated predecessor task ids that must be done first (validated: exists, same project, no self/cycle)")
     tc.add_argument("--actor", default="cli")
     tc.set_defaults(func=cmd_task_create)
 
@@ -945,6 +1155,7 @@ def main(argv=None):
     tu.add_argument("--result", default=None)
     tu.add_argument("--result-context", default=None)
     tu.add_argument("--acceptance-criteria", default=None)
+    tu.add_argument("--blocked-by", default=None, help="Comma-separated predecessor ids; '' clears the list (validated: exists, same project, no self/cycle)")
     tu.add_argument("--actor", default="cli")
     tu.set_defaults(func=cmd_task_update)
 
@@ -954,6 +1165,10 @@ def main(argv=None):
     tm.add_argument("--comment", default=None)
     tm.add_argument("--actor", default="cli")
     tm.set_defaults(func=cmd_task_move)
+
+    tb = tsub.add_parser("deps", help="Show dependency relations (blocked-by, dependents, readiness).")
+    tb.add_argument("task_id")
+    tb.set_defaults(func=cmd_task_deps)
 
     td = tsub.add_parser("delete", help="Delete task.")
     td.add_argument("task_id")

@@ -3,6 +3,7 @@ import { Task, TaskPriority, Agent, OpenCodeModelInfo } from '../types';
 import { X, RefreshCw } from 'lucide-react';
 import { fetchModels } from '../api/opencode';
 import { getTaskModelPref, saveTaskModelPref } from '../store/serverConfig';
+import { formatModelRef, isModelAllowed, resolveSessionModel } from '../store/modelResolution';
 
 interface TaskModalProps {
   isOpen: boolean;
@@ -21,9 +22,12 @@ interface TaskModalProps {
   }) => void;
   task?: Task | null;
   availableAgents: Agent[];
+  /** Models the active project allows ("providerID/modelID").
+   *  Empty/absent = no restriction. */
+  allowedModels?: string[] | null;
 }
 
-export default function TaskModal({ isOpen, onClose, onSave, task, availableAgents }: TaskModalProps) {
+export default function TaskModal({ isOpen, onClose, onSave, task, availableAgents, allowedModels }: TaskModalProps) {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [acceptanceCriteria, setAcceptanceCriteria] = useState('');
@@ -47,11 +51,6 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
       setSelectedAgentId(task.agentId || '');
       setResult(task.result || '');
       setResultContext(task.resultContext || '');
-      setSelectedModel(
-        task.modelId && task.modelProviderID
-          ? `${task.modelProviderID}/${task.modelId}`
-          : task.modelId || ''
-      );
     } else {
       setTitle('');
       setDescription('');
@@ -60,9 +59,10 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
       setSelectedAgentId('');
       setResult('');
       setResultContext('');
-      const pref = getTaskModelPref();
-      setSelectedModel(pref ? `${pref.providerID}/${pref.modelID}` : '');
     }
+    // Same order as session creation: task pick → browser pref when the project
+    // allows it → the project's first allowed model → nothing (server default).
+    setSelectedModel(formatModelRef(resolveSessionModel(task, { allowedModels }, getTaskModelPref())));
     loadModels();
   }, [task, isOpen]);
 
@@ -74,9 +74,14 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
   };
 
   const filteredModels = models.filter((m) => {
+    const key = `${m.providerID}/${m.modelID}`;
+    if (!isModelAllowed(key, allowedModels)) return false;
     const query = modelSearch.trim().toLowerCase();
-    return !query || `${m.providerID}/${m.modelID} ${m.name ?? ''}`.toLowerCase().includes(query);
+    return !query || `${key} ${m.name ?? ''}`.toLowerCase().includes(query);
   });
+  // A stored pick outside the pool stays visible (and changeable) instead of vanishing.
+  const selectedOutsidePool = !!selectedModel && !isModelAllowed(selectedModel, allowedModels);
+  const poolSize = (allowedModels ?? []).length;
 
   if (!isOpen) return null;
 
@@ -175,6 +180,9 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
                   </option>
                 );
               })}
+              {selectedOutsidePool && (
+                <option value={selectedModel}>{selectedModel} (not allowed in this project)</option>
+              )}
             </select>
             <input value={modelSearch} onChange={(e) => setModelSearch(e.target.value)}
               placeholder="Search models..." className="input mono mt-1.5" />
@@ -182,6 +190,11 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
             <p className="text-[11px] muted mt-1">
               Passed as <span className="mono">model: {"{ providerID, modelID }"}</span> when the session is created — so the build worker stops falling back to the global default.
             </p>
+            {poolSize > 0 && (
+              <p className="text-[11px] text-amber-400/90 mt-1">
+                {poolSize} model{poolSize === 1 ? '' : 's'} allowed in this project — pick from that list or change it in Project settings.
+              </p>
+            )}
           </div>
           <div>
             <label className="block text-[12px] font-medium t-soft mb-1">Result <span className="muted font-normal">(last message + context, on done/blocked)</span></label>

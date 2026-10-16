@@ -39,6 +39,7 @@ import { useOfflineSync } from './hooks/useOfflineSync';
 import OfflineBanner from './components/OfflineBanner';
 import { fetchAgents, createSession, sendPrompt, getServerInfo, putSessionInstruction } from './api/opencode';
 import { getTaskModelPref } from './store/serverConfig';
+import { resolveSessionModel, normalizeAllowedModels, isModelAllowed, formatModelRef } from './store/modelResolution';
 import { ensureAssistantSession } from './store/assistantSession';
 import KanbanColumn, { columnIcons } from './components/KanbanColumn';
 import TaskModal from './components/TaskModal';
@@ -552,16 +553,19 @@ export default function App() {
       } catch { /* offline — skip branch check */ }
     }
 
-    // Model: task-level pick → saved default → omit (server default).
+    // Model: task pick → allowed pref → project pool → omit (server default).
     // OpenAPI Model.Ref is { providerID, id } — NOT { providerID, modelID }.
+    // Order lives in resolveSessionModel() (shared with the mobile start path).
     const pref = getTaskModelPref();
-    const raw =
-      task.modelProviderID && task.modelId
-        ? { providerID: task.modelProviderID, modelID: task.modelId }
-        : pref
-          ? pref
-          : undefined;
-    const model = raw ? { providerID: raw.providerID, id: raw.modelID } : undefined;
+    const resolvedModel = resolveSessionModel(task, project, pref);
+    const model = resolvedModel ? { providerID: resolvedModel.providerID, id: resolvedModel.modelID } : undefined;
+    // Where the pick came from — only feeds the stale-model hint below.
+    const pool = normalizeAllowedModels(project?.allowedModels);
+    const modelSource = (task.modelProviderID && task.modelId)
+      ? 'task'
+      : pref && isModelAllowed(`${pref.providerID}/${pref.modelID}`, pool)
+        ? 'pref'
+        : pool.length ? 'project' : 'none';
 
     // Reuse existing session if the task already has one, otherwise create it.
     let sessionId = task.sessionId;
@@ -571,8 +575,11 @@ export default function App() {
       const res = await createSession({ title: task.title, agent: resolved.id ?? resolved.name, model, directory });
       const session = res.session;
       if (!session?.id) {
+        const staleHint = (modelSource === 'project' && /model|unknown|invalid/i.test(res.error ?? ''))
+          ? `\nThe project's allowed model ${formatModelRef(resolvedModel)} may no longer exist — update it in Project settings.` : undefined;
         const msg = [
           res.error ?? 'Failed to create session — no id returned.',
+          staleHint,
           !isConnected ? 'Server is offline (DEMO mode). Open Server settings, Save & test the connection.' : undefined,
         ].filter(Boolean).join(' ');
         await fail(msg, task.id);
@@ -878,7 +885,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [popoutSessionId]);
 
-  const handleSaveProject = async (data: { name: string; folder: string; description: string; gitUrl?: string; gitBranch?: string; mkdir?: boolean }) => {
+  const handleSaveProject = async (data: { name: string; folder: string; description: string; gitUrl?: string; gitBranch?: string; mkdir?: boolean; allowedModels?: string[] }) => {
     const targetId = editingProject?.id ?? null;
     const folder = data.folder.trim();
     try {
@@ -1264,6 +1271,7 @@ export default function App() {
         onSave={handleSaveTask}
         task={editingTask}
         availableAgents={availableAgents}
+        allowedModels={activeProject?.allowedModels}
       />
 
       <ProjectModal

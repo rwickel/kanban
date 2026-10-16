@@ -19,6 +19,7 @@ import {
 } from '../store/kanban';
 import { fetchAgents, createSession, sendPrompt, getServerInfo, putSessionInstruction } from '../api/opencode';
 import { getTaskModelPref } from '../store/serverConfig';
+import { resolveSessionModel } from '../store/modelResolution';
 import { ensureAssistantSession } from '../store/assistantSession';
 import { isQueuedOffline } from '../store/offlineQueue';
 import { useOfflineSync } from '../hooks/useOfflineSync';
@@ -201,11 +202,9 @@ export function useBoardData() {
     }
     const activeProj = projects.find((p) => p.id === task.projectId);
     const directory = activeProj?.path?.trim() || undefined;
-    const pref = getTaskModelPref();
-    const raw = task.modelProviderID && task.modelId
-      ? { providerID: task.modelProviderID, modelID: task.modelId }
-      : pref ? pref : undefined;
-    const model = raw ? { providerID: raw.providerID, id: raw.modelID } : undefined;
+    // Model: task pick → allowed pref → project pool → omit (server default).
+    const resolvedModel = resolveSessionModel(task, activeProj, getTaskModelPref());
+    const model = resolvedModel ? { providerID: resolvedModel.providerID, id: resolvedModel.modelID } : undefined;
 
     let sessionId = task.sessionId;
     if (!sessionId) {

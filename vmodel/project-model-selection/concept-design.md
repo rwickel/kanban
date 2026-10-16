@@ -1,5 +1,10 @@
 # Concept and Design — Project Model Selection
 
+> **Superseded** by `vmodel/project-allowed-models/concept-design.md`.
+> The single default model (`Project.modelId` / `modelProviderID`, resolution
+> level 2, the two-dropdown picker) was replaced by a *pool* of models usable in
+> the project (`Project.allowedModels`). Kept for history only.
+
 ## Problem
 
 Model choice today exists only at the *task* level (`Task.modelId` / `Task.modelProviderID`, picked in

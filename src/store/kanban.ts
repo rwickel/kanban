@@ -7,6 +7,8 @@
 import { Task, Project, TaskStatus, TaskPriority } from '../types';
 import { v4 as uuidv4 } from 'uuid';
 import { enqueue, listOps, removeOp, isNetworkError, QueuedOfflineError } from './offlineQueue';
+import { normalizeAllowedModels } from './modelResolution';
+import { validateBlockedBy, normalizeBlockedBy } from './dependencies';
 
 const LS_TASKS = 'kanban_tasks';
 const LS_PROJECTS = 'kanban_projects';
@@ -95,7 +97,7 @@ export async function getProjects(): Promise<Project[]> {
 }
 
 export async function createProject(name: string, path: string, description: string, extra?: {
-  gitUrl?: string; gitBranch?: string; mkdir?: boolean;
+  gitUrl?: string; gitBranch?: string; mkdir?: boolean; allowedModels?: string[];
 }): Promise<Project> {
   // Preserve id client-side so UI can route immediately.
   // path may be a folder name ("Bridge-Server") or absolute path inside the root.
@@ -105,6 +107,8 @@ export async function createProject(name: string, path: string, description: str
   if (extra?.gitUrl !== undefined) body.gitUrl = extra.gitUrl;
   if (extra?.gitBranch !== undefined) body.gitBranch = extra.gitBranch;
   if (extra?.mkdir !== undefined) body.noMkdir = !extra.mkdir;
+  // Allowed models — [] is meaningful (no restriction), so send it as-is.
+  if (extra?.allowedModels !== undefined) body.allowedModels = extra.allowedModels;
   const project = await api<Project>('/api/kanban/projects', {
     method: 'POST',
     body: JSON.stringify(body),
@@ -129,6 +133,8 @@ export async function updateProject(id: string, updates: Partial<Project>): Prom
     if (updates.gitUrl !== undefined) body.gitUrl = updates.gitUrl;
     if (updates.gitBranch !== undefined) body.gitBranch = updates.gitBranch;
     if (updates.agentIds !== undefined) body.agentIds = updates.agentIds;
+    // Allowed models — [] clears the restriction; undefined leaves it untouched.
+    if (updates.allowedModels !== undefined) body.allowedModels = normalizeAllowedModels(updates.allowedModels);
     const updated = await api<Project>(`/api/kanban/projects/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       body: JSON.stringify(body),
@@ -170,6 +176,11 @@ export async function deleteProject(id: string): Promise<void> {
 }
 
 // ---- tasks ----
+/** Fetch a single task by id (server truth; throws on network/404). */
+export async function getTask(id: string): Promise<Task> {
+  return api<Task>(`/api/kanban/tasks/${encodeURIComponent(id)}`);
+}
+
 export async function getTasks(projectId?: string): Promise<Task[]> {
   try {
     const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : '';
@@ -225,16 +236,19 @@ export async function createTask(
   result?: string,
   resultContext?: string,
   clientId?: string,
-  acceptanceCriteria?: string
+  acceptanceCriteria?: string,
+  blockedByTaskIds?: string[]
 ): Promise<Task> {
   // Client-generated id: offline replays reuse it, so a retried POST
   // either creates the row or fails "already exists" (safe to skip).
   const id = clientId ?? uuidv4();
+  const blockedBy = validateBlockedBy(id, blockedByTaskIds ?? []);
   const payload: Record<string, unknown> = {
     id, projectId, title, description,
     status: 'backlog', priority,
     agentId, agentName, sessionId, modelId, modelProviderID,
     result, resultContext, acceptanceCriteria,
+    blockedByTaskIds: blockedBy,
   };
   try {
     return await postTaskRaw(payload);
@@ -242,21 +256,26 @@ export async function createTask(
     if (!isNetworkError(e)) throw e;
     enqueue({
       kind: 'create', clientId: id, projectId, title, description, priority,
-      acceptanceCriteria,
+      acceptanceCriteria, blockedByTaskIds: blockedBy,
       agentId, agentName, sessionId, modelId, modelProviderID,
     });
     const now = new Date().toISOString();
     mergeTaskCache({
       id, projectId, title, description, status: 'backlog', priority,
       agentId, agentName, sessionId, modelId, modelProviderID,
-      acceptanceCriteria, pendingSync: true, createdAt: now, updatedAt: now,
+      acceptanceCriteria, blockedByTaskIds: blockedBy, pendingSync: true, createdAt: now, updatedAt: now,
     });
     throw new QueuedOfflineError('Offline — task queued, syncs on reconnect.', id);
   }
 }
 
 export async function updateTask(id: string, updates: Partial<Task>): Promise<Task | null> {
-  const clean = sanitizeUpdates(updates);
+  let clean = sanitizeUpdates(updates);
+  // Dependency writes get the same guards as the server (self/cycle) up front.
+  if (clean.blockedByTaskIds !== undefined) {
+    const known = lsGet<Task[]>(LS_TASKS, []);
+    clean = { ...clean, blockedByTaskIds: validateBlockedBy(id, clean.blockedByTaskIds, known) };
+  }
   try {
     return await patchTaskRaw(id, clean);
   } catch (e) {
@@ -288,6 +307,7 @@ export async function replayOfflineQueue(): Promise<{ synced: number; remaining:
             agentId: op.agentId, agentName: op.agentName, sessionId: op.sessionId,
              modelId: op.modelId, modelProviderID: op.modelProviderID,
              acceptanceCriteria: op.acceptanceCriteria,
+             blockedByTaskIds: op.blockedByTaskIds ?? [],
           });
         } else {
           await patchTaskRaw(op.id, op.updates);
@@ -327,6 +347,45 @@ export async function getTasksByProject(projectId: string): Promise<Task[]> {
 
 export async function getTasksByStatus(projectId: string, status: TaskStatus): Promise<Task[]> {
   return (await getTasks(projectId)).filter((t) => t.status === status);
+}
+
+// ---- task dependencies (blockedByTaskIds) ----
+export interface TaskDependencies {
+  id: string;
+  status: TaskStatus;
+  blockedByTaskIds: string[];
+  predecessors: Array<{ id: string; exists: boolean; status: TaskStatus | null; title: string | null; done: boolean }>;
+  dependents: string[];
+  ready: boolean;
+}
+
+/** Read one task's dependency relations from the server. */
+export async function getTaskDependencies(taskId: string): Promise<TaskDependencies> {
+  return api<TaskDependencies>(`/api/kanban/tasks/${encodeURIComponent(taskId)}/dependencies`);
+}
+
+/**
+ * Replace the full predecessor list (empty array clears).
+ * Server re-validates existence/self/cycle; client guards catch the obvious
+ * cases before the round trip. Queues like any other update when offline.
+ */
+export async function setTaskBlockedBy(taskId: string, blockedByTaskIds: string[]): Promise<Task | null> {
+  return updateTask(taskId, { blockedByTaskIds });
+}
+
+/** Add one predecessor (read-modify-write against the server truth). */
+export async function addTaskBlockedBy(taskId: string, dependsOnId: string): Promise<Task | null> {
+  if (dependsOnId === taskId) throw new Error(`A task cannot be blocked by itself: ${taskId}`);
+  const current = await getTask(taskId);
+  const next = normalizeBlockedBy([...(current.blockedByTaskIds ?? []), dependsOnId]);
+  return updateTask(taskId, { blockedByTaskIds: next });
+}
+
+/** Remove one predecessor (no-op when absent). */
+export async function removeTaskBlockedBy(taskId: string, dependsOnId: string): Promise<Task | null> {
+  const current = await getTask(taskId);
+  const next = normalizeBlockedBy((current.blockedByTaskIds ?? []).filter((id) => id !== dependsOnId));
+  return updateTask(taskId, { blockedByTaskIds: next });
 }
 
 // ---- message_to: follow-up in the SAME session (no new task) ----
@@ -406,7 +465,7 @@ export async function cloneRepo(url: string, folder: string, branch?: string): P
 
 /** Shared save path: clone-then-create on new projects, update otherwise. Desktop + mobile. */
 export async function saveProject(
-  data: { name: string; folder: string; description: string; gitUrl?: string; gitBranch?: string; mkdir?: boolean },
+  data: { name: string; folder: string; description: string; gitUrl?: string; gitBranch?: string; mkdir?: boolean; allowedModels?: string[] },
   existingId?: string | null,
 ): Promise<Project | null> {
   const folder = data.folder.trim();
@@ -421,6 +480,7 @@ export async function saveProject(
     gitUrl: data.gitUrl,
     gitBranch: data.gitBranch,
   };
+  if (data.allowedModels !== undefined) payload.allowedModels = normalizeAllowedModels(data.allowedModels);
   if (existingId) {
     return updateProject(existingId, payload);
   }
@@ -428,6 +488,7 @@ export async function saveProject(
     gitUrl: data.gitUrl,
     gitBranch: data.gitBranch,
     mkdir: data.mkdir,
+    allowedModels: data.allowedModels !== undefined ? normalizeAllowedModels(data.allowedModels) : undefined,
   });
   // createProject stores the link; patch again if server dropped git fields.
   if ((data.gitUrl || data.gitBranch) && (!created.gitUrl || !created.gitBranch)) {

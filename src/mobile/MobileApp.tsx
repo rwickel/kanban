@@ -168,6 +168,7 @@ export default function MobileApp() {
         <MobileTaskForm
           task={formEditing}
           availableAgents={availableAgents}
+          allowedModels={activeProject?.allowedModels}
           onClose={() => { setFormOpen(false); setFormEditing(null); }}
           onSave={(data: MobileTaskFormData) => {
             void handleSave(data, formEditing ?? undefined);
