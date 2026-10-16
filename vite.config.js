@@ -946,6 +946,8 @@ function kanbanApi() {
             if (b.noMkdir) argv.push("--no-mkdir");
             if (b.description) argv.push("--description", b.description);
             if (b.id) argv.push("--id", b.id);
+            if (b.modelId) argv.push("--model-id", String(b.modelId));
+            if (b.modelProviderID) argv.push("--model-provider", String(b.modelProviderID));
             for (const a of b.agentIds || []) argv.push("--agent-id", a);
             return json(res, 200, await cli(argv));
           }
@@ -959,6 +961,9 @@ function kanbanApi() {
             if (b.gitUrl !== undefined) argv.push("--git-url", String(b.gitUrl || ""));
             if (b.gitBranch !== undefined) argv.push("--git-branch", String(b.gitBranch || "main"));
             if (b.description !== undefined) argv.push("--description", String(b.description));
+            // Default model: empty string clears (server stores NULL) — both halves or neither.
+            if (b.modelId !== undefined) argv.push("--model-id", String(b.modelId || ""));
+            if (b.modelProviderID !== undefined) argv.push("--model-provider", String(b.modelProviderID || ""));
             for (const a of b.agentIds || []) argv.push("--agent-id", a);
             return json(res, 200, await cli(argv));
           }

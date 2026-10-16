@@ -81,6 +81,8 @@ CREATE TABLE IF NOT EXISTS projects (
     description TEXT NOT NULL DEFAULT '',
     acceptance_criteria TEXT,
     agent_ids TEXT NOT NULL DEFAULT '[]',
+    model_id TEXT,
+    model_provider_id TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -169,6 +171,8 @@ def get_conn(db_path: Path) -> sqlite3.Connection:
         ("folder", "TEXT NOT NULL DEFAULT ''"),
         ("git_url", "TEXT"),
         ("git_branch", "TEXT NOT NULL DEFAULT 'main'"),
+        ("model_id", "TEXT"),
+        ("model_provider_id", "TEXT"),
     ):
         if col not in pcols:
             conn.execute(f"ALTER TABLE projects ADD COLUMN {col} {ddl}")
@@ -294,6 +298,9 @@ def row_to_project(r: sqlite3.Row) -> dict:
         "gitBranch": (r["git_branch"] if "git_branch" in keys and r["git_branch"] else "main"),
         "description": r["description"] or "",
         "agentIds": agent_ids,
+        # Default model for new tasks/sessions in this project (both halves or neither).
+        "modelId": r["model_id"] if "model_id" in keys else None,
+        "modelProviderID": r["model_provider_id"] if "model_provider_id" in keys else None,
         "createdAt": r["created_at"],
     }
 
@@ -333,6 +340,15 @@ def require_kind(v) -> str:
     return v
 
 
+def norm_model_pair(model_id, model_provider):
+    """Default-model pair: both halves or neither. Empty string -> None (clear)."""
+    mid = (model_id or "").strip() or None
+    mpid = (model_provider or "").strip() or None
+    if bool(mid) != bool(mpid):
+        fail("Default model needs BOTH --model-id and --model-provider (or neither).")
+    return mid, mpid
+
+
 # ---------------- CLI handlers ----------------
 
 def cmd_init(args):
@@ -369,11 +385,14 @@ def cmd_project_create(args):
             fail(f"Invalid path '{raw_path}'. Must be inside {os.getenv('KANBAN_PROJECTS_ROOT')}, or pass --folder <name>.")
     else:
         fail("Missing folder. Pass --folder <name> (inside KANBAN_PROJECTS_ROOT).")
+    model_id, model_provider_id = norm_model_pair(
+        getattr(args, "model_id", None), getattr(args, "model_provider", None)
+    )
     conn.execute(
-        "INSERT INTO projects (id, name, path, folder, git_url, git_branch, description, agent_ids, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO projects (id, name, path, folder, git_url, git_branch, description, agent_ids, model_id, model_provider_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (pid, args.name, path, folder, getattr(args, "git_url", None),
          getattr(args, "git_branch", None) or "main",
-         args.description or "", json.dumps(args.agent_ids or []), now_iso()),
+         args.description or "", json.dumps(args.agent_ids or []), model_id, model_provider_id, now_iso()),
     )
     log_event(conn, None, args.actor, "project.created", {"id": pid, "name": args.name, "folder": folder})
     conn.commit()
@@ -412,6 +431,11 @@ def cmd_project_update(args):
         sets.append("git_branch = ?"); params.append(args.git_branch or "main")
     if args.agent_ids is not None:
         sets.append("agent_ids = ?"); params.append(json.dumps(args.agent_ids))
+    # Default model: both halves or neither; empty string clears (server default).
+    if getattr(args, "model_id", None) is not None or getattr(args, "model_provider", None) is not None:
+        mid, mpid = norm_model_pair(args.model_id, args.model_provider)
+        sets.append("model_id = ?"); params.append(mid)
+        sets.append("model_provider_id = ?"); params.append(mpid)
     if not sets:
         fail("Nothing to update.")
     params.append(args.project_id)
@@ -822,6 +846,8 @@ def main(argv=None):
     pc.add_argument("--description", default="")
     pc.add_argument("--id", default=None)
     pc.add_argument("--agent-id", dest="agent_ids", action="append", default=[])
+    pc.add_argument("--model-id", default=None, help="Default model id for new tasks (needs --model-provider).")
+    pc.add_argument("--model-provider", default=None, help="Default model provider for new tasks (needs --model-id).")
     pc.add_argument("--actor", default="cli")
     pc.set_defaults(func=cmd_project_create)
     pl = psub.add_parser("list", help="List projects.")
@@ -836,6 +862,8 @@ def main(argv=None):
     pu.add_argument("--git-branch", default=None)
     pu.add_argument("--description", default=None)
     pu.add_argument("--agent-id", dest="agent_ids", action="append", default=None)
+    pu.add_argument("--model-id", default=None, help="Default model id (empty string clears; needs --model-provider).")
+    pu.add_argument("--model-provider", default=None, help="Default model provider (empty string clears; needs --model-id).")
     pu.add_argument("--actor", default="cli")
     pu.set_defaults(func=cmd_project_update)
     pd = psub.add_parser("delete", help="Delete project + its tasks.")
