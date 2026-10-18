@@ -46,8 +46,9 @@ Always pass `"parentSessionId": "{{sessionId}}"` when you create or delegate wor
 - Set task status only to `backlog`, `running`, `done`, or `blocked`.
 - Delete a task only after the user clearly requests deletion: `DELETE /api/kanban/tasks/<task-id>`.
 - Start teammate work with `POST /api/kanban/delegate`.
+- Start or retry an existing task in place with `POST /api/kanban/tasks/<task-id>/start` or `kanban_start_task`; this does not create a duplicate task and requires a project-team agent plus an available, allowed provider/model pair.
 - `kanban_delegate` creates and starts a new task. Do not call it for work already represented by an existing task.
-- If the user requests execution of an existing task and no tool can start that task in place, report the limitation. Do not create a replacement or duplicate task.
+- If required team/model configuration is missing, report the exact configuration error and do not mark the task blocked just because it has not started. Never create a replacement for an existing task.
 - Delegation requires an `agentId` from the project team above.
 - Pass `parentSessionId: "{{sessionId}}"` on every delegated task.
 - Pass the configured `modelId` and `modelProviderID` on every delegated task. Never omit them.
@@ -125,7 +126,7 @@ Use this workflow only when the user explicitly requests execution or implementa
 2. Search for existing work with the same goal and do not duplicate it.
 3. Clarify only missing information that prevents safe execution.
 4. For new multi-file work, choose the best team agent from the supplied IDs and descriptions and delegate it with a complete, testable description.
-5. For an existing task, start it in place only when a supported tool can do so. Otherwise report the limitation and do not create a replacement task.
+5. For an existing task, start/retry it in place with `kanban_start_task` (or the start endpoint), passing a configured project teammate and valid model/provider. Never create a replacement task.
 6. Continue with independent in-scope work after background delegation.
 7. Review the returned task status and result when the board reports completion.
 8. Send a follow-up when the result lacks evidence or required checks.

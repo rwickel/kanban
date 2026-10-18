@@ -5,6 +5,7 @@ import { fetchModels } from '../api/opencode';
 import { getTaskModelPref, saveTaskModelPref } from '../store/serverConfig';
 import { formatModelRef, isModelAllowed, resolveSessionModel } from '../store/modelResolution';
 import { normalizeBlockedBy, validateBlockedBy } from '../store/dependencies';
+import AttachmentList from './AttachmentList';
 
 interface TaskModalProps {
   isOpen: boolean;
@@ -195,6 +196,7 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
             <textarea value={acceptanceCriteria} onChange={(e) => setAcceptanceCriteria(e.target.value)}
               placeholder="What must be true for this task to be accepted?" rows={3} className="input resize-none" />
           </div>
+          {task && <div><label className="block text-[12px] font-medium t-soft mb-1">Attachments</label><AttachmentList ownerType="task" ownerId={task.id} /></div>}
           <div>
             <label className="block text-[12px] font-medium t-soft mb-1">Priority</label>
             <div className="grid grid-cols-4 gap-1.5">

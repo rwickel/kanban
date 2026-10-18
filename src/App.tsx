@@ -18,6 +18,7 @@ import {
 import { Theme, useTheme } from './hooks/useTheme';
 import { readSpeechLang, usePreferences } from './hooks/usePreferences';
 import { Task, TaskStatus, TaskPriority, Project, Agent, OpenCodeAgentInfo } from './types';
+import { filterTasks } from './taskFilters';
 import {
   getProjects,
   getActiveProjectId,
@@ -88,6 +89,10 @@ export default function App() {
   });
   const [agents, setAgents] = useState<Agent[]>([]);
   const [isConnected, setIsConnected] = useState(false);
+  const [taskQuery, setTaskQuery] = useState('');
+  const [taskStatusFilter, setTaskStatusFilter] = useState<TaskStatus | ''>('');
+  const [taskPriorityFilter, setTaskPriorityFilter] = useState<TaskPriority | ''>('');
+  const [taskAssigneeFilter, setTaskAssigneeFilter] = useState('');
 
   // Modal states
   const [showTaskModal, setShowTaskModal] = useState(false);
@@ -1205,6 +1210,14 @@ export default function App() {
             onDragStart={handleDragStart}
             onDragEnd={handleDragEnd}
           >
+            <div className="mb-4 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+              <input aria-label="Search tasks" className="input min-w-0" placeholder="Search tasks…" value={taskQuery} onChange={e => setTaskQuery(e.target.value)} />
+              <select aria-label="Filter by status" className="input" value={taskStatusFilter} onChange={e => setTaskStatusFilter(e.target.value as TaskStatus | '')}><option value="">All statuses</option>{COLUMNS.map(c => <option key={c.status} value={c.status}>{c.title}</option>)}</select>
+              <select aria-label="Filter by priority" className="input" value={taskPriorityFilter} onChange={e => setTaskPriorityFilter(e.target.value as TaskPriority | '')}><option value="">All priorities</option>{(['critical', 'high', 'medium', 'low'] as TaskPriority[]).map(p => <option key={p} value={p}>{p}</option>)}</select>
+              <select aria-label="Filter by assignee" className="input" value={taskAssigneeFilter} onChange={e => setTaskAssigneeFilter(e.target.value)}><option value="">All assignees</option>{availableAgents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select>
+              {(taskQuery || taskStatusFilter || taskPriorityFilter || taskAssigneeFilter) && <button className="btn px-3 py-2 text-sm" onClick={() => { setTaskQuery(''); setTaskStatusFilter(''); setTaskPriorityFilter(''); setTaskAssigneeFilter(''); }}>Clear filters</button>}
+            </div>
+            {COLUMNS.every(col => filterTasks(tasks[col.status], { query: taskQuery, status: taskStatusFilter, priority: taskPriorityFilter, assignee: taskAssigneeFilter }).length === 0) && <p className="muted mb-3 text-sm" role="status">No tasks match these filters.</p>}
             <div className="flex gap-3 overflow-x-auto pb-4">
               {COLUMNS.map((col) => (
                 <KanbanColumn
@@ -1212,7 +1225,7 @@ export default function App() {
                   status={col.status}
                   title={col.title}
                   icon={columnIcons[col.status]}
-                  tasks={tasks[col.status]}
+                  tasks={filterTasks(tasks[col.status], { query: taskQuery, status: taskStatusFilter, priority: taskPriorityFilter, assignee: taskAssigneeFilter })}
                   onEditTask={handleEditTask}
                   onDeleteTask={handleDeleteTask}
                   onOpenChat={handleOpenChat}

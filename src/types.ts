@@ -5,6 +5,7 @@ export interface Task {
   id: string;
   title: string;
   description: string;
+  labels?: string[];
   /** Optional conditions that define when the task is accepted. */
   acceptanceCriteria?: string | null;
   status: TaskStatus;

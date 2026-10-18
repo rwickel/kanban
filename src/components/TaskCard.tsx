@@ -117,6 +117,7 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat, onMove, o
       </div>
 
       <h4 className="text-[15px] font-medium t-strong leading-snug line-clamp-2">{task.title}</h4>
+      {!!task.labels?.length && <div className="mt-2 flex flex-wrap gap-1" aria-label="Task labels">{task.labels.map((label) => <span key={label} className="pill p-neutral max-w-full truncate">{label}</span>)}</div>}
       {task.description && (
         <p className="text-[13px] muted mt-1 line-clamp-2 leading-snug">{task.description}</p>
       )}

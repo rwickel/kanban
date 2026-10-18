@@ -13,6 +13,7 @@ import { createTask } from '../store/kanban';
 import { STATUS_DOT, ThinkingBlock, ToolRow, ChatBubble, ChatErrorRow, ReviewTarget } from './ChatFeed';
 import { useSpeechInput } from '../hooks/useSpeechInput';
 import FilePreviewModal from './FilePreviewModal';
+import AttachmentList from './AttachmentList';
 
 interface SessionChatWindowProps {
   task: Task | null;
@@ -397,6 +398,7 @@ export default function SessionChatWindow({ task, onClose, standalone, onTaskCli
       {sendError && <div className="px-3.5 pt-2 text-[11px]" style={{ color: 'var(--danger)' }}>{sendError}</div>}
       {speechError && <div className="px-3.5 pt-2 text-[11px]" style={{ color: 'var(--amber)' }}>{speechError}</div>}
       <form data-chat-composer onSubmit={busy ? (e) => { e.preventDefault(); handleStop(); } : handleSend} className="p-3 border-t hairline" style={{ borderTopWidth: 1, borderTopStyle: 'solid', background: 'var(--surface)' }}>
+        {sessionId && <AttachmentList ownerType="chat" ownerId={sessionId} disabled={busy} />}
         <div className="flex gap-1.5 items-end">
           <input type="text" value={input} onChange={(e) => setInput(e.target.value)}
             placeholder={speechTranscribing ? 'Transcribing locally…' : speechListening ? (speechPct != null && speechPct >= 0 ? `Loading voice model ${Math.min(100, Math.round(speechPct * 100))}%…` : 'Listening — speak now…') : busy ? 'Session running — Stop to interrupt…' : 'Reply to agent…  (↵ send)'} className="input" disabled={busy} />

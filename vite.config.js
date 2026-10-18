@@ -9,12 +9,14 @@ import { fileURLToPath } from "node:url";
 import { readFileSync, existsSync, promises as fsp } from "node:fs";
 import { resolve as resolvePath, relative as relativePath, dirname as dirnamePath, sep as sepPath } from "node:path";
 import { loadEnvFile } from "./scripts/env.mjs";
+import { randomUUID } from "node:crypto";
 import {
   LINKBACK_CAP_PER_PARENT,
   linkbackEnabled,
   groupPending,
   planDeliveries,
 } from "./scripts/linkback.mjs";
+import { completionStatus } from "./scripts/task-completion.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -32,6 +34,80 @@ const DB =
   process.env.KANBAN_DB ||
   join(process.env.KANBAN_DATA_DIR || join(HERE, ".kanban-data"), "kanban.db");
 const PYTHON = process.env.KANBAN_PYTHON || "python";
+const ATTACHMENT_DIR = join(process.env.KANBAN_DATA_DIR || join(HERE, ".kanban-data"), "attachments");
+const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
+const ALLOWED_ATTACHMENT_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", "text/plain", "text/markdown", "application/json", "application/zip"]);
+
+function readRawBody(req, limit = MAX_ATTACHMENT_SIZE + 64 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = []; let size = 0;
+    req.on("data", (chunk) => { size += chunk.length; if (size > limit) { reject(Object.assign(new Error("Request is too large."), { status: 413 })); req.destroy(); return; } chunks.push(chunk); });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
+async function attachmentRoute(req, res, url) {
+  const parts = url.pathname.split("/").filter(Boolean);
+  if (parts[0] !== "attachments") return false;
+  const metadataPath = (id) => join(ATTACHMENT_DIR, `${id}.json`);
+  if (req.method === "POST" && parts.length === 1) {
+    const ownerType = url.searchParams.get("ownerType");
+    const ownerId = url.searchParams.get("ownerId")?.trim();
+    if (!(ownerType === "task" || ownerType === "chat") || !ownerId || ownerId.length > 200) { json(res, 400, { error: "A valid attachment owner is required." }); return true; }
+    try {
+      const raw = await readRawBody(req);
+      const boundary = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(req.headers["content-type"] || "");
+      if (!boundary) { json(res, 400, { error: "Multipart file data is required." }); return true; }
+      const marker = Buffer.from(`--${boundary[1] || boundary[2]}\r\n`);
+      const start = raw.indexOf(marker);
+      const headerEnd = raw.indexOf(Buffer.from("\r\n\r\n"), start + marker.length);
+      const end = raw.indexOf(Buffer.from(`\r\n--${boundary[1] || boundary[2]}`), headerEnd + 4);
+      if (start < 0 || headerEnd < 0 || end < 0) { json(res, 400, { error: "Invalid upload data." }); return true; }
+      const headers = raw.subarray(start + marker.length, headerEnd).toString("utf8");
+      const name = /filename="([^"]*)"/i.exec(headers)?.[1]?.replace(/[\\/]/g, "_").trim();
+      const type = /content-type:\s*([^\r\n]+)/i.exec(headers)?.[1]?.trim().toLowerCase() || "application/octet-stream";
+      const data = raw.subarray(headerEnd + 4, end);
+      if (!name) { json(res, 400, { error: "File name is required." }); return true; }
+      if (data.length > MAX_ATTACHMENT_SIZE) { json(res, 413, { error: "Files must be 10 MB or smaller." }); return true; }
+      if (!ALLOWED_ATTACHMENT_TYPES.has(type)) { json(res, 415, { error: "This file type is not supported." }); return true; }
+      await fsp.mkdir(ATTACHMENT_DIR, { recursive: true });
+      const id = randomUUID();
+      await fsp.writeFile(join(ATTACHMENT_DIR, id), data, { flag: "wx" });
+      const attachment = { id, name, type, size: data.length, ownerType, ownerId };
+      await fsp.writeFile(metadataPath(id), JSON.stringify(attachment), { flag: "wx" });
+      attachment.url = `/api/kanban/attachments/${id}/content`;
+      json(res, 201, attachment);
+    } catch (error) { json(res, error.status || 500, { error: error.message || "Upload failed." }); }
+    return true;
+  }
+  if (req.method === "GET" && parts.length === 1) {
+    const ownerType = url.searchParams.get("ownerType"); const ownerId = url.searchParams.get("ownerId");
+    try {
+      const files = await fsp.readdir(ATTACHMENT_DIR).catch(() => []);
+      const items = await Promise.all(files.filter((file) => file.endsWith(".json")).map(async (file) => JSON.parse(await fsp.readFile(join(ATTACHMENT_DIR, file), "utf8"))));
+      json(res, 200, items.filter((item) => item.ownerType === ownerType && item.ownerId === ownerId));
+    } catch { json(res, 500, { error: "Could not list attachments." }); }
+    return true;
+  }
+  if ((req.method === "GET" || req.method === "DELETE") && (parts.length === 2 || parts.length === 3)) {
+    const id = parts[1];
+    if (!/^[\da-f-]{36}$/i.test(id)) { json(res, 404, { error: "Attachment not found." }); return true; }
+    try {
+      const item = JSON.parse(await fsp.readFile(metadataPath(id), "utf8"));
+      if (req.method === "DELETE" && parts.length === 2) {
+        await fsp.unlink(join(ATTACHMENT_DIR, id)); await fsp.unlink(metadataPath(id)); json(res, 200, { ok: true });
+      } else {
+        const data = await fsp.readFile(join(ATTACHMENT_DIR, id));
+        res.statusCode = 200; res.setHeader("Content-Type", item.type); res.setHeader("Content-Length", data.length);
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        res.setHeader("Content-Disposition", `${parts[2] === "content" && item.type.startsWith("image/") ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(item.name)}`); res.end(data);
+      }
+    } catch { json(res, 404, { error: "Attachment not found." }); }
+    return true;
+  }
+  json(res, 404, { error: "Attachment route not found." }); return true;
+}
 
 async function cli(args) {
   const { stdout } = await execFileAsync(PYTHON, [CLI, "--db", DB, ...args], {
@@ -231,11 +307,11 @@ async function reconcileRunning() {
           }
         } catch { /* fall back to message outcome */ }
         if (!outcome && typeof last?.outcome === "string") outcome = last.outcome.toLowerCase();
-        const doneLike = ltype === "idle" && ["completed", "done", "succeeded", "success"].includes(outcome);
+        const succeeded = ltype === "idle" && ["completed", "done", "succeeded", "success"].includes(outcome);
         const failLike = ltype === "idle" && ["failed", "error"].includes(outcome);
         const sessionFailed = ["failed", "error"].includes(outcome);
         const lastActivity = messageTimestamp(last) || messageTimestamp(session) || updatedAt;
-        const stale = t.status === "running" && !doneLike && !failLike && !sessionFailed &&
+        const stale = t.status === "running" && !succeeded && !failLike && !sessionFailed &&
           lastActivity > 0 && Date.now() - lastActivity >= STALE_SESSION_MS;
         if (stale) {
           await interruptSession(apiBase, H, sid).catch(() => null);
@@ -246,14 +322,24 @@ async function reconcileRunning() {
           ]).catch(() => null);
           continue;
         }
-        if (!doneLike && !failLike && !sessionFailed) {
+        if (!succeeded && !failLike && !sessionFailed) {
           if (t.status === "blocked") {
             await cli(["task", "update", t.id, "--actor", "reconciler", "--status", "running"])
               .catch(() => null);
           }
           continue;
         }
-        const next = doneLike ? (t.kind === "cyclic" ? "backlog" : "done") : "blocked";
+        let completionSignal = "";
+        if (succeeded) {
+          for (let i = messages.length - 1; i >= 0; i--) {
+            if (msgRoleOf(messages[i]) === "assistant") {
+              completionSignal = msgTextOf(messages[i]);
+              break;
+            }
+          }
+        }
+        const completion = completionStatus({ succeeded, failed: failLike || sessionFailed, kind: t.kind, finalAssistantText: completionSignal });
+        const next = completion?.status || "blocked";
         // Last assistant text (skip user/system) → result, unless already set.
         let resultText = "";
         for (let i = messages.length - 1; i >= 0; i--) {
@@ -277,9 +363,11 @@ async function reconcileRunning() {
               if (errorText) break;
             }
           }
-          const context = errorText
-            ? `session outcome: ${outcome}; error: ${errorText}`
-            : `session outcome: ${outcome}; no error detail reported by the session`;
+          const context = succeeded
+            ? completion?.reason || "completion was not verified"
+              : errorText
+                ? `session outcome: ${outcome}; error: ${errorText}`
+                : `session outcome: ${outcome}; no error detail reported by the session`;
           argv.push("--result-context", context.slice(0, 4000));
         }
         await cli(argv).catch(() => null);
@@ -556,8 +644,8 @@ async function delegateTask(opts) {
   const projects = await cli(["project", "list", "--json"]);
   const project = (Array.isArray(projects) ? projects : []).find((p) => p.id === projectId);
   if (!project) throw { status: 404, message: `Project not found: ${projectId}` };
-  if (Array.isArray(project.agentIds) && project.agentIds.length > 0 && !project.agentIds.includes(agentId)) {
-    throw { status: 400, message: `agentId "${agentId}" is not on this project's team [${project.agentIds.join(", ")}]` };
+  if (!Array.isArray(project.agentIds) || !project.agentIds.includes(agentId)) {
+    throw { status: 400, message: `agentId "${agentId}" is not on this project's team [${(project.agentIds || []).join(", ")}]` };
   }
   let resolvedAgentId = agentId || null;
   let resolvedAgentName = agentName || null;
@@ -607,7 +695,7 @@ async function delegateTask(opts) {
     const prompt =
       `You are ${resolvedAgentName || resolvedAgentId || agentName || agentId || "a teammate"} executing a delegated subtask. Complete it end-to-end in ${project.path || project.name}.\n` +
       `Task id: ${tid}\nProject id: ${projectId}\nTask: ${title}\nDescription: ${description || "(none)"}\nSession id: ${session.id} (pass as parentSessionId when you create/delegate follow-up tasks).\n\n` +
-      `When finished, just write your final answer as the last assistant message — the board captures it as the task result automatically and follows the session outcome (completed→done, failed→blocked). Do NOT call kanban_update_status or PATCH the task status yourself. ` +
+      `Before finishing, verify every acceptance criterion and required check. End with KANBAN_TASK_COMPLETE only when all are met; otherwise explain what remains and end with KANBAN_TASK_INCOMPLETE. A successful session alone does not prove completion. Do NOT call kanban_update_status or PATCH the task status yourself. ` +
       (styleGuide ? `\n${styleGuide}\n` : "") +
       `Fire-and-forget: the delegator already returned. Call kanban_task_heartbeat on your task id every couple of minutes with --progress so the watchdog sees you alive.`;
     const pRes = await fetch(`${apiBase}/session/${session.id}/prompt`, {
@@ -652,6 +740,65 @@ async function delegateTask(opts) {
         "--startup-phase", "error", "--startup-error", cause.slice(0, 500)]);
     } catch { /* keep original error */ }
     throw { status: 502, message: cause, task: cur };
+  }
+}
+
+// Start/retry a task that already exists. Resolve and validate the configured
+// teammate + model before changing task state; this endpoint never creates a card.
+async function startExistingTask(taskId, opts = {}) {
+  const task = await cli(["task", "show", taskId]);
+  if (!task || !task.id) throw { status: 404, message: `Task not found: ${taskId}` };
+  if (task.status === "running") throw { status: 409, message: "Task is already running", task };
+  const projects = await cli(["project", "list", "--json"]);
+  const project = (Array.isArray(projects) ? projects : []).find((p) => p.id === task.projectId);
+  if (!project) throw { status: 404, message: `Project not found: ${task.projectId}` };
+
+  const agentId = opts.agentId || task.agentId;
+  if (!agentId) throw { status: 400, message: "agentId required; configure/select a teammate before starting this task" };
+  const team = Array.isArray(project.agentIds) ? project.agentIds : [];
+  if (!team.includes(agentId)) throw { status: 400, message: `agentId "${agentId}" is not on this project's team [${team.join(", ")}]` };
+
+  const modelId = opts.modelId || task.modelId;
+  const modelProviderID = opts.modelProviderID || task.modelProviderID;
+  if (!modelId || !modelProviderID) throw { status: 400, message: "modelId and modelProviderID are required; select a configured model before starting this task" };
+  await validateTaskModel(task.projectId, modelProviderID, modelId);
+
+  const agentName = opts.agentName || task.agentName || agentId;
+  const description = task.description || "";
+  const projectPath = project.path || "";
+  const base = ((loadServerCreds().url || "http://127.0.0.1:4099") + "").replace(/\/+$/, "");
+  const apiBase = base.endsWith("/api") ? base : `${base}/api`;
+  const H = { "Content-Type": "application/json", ...opencodeAuthHeaders(loadServerCreds().password || "") };
+
+  // Keep the existing task identity and result history; only reset run fields.
+  await cli(["task", "update", taskId, "--actor", "delegate", "--agent-id", agentId,
+    "--agent-name", agentName, "--model-id", modelId, "--model-provider", modelProviderID,
+    "--result", "", "--result-context", "", "--startup-error", ""]);
+  await cli(["task", "move", taskId, "running", "--actor", "delegate"]);
+  try {
+    const created = await fetch(`${apiBase}/session`, {
+      method: "POST", headers: H,
+      body: JSON.stringify({ agent: agentId, model: { id: modelId, providerID: modelProviderID }, ...(projectPath ? { location: { directory: projectPath } } : {}) }),
+    });
+    if (!created.ok) throw new Error(`session create failed (HTTP ${created.status}) — ${(await created.text()).slice(0, 300)}`);
+    const payload = await created.json();
+    const session = payload?.data ?? payload;
+    if (!session?.id) throw new Error("session create returned no id");
+    await cli(["task", "update", taskId, "--actor", "delegate", "--session-id", session.id,
+      "--startup-phase", "ready"]);
+    const styleGuide = loadStyleGuide();
+    const prompt = `You are ${agentName} executing an existing Kanban task. Complete it end-to-end in ${projectPath || project.name}.\nTask id: ${taskId}\nProject id: ${task.projectId}\nTask: ${task.title}\nDescription: ${description || "(none)"}\nSession id: ${session.id}\n\nReview every acceptance criterion and required check before reporting. End with KANBAN_TASK_COMPLETE only when all are satisfied and verified. Otherwise explain what remains and end with KANBAN_TASK_INCOMPLETE. Do not change the task status manually.${styleGuide ? `\n${styleGuide}\n` : ""}`;
+    const prompted = await fetch(`${apiBase}/session/${encodeURIComponent(session.id)}/prompt`, {
+      method: "POST", headers: H, body: JSON.stringify({ text: prompt }),
+    });
+    if (!prompted.ok) throw new Error(`send prompt failed (HTTP ${prompted.status}) — ${(await prompted.text()).slice(0, 300)}`);
+    return { task: await cli(["task", "show", taskId]), sessionId: session.id };
+  } catch (error) {
+    const message = describeErrorCause(error);
+    await cli(["task", "update", taskId, "--actor", "delegate", "--status", "blocked",
+      "--startup-phase", "error", "--startup-error", message.slice(0, 500),
+      "--result-context", message.slice(0, 4000)]).catch(() => null);
+    throw { status: 502, message, task: await cli(["task", "show", taskId]).catch(() => task) };
   }
 }
 
@@ -768,6 +915,7 @@ function kanbanDocs() {
     routes: [
       { method: "GET", path: "/api/kanban/tasks", query: "projectId?, status=backlog|running|done|blocked?", returns: "Task[]" },
       { method: "GET", path: "/api/kanban/tasks/:id", returns: "Task (404 when missing)" },
+      { method: "POST", path: "/api/kanban/tasks/:id/start", body: "agentId?, agentName?, modelId?, modelProviderID? (missing values use the task's saved configuration); starts/retries this existing task without creating a duplicate", returns: "{task,sessionId}" },
       { method: "POST", path: "/api/kanban/tasks", body: "projectId*, title*, description?, status?, priority?, id?, agentId?, agentName?, sessionId?, modelId?, modelProviderID?, startupPhase?, startupError?, parentSessionId?, result?, resultContext?, blockedByTaskIds?[]", returns: "Task" },
       { method: "PATCH", path: "/api/kanban/tasks/:id", body: "title?, description?, status?, priority?, agentId?, agentName?, sessionId?, modelId?, modelProviderID?, startupPhase?, startupError?, parentSessionId?, result?, resultContext?, blockedByTaskIds?[] (array replaces, [] clears)", returns: "Task" },
       { method: "GET", path: "/api/kanban/tasks/:id/dependencies", returns: "{id, status, blockedByTaskIds[], predecessors[{id,exists,status,title,done}], dependents[], ready}" },
@@ -892,6 +1040,14 @@ function kanbanOpenApi() {
           summary: "Delete task",
           parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
           responses: { 200: { description: "{ok,deleted}", content: { "application/json": { schema: { type: "object" } } } } },
+        },
+      },
+      "/api/kanban/tasks/{id}/start": {
+        post: {
+          summary: "Start or retry an existing task without creating a duplicate",
+          parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+          requestBody: { required: false, content: { "application/json": { schema: { type: "object", properties: { agentId: { type: "string" }, agentName: { type: "string" }, modelId: { type: "string" }, modelProviderID: { type: "string" } } } } } },
+          responses: { 200: { description: "Existing task started", content: { "application/json": { schema: { type: "object" } } } }, 400: { description: "Missing or invalid team agent/model", content: { "application/json": { schema: errSchema } } }, 404: { description: "task/project not found", content: { "application/json": { schema: errSchema } } }, 409: { description: "task already running", content: { "application/json": { schema: errSchema } } } },
         },
       },
       "/api/kanban/tasks/{id}/dependencies": {
@@ -1022,6 +1178,7 @@ function kanbanApi() {
         const parts = url.pathname.split("/").filter(Boolean);
         const q = url.searchParams;
         try {
+          if (await attachmentRoute(req, res, url)) return;
           // GET /api/kanban/tasks?projectId=&status=  → Task[]
           if (req.method === "GET" && parts[0] === "tasks" && parts.length === 1) {
             const argv = ["task", "list"];
@@ -1036,6 +1193,12 @@ function kanbanApi() {
           // GET /api/kanban/tasks/:id → Task
           if (req.method === "GET" && parts[0] === "tasks" && parts.length === 2) {
             return json(res, 200, await cli(["task", "show", parts[1]]));
+          }
+          // POST /api/kanban/tasks/:id/start {agentId?,modelId?,modelProviderID?}
+          // → starts/retries the existing task; never creates a replacement.
+          if (req.method === "POST" && parts[0] === "tasks" && parts.length === 3 && parts[2] === "start") {
+            const b = await readBody(req);
+            return json(res, 200, await startExistingTask(parts[1], b));
           }
           // POST /api/kanban/tasks {projectId,title,...} → Task
           if (req.method === "POST" && parts[0] === "tasks" && parts.length === 1) {

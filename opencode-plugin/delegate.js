@@ -40,7 +40,7 @@ function buildDelegatePrompt({
     `You are ${agentLabel || "a teammate"} executing a delegated subtask. Complete it end-to-end in ${projectPath || "the project"}.\n` +
     `Task id: ${taskId}\nProject id: ${projectId}\nTask: ${title}\nDescription: ${description || "(none)"}\n` +
     `Session id: ${sessionId} (pass as parentSessionId when you create/delegate follow-up tasks).\n\n` +
-    `When finished, just write your final answer as the last assistant message — the board captures it as the task result automatically and follows the session outcome (completed→done, failed→blocked). Do NOT call kanban_update_status or PATCH the task status yourself. Never write your answer into the description.` +
+    `Before finishing, verify every acceptance criterion and required check. End with KANBAN_TASK_COMPLETE only when all are met; otherwise explain what remains and end with KANBAN_TASK_INCOMPLETE. A successful session alone does not prove completion. Do NOT call kanban_update_status or PATCH the task status yourself. Never write your answer into the description.` +
     (styleGuide ? `\n${styleGuide}\n` : "") +
     ` Fire-and-forget: the delegator already returned.`
   )
@@ -170,7 +170,7 @@ export async function delegateTool(args, context, ctx) {
     if (row) {
       projectPath = row.path || ""
       const team = Array.isArray(row.agentIds) ? row.agentIds : []
-      if (team.length > 0 && args.agentId && !team.includes(args.agentId)) {
+      if (!team.includes(args.agentId)) {
         toolError(`agentId "${args.agentId}" is not on this project's team [${team.join(", ")}]`)
       }
     }

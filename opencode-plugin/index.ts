@@ -10,7 +10,7 @@
 // through the running server's own ctx.session client, so no extra
 // `opencode serve` and no port or password is needed for delegation.
 
-import { callingSessionId, cliResult, jsonResult, ocBase, ocH, runCli, toolError } from "./core.js"
+import { callingSessionId, cliResult, env, jsonResult, ocBase, ocH, runCli, toolError } from "./core.js"
 import { delegateTool, messageToTool } from "./delegate.js"
 
 // Optional arguments are expressed by leaving the key out of `required`,
@@ -318,6 +318,34 @@ export default {
         execute: async (input: any) => {
           if (input.taskId) return cliResult(runCli(["task", "show", input.taskId]))
           return cliResult(runCli(["events", "list", "--limit", "20"]))
+        },
+      })
+
+      editor.add({
+        name: "kanban_start_task",
+        description: "Start or retry an existing blocked/backlog/done task in place. Requires an agent on the project team and an available, allowed model/provider pair. Never creates a duplicate task.",
+        input: {
+          type: "object",
+          properties: {
+            taskId: str("Existing Kanban task id"),
+            agentId: str("Teammate id already configured on the project"),
+            agentName: str("Teammate display name"),
+            modelId: str("Available and project-allowed model id"),
+            modelProviderID: str("Provider id for the selected model"),
+          },
+          required: ["taskId"],
+          additionalProperties: false,
+        },
+        options: { namespace: "kanban" },
+        execute: async (input: any) => {
+          const row = runCli(["task", "show", input.taskId])
+          if (!row.ok) return cliResult(row)
+          const r = await fetch(`${env("KANBAN_API_URL", "http://localhost:3001")}/api/kanban/tasks/${encodeURIComponent(input.taskId)}/start`, {
+            method: "POST", headers: ocH(), body: JSON.stringify(input),
+          })
+          const payload = await r.json().catch(() => ({}))
+          if (!r.ok) return jsonResult({ ok: false, status: r.status, ...payload })
+          return jsonResult(payload)
         },
       })
 
