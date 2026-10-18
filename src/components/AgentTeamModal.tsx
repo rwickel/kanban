@@ -63,6 +63,21 @@ export default function AgentTeamModal({ isOpen, onClose, onSave, selectedAgentI
     );
   };
 
+  // Keep the current selection visible even when the live list is incomplete
+  // (OpenCode down → demo fallback): ids that are selected on the project but
+  // missing from the fetched list appear as id-only entries, so a save never
+  // silently drops them from the team.
+  const displayedAgents: OpenCodeAgentInfo[] = [
+    ...agents,
+    ...checkedIds
+      .filter((id) => !agents.some((a) => a.id === id))
+      .map((id) => ({
+        id,
+        name: id,
+        description: 'Saved on this project — not in the live agent list',
+      })),
+  ];
+
   const handleSave = () => {
     onSave(checkedIds);
     onClose();
@@ -79,7 +94,7 @@ export default function AgentTeamModal({ isOpen, onClose, onSave, selectedAgentI
           <div className="flex items-center gap-2">
             <Bot className="w-4 h-4 muted" strokeWidth={1.75} />
             <h2 className="text-[13px] font-semibold t-strong">Agent Team</h2>
-            <span className="pill p-neutral mono text-[11px]">{agents.length} agents</span>
+            <span className="pill p-neutral mono text-[11px]">{displayedAgents.length} agents</span>
           </div>
           <button onClick={onClose} className="btn p-1" aria-label="Close">
             <X className="w-4 h-4" strokeWidth={1.75} />
@@ -113,7 +128,7 @@ export default function AgentTeamModal({ isOpen, onClose, onSave, selectedAgentI
                 <RefreshCw className="w-4 h-4 muted animate-spin" />
               </div>
             ) : (
-              agents.map((agent) => {
+              displayedAgents.map((agent) => {
                 const isChecked = checkedIds.includes(agent.id);
                 return (
                   <button

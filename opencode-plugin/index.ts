@@ -29,6 +29,12 @@ const priorityEnum = (description: string) => ({
   description,
 })
 
+const blockedByProp = (description: string) => ({
+  type: "array",
+  items: { type: "string" },
+  description,
+})
+
 export default {
   id: "kanban",
   async setup(ctx: any) {
@@ -244,7 +250,7 @@ export default {
       editor.add({
         name: "kanban_create_task",
         description:
-          "Create a new task in a project's backlog. Returns the created task JSON including its uuid. The calling session is attached as parentSessionId automatically.",
+          "Create a new task in a project's backlog. Returns the created task JSON including its uuid. The calling session is attached as parentSessionId automatically. Pass blockedByTaskIds to make the task wait for other tasks of the same project.",
         input: {
           type: "object",
           properties: {
@@ -253,6 +259,9 @@ export default {
             description: str("Task description"),
             priority: priorityEnum("Priority (default medium)"),
             parentSessionId: str("Override the parent session (default: this session)"),
+            blockedByTaskIds: blockedByProp(
+              "Depends-on: predecessor task ids (same project) that must be done before this task may start. Unknown ids, self-references, foreign-project ids and cycles are rejected with an error.",
+            ),
           },
           required: ["projectId", "title"],
           additionalProperties: false,
@@ -267,6 +276,9 @@ export default {
           ]
           if (input.description) argv.push("--description", input.description)
           if (input.priority) argv.push("--priority", input.priority)
+          if (Array.isArray(input.blockedByTaskIds) && input.blockedByTaskIds.length > 0) {
+            argv.push("--blocked-by", input.blockedByTaskIds.map((v: unknown) => String(v).trim()).filter(Boolean).join(","))
+          }
           const parent = callingSessionId(input.parentSessionId, context)
           if (parent) argv.push("--parent-session-id", parent)
           return cliResult(runCli(argv))
@@ -370,7 +382,7 @@ export default {
       editor.add({
         name: "kanban_update_task",
         description:
-          "Patch a task's metadata (title/description/priority/parent-session). The description is the original task brief — do NOT overwrite it with your answer. Write your answer with task_result instead. Returns updated task JSON.",
+          "Patch a task's metadata (title/description/priority/parent-session/depends-on). The description is the original task brief — do NOT overwrite it with your answer. Write your answer with task_result instead. Returns updated task JSON.",
         input: {
           type: "object",
           properties: {
@@ -379,6 +391,9 @@ export default {
             description: str("Original task brief — never to store your result"),
             priority: priorityEnum("New priority"),
             parentSessionId: str("Parent session that created this task"),
+            blockedByTaskIds: blockedByProp(
+              "Depends-on: replace the predecessor list (same project). Pass [] to clear all dependencies. Unknown ids, self-references, foreign-project ids and cycles are rejected with an error.",
+            ),
           },
           required: ["taskId"],
           additionalProperties: false,
@@ -392,6 +407,12 @@ export default {
           if (input.parentSessionId !== undefined) {
             argv.push("--parent-session-id", input.parentSessionId)
           }
+          if (Array.isArray(input.blockedByTaskIds)) {
+            argv.push(
+              "--blocked-by",
+              input.blockedByTaskIds.map((v: unknown) => String(v).trim()).filter(Boolean).join(","),
+            )
+          }
           if (argv.length <= 3) toolError("nothing to update")
           return cliResult(runCli(argv))
         },
@@ -402,7 +423,7 @@ export default {
       editor.add({
         name: "kanban_delegate",
         description:
-          "Create a task for another agent on the team and start it immediately. Fire-and-forget by default — returns { task, sessionId, waited:false, parentSessionId } right away so the caller can fan out. Pass wait:true to block until done/blocked. This session is attached as parentSessionId automatically; an explicit parentSessionId wins. The subtask flips to done/blocked when the teammate is done.",
+          "Create a task for another agent on the team and start it immediately. Fire-and-forget by default — returns { task, sessionId, waited:false, parentSessionId } right away so the caller can fan out. Pass wait:true to block until done/blocked. This session is attached as parentSessionId automatically; an explicit parentSessionId wins. The subtask flips to done/blocked when the teammate is done. Pass blockedByTaskIds to make the subtask wait for other tasks: when a predecessor is not done yet the subtask is created in the backlog (started:false) instead of running.",
         input: {
           type: "object",
           properties: {
@@ -415,6 +436,9 @@ export default {
             modelId: str("Model id for the teammate session"),
             modelProviderID: str("Model provider id for the teammate session"),
             parentSessionId: str("Override the parent session (default: this session)"),
+            blockedByTaskIds: blockedByProp(
+              "Depends-on: predecessor task ids (same project) that must be done before this subtask starts. The server rejects unknown ids, self-references, foreign-project ids and cycles.",
+            ),
             timeoutSec: {
               type: "number",
               description: "Max seconds to wait when wait:true (default 600, cap 1800)",

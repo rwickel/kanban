@@ -114,6 +114,9 @@ export async function delegateTool(args, context, ctx) {
   const interval = clamp(args.pollMs, 1000, 15000, 3000)
   const shouldWait = args.wait === true
   const parentSessionId = args.parentSessionId ?? null
+  const blockedBy = Array.isArray(args.blockedByTaskIds)
+    ? args.blockedByTaskIds.map((v) => String(v ?? "").trim()).filter(Boolean)
+    : []
 
   const created = runCli([
     "task", "create",
@@ -127,11 +130,35 @@ export async function delegateTool(args, context, ctx) {
     ...(args.modelId ? ["--model-id", args.modelId] : []),
     ...(args.modelProviderID ? ["--model-provider", args.modelProviderID] : []),
     ...(parentSessionId ? ["--parent-session-id", parentSessionId] : []),
+    ...(blockedBy.length ? ["--blocked-by", blockedBy.join(",")] : []),
   ])
   if (!created.ok) toolError(created.text)
 
   const tid = parseJson(created.text)?.id
   if (!tid) toolError(created.text)
+
+  // Depends-on: only start the teammate when every predecessor is done.
+  // Otherwise the task stays in the backlog; the caller can poll it with
+  // kanban_task_status or re-delegate once the predecessors finish.
+  if (blockedBy.length) {
+    const deps = runCli(["task", "deps", tid])
+    const info = deps.ok ? parseJson(deps.text) : null
+    if (info && info.ready === false) {
+      const pending = (info.predecessors || [])
+        .filter((p) => !p.done)
+        .map((p) => `${p.title || p.id} (${p.status ?? "missing"})`)
+      return jsonResult({
+        task: parseJson(created.text),
+        started: false,
+        waited: false,
+        parentSessionId,
+        blockedByTaskIds: info.blockedByTaskIds,
+        reason:
+          `Not started: ${pending.length} predecessor task(s) are not done yet — the task waits in the backlog. ` +
+          `Pending: ${pending.join("; ")}. Once they are done, start it via kanban_update_status or re-delegate.`,
+      })
+    }
+  }
 
   const moved = runCli(["task", "move", tid, "running", "--actor", "delegate"])
   if (!moved.ok) toolError(moved.text)

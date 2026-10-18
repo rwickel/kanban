@@ -15,6 +15,10 @@ export interface Task {
   /** Visible startup state for running tasks: creating session → sending prompt → ready/error */
   startupPhase?: 'creating-session' | 'sending-prompt' | 'ready' | 'error';
   startupError?: string;
+  /** oneshot finishes once; cyclic returns to backlog after each successful run. */
+  kind?: 'oneshot' | 'cyclic' | 'service';
+  /** Delay in seconds before a cyclic task starts its next run. */
+  cycleIntervalSec?: number | null;
   /** "providerID/modelID" e.g. "ollama/gemma4:e2b" — passed to createSession */
   modelId?: string;
   modelProviderID?: string;

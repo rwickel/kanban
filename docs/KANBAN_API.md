@@ -258,7 +258,78 @@ relevant — tool/reasoning frames are skipped, capped at 4000 chars
 (`resultTruncated: true` when cut). Plugin tool: `kanban_message_to
 {sessionId?|taskId?,text,...}`. Same OpenCode auth as delegate.
 
-### `GET /api/kanban/server`
+## Task prompt layers (`src/prompts/taskPrompt.ts`)
+
+Every board task is told what to do in **three layers**. Only layer 3 repeats.
+
+| Layer | Content | When |
+| --- | --- | --- |
+| 1. Agent instructions | The agent definition (`build`, `coder`, `testing`, …) | Loaded by OpenCode with the session |
+| 2. Task-session instruction | Durable task contract: lifecycle, work method, delegation, security, communication, and the cyclical checkpoint protocol | **Once**, when the session is created |
+| 3. Execution prompt | Title, description, priority, and cycle/checkpoint metadata | **Once per run** (and once per cycle) |
+
+Layer 2 is stored as the instruction entry `task-agent`:
+
+```http
+PUT /api/kanban/oc/experimental/session/{sessionId}/instructions/entries/task-agent
+{ "value": "<task-agent-preamble.md + task identity + work method>" }
+```
+
+Layer 3 is the only thing sent to `POST /session/{id}/prompt`:
+
+```text
+Execute this task now.
+
+Task id: q-123
+Session id: ses_abc
+Title: Check email
+Priority: High
+
+## What to do
+Summarize unread important messages.
+```
+
+A **cyclical** task reuses the same session. Layer 2 is written on the first
+cycle only; every later cycle sends a short layer-3 message:
+
+```text
+Run the next cycle of this cyclical task.
+
+Task id: q-123
+Session id: ses_abc
+Cycle time: 2026-10-17T10:00:00Z
+Repeats: every 3600 seconds
+Checkpoint file: .kanban/checkpoints/q-123.json
+Title: Check email
+Priority: High
+
+## What to do
+Summarize unread important messages.
+```
+
+If the instruction `PUT` fails, the board falls back to sending the full
+contract inline (old behaviour), so the agent never runs without rules.
+
+### Cyclical checkpoints
+
+A cyclical task keeps its own checkpoint file in the project worktree:
+
+```text
+.kanban/checkpoints/<task-id>.json
+```
+
+The session instruction (layer 2) defines the protocol; the agent owns the file:
+
+- read the file at the **start** of every cycle — the file is authoritative, not chat history;
+- if missing, create it and treat the previous position as "last 24 hours";
+- process only items **after** the stored checkpoint;
+- write it **only after a successful cycle**;
+- on failure leave it unchanged, so the next cycle retries;
+- store cursors/ids/timestamps only — never secrets or message bodies.
+
+`.kanban/checkpoints/` is git-ignored (runtime state, not source).
+
+## Server — `GET /api/kanban/server`
 
 Returns `{ url, hasPassword }` from the root `.env`. The endpoint never returns
 the secret. Server settings are read-only in the browser.

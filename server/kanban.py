@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     kind TEXT NOT NULL DEFAULT 'oneshot',
     heartbeat_at TEXT,
     expected_sec INTEGER,
+    cycle_interval_sec INTEGER,
     progress TEXT NOT NULL DEFAULT '',
     parent_session_id TEXT,
     blocked_by_task_ids TEXT NOT NULL DEFAULT '[]',
@@ -157,6 +158,7 @@ def get_conn(db_path: Path) -> sqlite3.Connection:
         ("kind", "TEXT NOT NULL DEFAULT 'oneshot'"),
         ("heartbeat_at", "TEXT"),
         ("expected_sec", "INTEGER"),
+        ("cycle_interval_sec", "INTEGER"),
         ("progress", "TEXT NOT NULL DEFAULT ''"),
         ("parent_session_id", "TEXT"),
         ("blocked_by_task_ids", "TEXT NOT NULL DEFAULT '[]'"),
@@ -270,6 +272,7 @@ def row_to_task(r: sqlite3.Row) -> dict:
         "kind": r["kind"] if "kind" in keys and r["kind"] else "oneshot",
         "heartbeatAt": r["heartbeat_at"] if "heartbeat_at" in keys else None,
         "expectedSec": r["expected_sec"] if "expected_sec" in keys else None,
+        "cycleIntervalSec": r["cycle_interval_sec"] if "cycle_interval_sec" in keys else None,
         "progress": r["progress"] if "progress" in keys and r["progress"] else "",
         "parentSessionId": r["parent_session_id"] if "parent_session_id" in keys else None,
         "blockedByTaskIds": parse_id_list(
@@ -361,8 +364,8 @@ def require_priority(v: str) -> str:
 
 def require_kind(v) -> str:
     v = (v or "oneshot").strip().lower()
-    if v not in ("oneshot", "service"):
-        fail(f"Invalid kind '{v}'. Valid: oneshot, service")
+    if v not in ("oneshot", "cyclic", "service"):
+        fail(f"Invalid kind '{v}'. Valid: oneshot, cyclic, service")
     return v
 
 
@@ -692,21 +695,22 @@ def cmd_task_create(args):
     blocked_raw = getattr(args, "blocked_by", None)
     blocked_ids = require_blocked_by(conn, tid, blocked_raw, project_id=args.project) if blocked_raw is not None else []
     expected = getattr(args, "expected_sec", None)
+    cycle_interval = getattr(args, "cycle_interval_sec", None)
     ts = now_iso()
     conn.execute(
         """INSERT INTO tasks (id, project_id, title, description, status, priority,
                               agent_id, agent_name, session_id, model_id, model_provider_id,
                               startup_phase, startup_error, kind, heartbeat_at,
-                              expected_sec, progress, parent_session_id,
+                               expected_sec, cycle_interval_sec, progress, parent_session_id,
                                result, result_context, acceptance_criteria,
                               blocked_by_task_ids,
                               created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (tid, args.project, args.title, args.description or "", status, priority,
          args.agent_id, args.agent_name, args.session_id,
          args.model_id, args.model_provider,
          args.startup_phase, args.startup_error, kind, ts if status == "running" else None,
-         expected, getattr(args, "progress", None) or "",
+          expected, cycle_interval, getattr(args, "progress", None) or "",
          getattr(args, "parent_session_id", None),
           getattr(args, "result", None), getattr(args, "result_context", None),
           getattr(args, "acceptance_criteria", None),
@@ -764,6 +768,7 @@ def cmd_task_update(args):
         ("model_provider_id", args.model_provider),
         ("startup_phase", args.startup_phase), ("startup_error", args.startup_error),
         ("kind", getattr(args, "kind", None)),
+        ("cycle_interval_sec", getattr(args, "cycle_interval_sec", None)),
         ("progress", getattr(args, "progress", None)),
         ("parent_session_id", getattr(args, "parent_session_id", None)),
         ("result", getattr(args, "result", None)),
@@ -775,6 +780,11 @@ def cmd_task_update(args):
         if val is not None:
             if col == "kind":
                 val = require_kind(val)
+            if col == "cycle_interval_sec":
+                try:
+                    val = int(val)
+                except (TypeError, ValueError):
+                    fail("Invalid cycle interval. Must be an integer (seconds).")
             sets.append(f"{col} = ?")
             params.append(val)
             changes[col] = val
@@ -1113,8 +1123,9 @@ def main(argv=None):
     tc.add_argument("--model-provider", default=None)
     tc.add_argument("--startup-phase", default=None)
     tc.add_argument("--startup-error", default=None)
-    tc.add_argument("--kind", default=None, choices=("oneshot", "service"), help="Task kind: oneshot (must reach done, default) or service (npm run dev — running IS success)")
+    tc.add_argument("--kind", default=None, choices=("oneshot", "cyclic", "service"), help="Task kind: oneshot, cyclic, or service")
     tc.add_argument("--expected-sec", type=int, default=None, help="Stall timeout in seconds for oneshot (default 600). Ignored for service.")
+    tc.add_argument("--cycle-interval-sec", type=int, default=None)
     tc.add_argument("--progress", default=None, help="Free-text progress, e.g. 'step 3/10' or 'vite :5173 pid 1234'")
     tc.add_argument("--parent-session-id", default=None, help="Parent session that created this task (empty = user/board)")
     tc.add_argument("--result", default=None, help="Task result: last message + context on done/blocked")
@@ -1148,8 +1159,9 @@ def main(argv=None):
     tu.add_argument("--model-provider", default=None)
     tu.add_argument("--startup-phase", default=None)
     tu.add_argument("--startup-error", default=None)
-    tu.add_argument("--kind", default=None, choices=("oneshot", "service"))
+    tu.add_argument("--kind", default=None, choices=("oneshot", "cyclic", "service"))
     tu.add_argument("--expected-sec", type=int, default=None)
+    tu.add_argument("--cycle-interval-sec", type=int, default=None)
     tu.add_argument("--progress", default=None)
     tu.add_argument("--parent-session-id", default=None, help="Parent session that created this task (empty when created by user/board)")
     tu.add_argument("--result", default=None)

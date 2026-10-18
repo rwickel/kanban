@@ -52,14 +52,16 @@ test('findCycleTaskId: direct two-node cycle is caught', () => {
 });
 
 test('findCycleTaskId: longer chain is caught', () => {
+  // Edge direction: task -> its blockedBy entries (the task waits for them).
+  // D waits for C, C waits for B, B waits for A — so making A wait for D
+  // would close the loop A -> D -> C -> B -> A. The offending predecessor
+  // that points back at A is B.
   const tasks = [
-    { id: B, blockedByTaskIds: [C] },
-    { id: C, blockedByTaskIds: [D] },
-    { id: D, blockedByTaskIds: [] },
+    { id: B, blockedByTaskIds: [A] },
+    { id: C, blockedByTaskIds: [B] },
+    { id: D, blockedByTaskIds: [C] },
   ];
-  // A -> D -> C -> B -> A would close via B, which A already (virtually) blocks.
-  const withA = [...tasks, { id: A, blockedByTaskIds: [B] }];
-  assert.equal(findCycleTaskId(A, [D], withA), D);
+  assert.equal(findCycleTaskId(A, [D], tasks), B);
 });
 
 test('findCycleTaskId: unrelated branches do not false-positive', () => {

@@ -17,6 +17,8 @@ export type MobileTaskFormData = {
   modelProviderID?: string;
   result?: string;
   resultContext?: string;
+  kind?: Task['kind'];
+  cycleIntervalSec?: number;
 };
 
 export default function MobileTaskForm({
@@ -46,6 +48,8 @@ export default function MobileTaskForm({
   const [selectedModel, setSelectedModel] = useState(() =>
     formatModelRef(resolveSessionModel(task, { allowedModels }, getTaskModelPref()))
   );
+  const [kind, setKind] = useState<Task['kind']>(task?.kind ?? 'oneshot');
+  const [cycleIntervalSec, setCycleIntervalSec] = useState(String(task?.cycleIntervalSec ?? 3600));
 
   const loadModels = async () => {
     if (modelsLoading) return;
@@ -94,6 +98,8 @@ export default function MobileTaskForm({
       modelProviderID: providerID || undefined,
       result: (task?.result ?? undefined) as string | undefined,
       resultContext: (task?.resultContext ?? undefined) as string | undefined,
+      kind,
+      cycleIntervalSec: kind === 'cyclic' ? Math.max(1, Number(cycleIntervalSec) || 3600) : undefined,
     });
     onClose();
   };
@@ -108,6 +114,17 @@ export default function MobileTaskForm({
       </header>
 
       <form onSubmit={handleSubmit} className="m-overlay-body" style={{ display: 'flex', flexDirection: 'column' }}>
+        <div className="m-field">
+          <label className="m-label" htmlFor="mt-kind">Task type</label>
+          <select id="mt-kind" value={kind} onChange={(e) => setKind(e.target.value as Task['kind'])} className="input">
+            <option value="oneshot">One-shot</option><option value="cyclic">Cyclic</option>
+          </select>
+          {kind === 'cyclic' && <div style={{ marginTop: 6 }}>
+            <label className="m-label" htmlFor="mt-cycle-interval">Repeat every (seconds)</label>
+            <input id="mt-cycle-interval" type="number" min="1" value={cycleIntervalSec} onChange={(e) => setCycleIntervalSec(e.target.value)} className="input" placeholder="e.g. 3600 = every hour" aria-describedby="mt-cycle-help" />
+            <p id="mt-cycle-help" className="muted" style={{ marginTop: 4 }}>After this delay, the task returns to the backlog and can run again.</p>
+          </div>}
+        </div>
         <div className="m-field">
           <label className="m-label" htmlFor="mt-title">Title</label>
           <input id="mt-title" type="text" value={title} onChange={(e) => setTitle(e.target.value)}

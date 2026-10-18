@@ -238,6 +238,7 @@ export async function createTask(
   clientId?: string,
   acceptanceCriteria?: string,
   blockedByTaskIds?: string[]
+  ,kind?: Task['kind'], cycleIntervalSec?: number
 ): Promise<Task> {
   // Client-generated id: offline replays reuse it, so a retried POST
   // either creates the row or fails "already exists" (safe to skip).
@@ -249,6 +250,7 @@ export async function createTask(
     agentId, agentName, sessionId, modelId, modelProviderID,
     result, resultContext, acceptanceCriteria,
     blockedByTaskIds: blockedBy,
+    kind, cycleIntervalSec,
   };
   try {
     return await postTaskRaw(payload);
@@ -258,6 +260,7 @@ export async function createTask(
       kind: 'create', clientId: id, projectId, title, description, priority,
       acceptanceCriteria, blockedByTaskIds: blockedBy,
       agentId, agentName, sessionId, modelId, modelProviderID,
+      taskKind: kind, cycleIntervalSec,
     });
     const now = new Date().toISOString();
     mergeTaskCache({
@@ -306,6 +309,7 @@ export async function replayOfflineQueue(): Promise<{ synced: number; remaining:
             description: op.description, status: 'backlog', priority: op.priority,
             agentId: op.agentId, agentName: op.agentName, sessionId: op.sessionId,
              modelId: op.modelId, modelProviderID: op.modelProviderID,
+             kind: op.taskKind, cycleIntervalSec: op.cycleIntervalSec,
              acceptanceCriteria: op.acceptanceCriteria,
              blockedByTaskIds: op.blockedByTaskIds ?? [],
           });

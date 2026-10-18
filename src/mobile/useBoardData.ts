@@ -17,10 +17,18 @@ import {
   pollDelayMs,
   replayOfflineQueue,
 } from '../store/kanban';
-import { fetchAgents, createSession, sendPrompt, getServerInfo, putSessionInstruction } from '../api/opencode';
+import { fetchAgents, createSession, sendPrompt, getServerInfo, getSessionInstruction, putSessionInstruction } from '../api/opencode';
 import { getTaskModelPref } from '../store/serverConfig';
 import { resolveSessionModel } from '../store/modelResolution';
 import { ensureAssistantSession } from '../store/assistantSession';
+import { readSpeechLang } from '../hooks/usePreferences';
+import {
+  TASK_INSTRUCTION_KEY,
+  buildTaskFallbackPrompt,
+  buildTaskRunPrompt,
+  buildTaskSessionInstruction,
+  resolveLanguageName,
+} from '../prompts/taskPrompt';
 import { isQueuedOffline } from '../store/offlineQueue';
 import { useOfflineSync } from '../hooks/useOfflineSync';
 
@@ -207,6 +215,9 @@ export function useBoardData() {
     const model = resolvedModel ? { providerID: resolvedModel.providerID, id: resolvedModel.modelID } : undefined;
 
     let sessionId = task.sessionId;
+    // A cyclical task re-enters here with the same sessionId every cycle, so
+    // the durable instruction is written only on the very first run.
+    const isNewSession = !sessionId;
     if (!sessionId) {
       upsertTaskInState({ ...task, startupPhase: 'creating-session', startupError: undefined } as Task);
       const res = await createSession({ title: task.title, agent: resolved.id ?? resolved.name, model, directory });
@@ -218,9 +229,30 @@ export function useBoardData() {
     } else {
       upsertTaskInState({ ...task, startupPhase: 'sending-prompt', startupError: undefined } as Task);
     }
-    const desc = task.description?.trim() || '(no description provided)';
-    const prompt = `# ${task.title}\n\n${desc}`;
-    await putSessionInstruction(sessionId, 'task-agent', prompt);
+    // Same three-layer contract as the desktop path: the static task contract
+    // goes into a durable instruction entry once per session, and only the
+    // short execution prompt is sent per run.
+    const ctx = {
+      task,
+      project: activeProj,
+      agents,
+      sessionId,
+      language: resolveLanguageName(readSpeechLang()),
+      firstRun: isNewSession,
+      runTime: new Date().toISOString(),
+    };
+    let prompt = buildTaskRunPrompt(ctx);
+    let needsInstruction = isNewSession;
+    if (!needsInstruction) {
+      needsInstruction = (await getSessionInstruction(sessionId, TASK_INSTRUCTION_KEY)) === null;
+    }
+    if (needsInstruction) {
+      const put = await putSessionInstruction(sessionId, TASK_INSTRUCTION_KEY, buildTaskSessionInstruction(ctx));
+      if (!put.ok) {
+        console.warn('task instruction entry failed, sending the full prompt inline:', put.error);
+        prompt = buildTaskFallbackPrompt(ctx);
+      }
+    }
     const sent = await sendPrompt(sessionId, prompt, resolved.id);
     if (!sent.ok) {
       await updateTask(task.id, { startupPhase: 'error', startupError: sent.error } as Partial<Task>).catch(() => {});

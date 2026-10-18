@@ -86,7 +86,13 @@ export default function MobileChat({
     if (!next) return;
     const patch: Record<string, unknown> = { status: next };
     if (!task.result && lastResultRef.current) patch.result = lastResultRef.current;
-    if (!task.resultContext && next === 'blocked') patch.resultContext = `session outcome: ${outcome}`;
+    // Consistent with desktop and the server reconciler: report the real
+    // session error when available, otherwise an honest placeholder.
+    if (!task.resultContext && next === 'blocked') {
+      patch.resultContext = sessionError
+        ? `session outcome: ${outcome}; error: ${sessionError}`
+        : `session outcome: ${outcome}; no error detail reported by the session`;
+    }
     updateTask(task.id, patch as Partial<Task>).catch(() => {});
   }, [task?.id, task?.status, status, outcome]);
 

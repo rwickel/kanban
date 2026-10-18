@@ -7,4 +7,6 @@ build/
 !.env.example
 .kanban-data/
 .kanban-queue/
+# Cyclical-task checkpoints are runtime state written by the agent, not source.
+.kanban/checkpoints/
 __pycache__/

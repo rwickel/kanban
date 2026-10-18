@@ -104,6 +104,28 @@ function sleep(ms) {
 // skips tasks touched in the last 20s to avoid racing an agent's own writes.
 let reconcileTimer = null;
 let reconcileBusy = false;
+// A delegated session that remains running without producing a message is
+// presumed stuck. Keep this configurable for slower providers, but fail safe
+// after ten minutes by default so abandoned sessions do not run forever.
+const STALE_SESSION_MS = Math.max(
+  60_000,
+  Number(process.env.KANBAN_STALE_SESSION_SEC || 600) * 1000,
+);
+// Extracts the LITERAL error text that the OpenCode session API actually
+// reports. Verified shapes (live probes, Oct 2026):
+//   GET /session/{id} → { id, projectID, agent, model, cost, tokens, outcome, time, title, location }
+//     — the session object carries NO error field in this server version;
+//     outcome is "failed" | "succeeded" | "interrupted" only. The
+//     error/providerError/provider_error checks below stay as forward
+//     compatibility for servers that add them.
+//   GET /session/{id}/message → the last row of a failed session is a bare
+//     {"type":"idle","outcome":"failed"} marker. The REAL error sits on the
+//     assistant row just before it: {"type":"assistant","finish":"error",
+//     "error":{"type":"provider.transport"|"provider.quota",
+//     "message":"<literal text>","response":{...optional...}}}.
+// Only fields that are actually present (belegte Felder) are returned —
+// nothing is invented. Callers must therefore scan the whole message list
+// (newest first), not just the last row (see reconcileRunning).
 function sessionErrorText(value) {
   if (!value || typeof value !== "object") return "";
   const obj = value;
@@ -112,7 +134,12 @@ function sessionErrorText(value) {
     if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
     if (candidate && typeof candidate === "object") {
       const message = candidate.message || candidate.detail || candidate.description;
-      if (typeof message === "string" && message.trim()) return message.trim();
+      if (typeof message === "string" && message.trim()) {
+        // error.type is a reported field too (e.g. "provider.transport") —
+        // prefix it so the kind of failure is visible in resultContext.
+        const type = typeof candidate.type === "string" ? candidate.type.trim() : "";
+        return type && type !== "error" ? `${type}: ${message.trim()}` : message.trim();
+      }
       const nested = sessionErrorText(candidate);
       if (nested) return nested;
     }
@@ -128,17 +155,57 @@ function startReconciler() {
   reconcileTimer = setInterval(() => {
     reconcileRunning().catch(() => {});
     deliverResultsToParents().catch(() => {});
+    scheduleCyclicTasks().catch(() => {});
   }, 15000);
   // First pass shortly after boot.
   setTimeout(() => reconcileRunning().catch(() => {}), 8000);
   setTimeout(() => deliverResultsToParents().catch(() => {}), 20000);
+  setTimeout(() => scheduleCyclicTasks().catch(() => {}), 8000);
+}
+function messageTimestamp(message) {
+  if (!message || typeof message !== "object") return 0;
+  const candidates = [
+    message.time, message.timestamp, message.createdAt, message.created_at,
+    message.info?.time, message.info?.timestamp, message.info?.createdAt,
+    message.time?.created, message.time?.updated, message.info?.time?.created,
+    message.info?.time?.updated,
+  ];
+  for (const value of candidates) {
+    const parsed = typeof value === "number" ? value : Date.parse(String(value || ""));
+    if (Number.isFinite(parsed) && parsed > 0) return parsed < 10_000_000_000 ? parsed * 1000 : parsed;
+  }
+  return 0;
+}
+async function interruptSession(apiBase, headers, sessionId) {
+  await fetch(`${apiBase}/session/${encodeURIComponent(sessionId)}/interrupt`, {
+    method: "POST", headers,
+  });
+}
+async function scheduleCyclicTasks() {
+  const rows = await cli(["task", "list", "--status", "backlog"]).catch(() => []);
+  const now = Date.now();
+  for (const t of Array.isArray(rows) ? rows : []) {
+    if (t.kind !== "cyclic" || !Number.isFinite(Number(t.cycleIntervalSec)) || Number(t.cycleIntervalSec) <= 0) continue;
+    const last = Date.parse(t.updatedAt || t.updated_at || t.createdAt || t.created_at || "") || now;
+    if (now - last >= Number(t.cycleIntervalSec) * 1000) {
+      await cli(["task", "move", t.id, "running", "--actor", "cyclic-scheduler"]).catch(() => null);
+    }
+  }
 }
 async function reconcileRunning() {
   if (reconcileBusy) return;
   reconcileBusy = true;
   try {
-    const running = await cli(["task", "list", "--status", "running"]).catch(() => []);
-    const rows = Array.isArray(running) ? running : [];
+    const [running, blocked] = await Promise.all([
+      cli(["task", "list", "--status", "running"]).catch(() => []),
+      cli(["task", "list", "--status", "blocked"]).catch(() => []),
+    ]);
+    // A reconciler error can mark a task blocked while its OpenCode session is
+    // still active. Include blocked tasks so the session remains authoritative.
+    const rows = [
+      ...(Array.isArray(running) ? running : []),
+      ...(Array.isArray(blocked) ? blocked : []),
+    ];
     const apiBase = ocApiBase();
     const H = ocAuthHeaders();
     for (const t of rows) {
@@ -167,8 +234,26 @@ async function reconcileRunning() {
         const doneLike = ltype === "idle" && ["completed", "done", "succeeded", "success"].includes(outcome);
         const failLike = ltype === "idle" && ["failed", "error"].includes(outcome);
         const sessionFailed = ["failed", "error"].includes(outcome);
-        if (!doneLike && !failLike && !sessionFailed) continue;
-        const next = doneLike ? "done" : "blocked";
+        const lastActivity = messageTimestamp(last) || messageTimestamp(session) || updatedAt;
+        const stale = t.status === "running" && !doneLike && !failLike && !sessionFailed &&
+          lastActivity > 0 && Date.now() - lastActivity >= STALE_SESSION_MS;
+        if (stale) {
+          await interruptSession(apiBase, H, sid).catch(() => null);
+          await cli([
+            "task", "update", t.id, "--actor", "reconciler", "--status", "blocked",
+            "--result-context",
+            `session produced no message for ${Math.round((Date.now() - lastActivity) / 1000)}s; session interrupted as stale`,
+          ]).catch(() => null);
+          continue;
+        }
+        if (!doneLike && !failLike && !sessionFailed) {
+          if (t.status === "blocked") {
+            await cli(["task", "update", t.id, "--actor", "reconciler", "--status", "running"])
+              .catch(() => null);
+          }
+          continue;
+        }
+        const next = doneLike ? (t.kind === "cyclic" ? "backlog" : "done") : "blocked";
         // Last assistant text (skip user/system) → result, unless already set.
         let resultText = "";
         for (let i = messages.length - 1; i >= 0; i--) {
@@ -181,10 +266,20 @@ async function reconcileRunning() {
         const argv = ["task", "update", t.id, "--actor", "reconciler", "--status", next];
         if (resultText && !(t.result || t.result_text)) argv.push("--result", resultText);
         if (next === "blocked") {
-          const errorText = sessionErrorText(session) || sessionErrorText(last);
+          // No fabricated network diagnosis: only the literal error the
+          // session API reported. Scan the message list newest→oldest — the
+          // last row is a bare idle marker, the real error sits on the
+          // assistant row before it (see sessionErrorText docs).
+          let errorText = sessionErrorText(session);
+          if (!errorText) {
+            for (let i = messages.length - 1; i >= 0; i--) {
+              errorText = sessionErrorText(messages[i]);
+              if (errorText) break;
+            }
+          }
           const context = errorText
             ? `session outcome: ${outcome}; error: ${errorText}`
-            : `session outcome: ${outcome}; error: ConnectionRefused: Unable to connect. Is the computer able to access the URL?`;
+            : `session outcome: ${outcome}; no error detail reported by the session`;
           argv.push("--result-context", context.slice(0, 4000));
         }
         await cli(argv).catch(() => null);
@@ -416,6 +511,29 @@ async function messageToSession(opts) {
   }
 }
 
+// Flattens an error and its cause chain into one literal string so the
+// caller of /api/kanban/delegate receives the ROOT cause — e.g. the
+// "connect ECONNREFUSED 127.0.0.1:4099" that Node hides behind its generic
+// "fetch failed" message — instead of a meaningless bare 502.
+// Only fields the runtime actually reported are concatenated; nothing is invented.
+function describeErrorCause(err) {
+  const parts = [];
+  let cur = err;
+  let depth = 0;
+  while (cur != null && depth < 4) {
+    let part = "";
+    if (typeof cur === "string") part = cur;
+    else if (typeof cur.message === "string" && cur.message.trim()) part = cur.message;
+    else if (typeof cur.code === "string" && cur.code.trim()) part = cur.code;
+    else part = String(cur);
+    part = part.trim();
+    if (part && parts[parts.length - 1] !== part) parts.push(part);
+    cur = cur && typeof cur === "object" && cur.cause && cur.cause !== cur ? cur.cause : null;
+    depth += 1;
+  }
+  return parts.length ? parts.join(" — cause: ") : "unknown error";
+}
+
 // Synchronous agent→agent delegation: create a task for a teammate, run it
 // immediately via the OpenCode server, and WAIT (poll SQLite) until it lands
 // in done/blocked — like a normal read/write tool call that returns a value.
@@ -525,12 +643,15 @@ async function delegateTask(opts) {
   } catch (err) {
     if (err && typeof err === "object" && "status" in err) throw err;
     // Spawn/prompt failure → park the subtask as blocked so the board shows it.
+    // Pass the full cause chain (message + cause) to the caller: a plain
+    // 502 without the root cause made blocked tasks unanalyzable.
+    const cause = describeErrorCause(err);
     let cur = null;
     try {
       cur = await cli(["task", "update", tid, "--actor", "delegate", "--status", "blocked",
-        "--startup-phase", "error", "--startup-error", String(err?.message || err).slice(0, 500)]);
+        "--startup-phase", "error", "--startup-error", cause.slice(0, 500)]);
     } catch { /* keep original error */ }
-    throw { status: 502, message: String(err?.message || err), task: cur };
+    throw { status: 502, message: cause, task: cur };
   }
 }
 
@@ -937,7 +1058,9 @@ function kanbanApi() {
             if (b.parentSessionId !== undefined && b.parentSessionId !== null) argv.push("--parent-session-id", String(b.parentSessionId));
             if (b.result !== undefined && b.result !== null) argv.push("--result", String(b.result));
             if (b.resultContext !== undefined && b.resultContext !== null) argv.push("--result-context", String(b.resultContext));
-            if (b.acceptanceCriteria !== undefined && b.acceptanceCriteria !== null) argv.push("--acceptance-criteria", String(b.acceptanceCriteria));
+             if (b.acceptanceCriteria !== undefined && b.acceptanceCriteria !== null) argv.push("--acceptance-criteria", String(b.acceptanceCriteria));
+             if (b.kind) argv.push("--kind", String(b.kind));
+             if (b.cycleIntervalSec !== undefined && b.cycleIntervalSec !== null) argv.push("--cycle-interval-sec", String(b.cycleIntervalSec));
             if (b.blockedByTaskIds !== undefined && b.blockedByTaskIds !== null) {
               argv.push("--blocked-by", Array.isArray(b.blockedByTaskIds) ? b.blockedByTaskIds.join(",") : String(b.blockedByTaskIds));
             }
@@ -960,7 +1083,8 @@ function kanbanApi() {
               ["--startup-phase", "startupPhase"], ["--startup-error", "startupError"],
               ["--parent-session-id", "parentSessionId"],
               ["--result", "result"], ["--result-context", "resultContext"],
-              ["--acceptance-criteria", "acceptanceCriteria"],
+               ["--acceptance-criteria", "acceptanceCriteria"],
+               ["--kind", "kind"], ["--cycle-interval-sec", "cycleIntervalSec"],
             ]) {
               if (b[key] !== undefined && b[key] !== null) argv.push(flag, String(b[key]));
             }

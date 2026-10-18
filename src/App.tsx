@@ -37,10 +37,18 @@ import {
 import { isQueuedOffline } from './store/offlineQueue';
 import { useOfflineSync } from './hooks/useOfflineSync';
 import OfflineBanner from './components/OfflineBanner';
-import { fetchAgents, createSession, sendPrompt, getServerInfo, putSessionInstruction } from './api/opencode';
+import { fetchAgents, createSession, sendPrompt, getServerInfo, getSessionInstruction, putSessionInstruction } from './api/opencode';
 import { getTaskModelPref } from './store/serverConfig';
 import { resolveSessionModel, normalizeAllowedModels, isModelAllowed, formatModelRef } from './store/modelResolution';
 import { ensureAssistantSession } from './store/assistantSession';
+import {
+  TASK_INSTRUCTION_KEY,
+  buildTaskFallbackPrompt,
+  buildTaskRunPrompt,
+  buildTaskSessionInstruction,
+  preloadTaskPromptFiles,
+  resolveLanguageName,
+} from './prompts/taskPrompt';
 import KanbanColumn, { columnIcons } from './components/KanbanColumn';
 import TaskModal from './components/TaskModal';
 import SessionChatWindow from './components/SessionChatWindow';
@@ -50,6 +58,11 @@ import AgentTeamModal from './components/AgentTeamModal';
 import ServerConfigModal from './components/ServerConfigModal';
 import TaskCard from './components/TaskCard';
 
+// Re-fetch the OpenCode agent list on this cadence while the server is down
+// (it starts separately from the board), so saved project teams reappear
+// without a page reload.
+const AGENT_RETRY_MS = 5000;
+
 const COLUMNS: { status: TaskStatus; title: string }[] = [
   { status: 'backlog', title: 'Backlog' },
   { status: 'running', title: 'In Progress' },
@@ -57,35 +70,11 @@ const COLUMNS: { status: TaskStatus; title: string }[] = [
   { status: 'blocked', title: 'Blocked' },
 ];
 
-// Customizable agent style (prompts/final-message-style.md), loaded once.
-// Edit the file + refresh the page to change what agents are told.
-let styleGuideCache: string | null = null;
-let taskPreambleCache: string | null = null;
-async function loadStyleGuide(): Promise<string> {
-  if (styleGuideCache !== null) return styleGuideCache;
-  try {
-    const r = await fetch('/api/kanban/prompts/final-message-style.md');
-    styleGuideCache = r.ok ? (await r.text()).trim() : '';
-  } catch { styleGuideCache = ''; }
-  return styleGuideCache;
-}
-void loadStyleGuide();
-
-async function loadTaskPreamble(): Promise<string> {
-  if (taskPreambleCache !== null) return taskPreambleCache;
-  try {
-    const r = await fetch('/api/kanban/prompts/task-agent-preamble.md');
-    if (r.ok) {
-      const text = (await r.text()).trim();
-      // Resolve the placeholder to the actual HTTP/HTTPS origin used by Vite.
-      const serverUrl = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3001';
-      taskPreambleCache = text.replaceAll('{{serverUrl}}', serverUrl);
-    } else taskPreambleCache = '';
-  } catch { taskPreambleCache = ''; }
-  return taskPreambleCache;
-}
-
-void loadTaskPreamble();
+// Customizable agent prompt files (prompts/final-message-style.md and
+// prompts/task-agent-preamble.md), loaded once and cached in
+// src/prompts/taskPrompt.ts. Edit the file + refresh the page to change what
+// agents are told. Preloaded so the first task start never waits on the fetch.
+preloadTaskPromptFiles();
 
 export default function App() {
   // State
@@ -199,43 +188,59 @@ export default function App() {
     }
   }, []);
 
-  // Load agents from OpenCode API
+  // Load agents from OpenCode API.
+  // The OpenCode server starts separately, so at board startup the fetch often
+  // fails or returns []. Never let that clobber an already loaded real agent
+  // list with the demo fallback — that used to shrink every project's visible
+  // team to the two demo ids that happen to overlap ("coder", "reviewer").
+  // Instead: keep the last real list and retry with a fixed backoff until the
+  // server answers, so the board self-heals without a page reload.
+  const agentsLoadedRef = useRef(false); // a real (non-demo) list arrived at least once
+  const agentRetryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const loadAgents = useCallback(async () => {
     try {
       const agentData: OpenCodeAgentInfo[] = await fetchAgents();
       if (agentData.length > 0) {
         setAgents(agentData.map(a => ({ id: a.id, name: a.name, description: a.description, color: a.color })));
         setIsConnected(true);
-      } else {
-        // Demo agents
-        setAgents([
-          { id: 'coder', name: 'Coder', description: 'General coding agent', color: '#8b5cf6' },
-          { id: 'reviewer', name: 'Reviewer', description: 'Code review agent', color: '#3b82f6' },
-          { id: 'tester', name: 'Tester', description: 'Testing agent', color: '#10b981' },
-          { id: 'architect', name: 'Architect', description: 'Architecture agent', color: '#f59e0b' },
-          { id: 'debugger', name: 'Debugger', description: 'Debugging agent', color: '#ef4444' },
-        ]);
-        setIsConnected(false);
-        // No real agents → is the server still disconnected? Only prompt
-        // when /api/kanban/server has no password stored (server-side).
-        try {
-          const r = await fetch('/api/kanban/server');
-          const j = await r.json().catch(() => ({}));
-          if (!j?.hasPassword) setShowServerModal(true);
-        } catch {
-          setShowServerModal(true);
-        }
+        agentsLoadedRef.current = true;
+        return;
       }
     } catch {
+      // fall through to the retry/demo handling below
+    }
+    setIsConnected(false);
+    // Demo agents only until the first real list arrives.
+    if (!agentsLoadedRef.current) {
       setAgents([
-        { id: 'coder', name: 'Coder', description: 'Coding agent', color: '#8b5cf6' },
+        { id: 'coder', name: 'Coder', description: 'General coding agent', color: '#8b5cf6' },
         { id: 'reviewer', name: 'Reviewer', description: 'Code review agent', color: '#3b82f6' },
         { id: 'tester', name: 'Tester', description: 'Testing agent', color: '#10b981' },
         { id: 'architect', name: 'Architect', description: 'Architecture agent', color: '#f59e0b' },
         { id: 'debugger', name: 'Debugger', description: 'Debugging agent', color: '#ef4444' },
       ]);
-      setIsConnected(false);
+      // No real agents yet → is the server still disconnected? Only prompt
+      // when /api/kanban/server has no password stored (server-side).
+      try {
+        const r = await fetch('/api/kanban/server');
+        const j = await r.json().catch(() => ({}));
+        if (!j?.hasPassword) setShowServerModal(true);
+      } catch {
+        setShowServerModal(true);
+      }
     }
+    // Retry until the server comes up (the success path returns early).
+    if (agentRetryRef.current) clearTimeout(agentRetryRef.current);
+    agentRetryRef.current = setTimeout(() => {
+      agentRetryRef.current = null;
+      void loadAgents();
+    }, AGENT_RETRY_MS);
+  }, []);
+
+  // Stop the retry loop when the board unmounts.
+  useEffect(() => () => {
+    if (agentRetryRef.current) clearTimeout(agentRetryRef.current);
   }, []);
 
   const handleServerConnected = useCallback(() => {
@@ -309,9 +314,14 @@ export default function App() {
   // Get available agents for current project.
   // If the project has no team configured yet, fall back to all agents
   // so the New Task modal still offers an agent picker.
+  // Every id stored on the project stays visible: when the live agent list
+  // is incomplete (OpenCode down/restarting, demo fallback), the missing
+  // ids surface as id-only placeholders instead of silently disappearing.
   const availableAgents = activeProject
     ? (activeProject.agentIds.length > 0
-        ? agents.filter(a => activeProject.agentIds.includes(a.id))
+        ? activeProject.agentIds.map((id) => (
+            agents.find((a) => a.id === id) || { id, name: id, description: 'Agent id saved on this project (not in the live agent list)' }
+          ))
         : agents)
     : [];
 
@@ -392,82 +402,20 @@ export default function App() {
     }
   };
 
-  const buildTaskPrompt = (task: Task): string => {
-    const taskPreamble = taskPreambleCache?.trim() || '# Task agent instructions\n\nExecute this task autonomously from start to finish.';
-    const styleSnippet = styleGuideCache?.trim() || '- Use Simplified Technical English (ASD-STE100) in your final message: approved simple verbs (add, remove, update, move, rename, fix, replace), one instruction per sentence, maximum 20 words per sentence, no jargon.';
-    const languageNames: Record<string, string> = { en: 'English', de: 'German', fr: 'French', es: 'Spanish', it: 'Italian', pt: 'Portuguese', nl: 'Dutch' };
-    const configuredLanguage = languageNames[readSpeechLang()] ?? 'English';
-    const title = task.title?.trim() || 'Untitled task';
-    const desc = task.description?.trim() || '(no description provided)';
-    const prio = task.priority ? task.priority.charAt(0).toUpperCase() + task.priority.slice(1) : 'Medium';
-    const project = projects.find((p) => p.id === task.projectId);
-    const projectName = project?.name?.trim();
-    const projectPath = project?.path?.trim();
-    // Agent team context: assigned agent + project team roster + all known agents.
-    const assigned = task.agentId
-      ? (agents.find((a) => a.id === task.agentId) ?? { id: task.agentId, name: task.agentName ?? task.agentId })
-      : undefined;
-    const teamIds = project?.agentIds ?? [];
-    const teamAgents = teamIds
-      .map((id) => agents.find((a) => a.id === id))
-      .filter((a): a is Agent => Boolean(a));
-    const teamLines = teamAgents.length > 0
-      ? teamAgents.map((a) => `- ${a.name} (id: ${a.id})${a.description ? ` — ${a.description}` : ''}`).join('\n')
-      : teamIds.length > 0
-        ? teamIds.map((id) => `- (id: ${id})`).join('\n')
-        : '(no project team configured — all agents available)';
-    const headerLines = [
-      taskPreamble,
-      '',
-      `# ${title}`,
-      '',
-      `**Project:** ${projectName ? `${projectName}${projectPath ? ` (${projectPath})` : ''}` : '(unknown)'}`,
-      `**Priority:** ${prio}`,
-      `**Task id:** ${task.id}`,
-      `**Project id:** ${task.projectId}`,
-      task.sessionId ? `**Your session id:** ${task.sessionId}` : undefined,
-      task.parentSessionId
-        ? `**Parent session:** ${task.parentSessionId} (the session that created this task — report back there if needed)`
-        : `**Parent session:** — (created directly by user/board)`,
-      assigned ? `**Assigned agent:** ${assigned.name} (id: ${assigned.id})` : undefined,
-      '',
-      `**Team for this project:**`,
-      teamLines,
-      '',
-      `## What to do`,
-      '',
-      desc,
-      '',
-      `## How to work`,
-      '',
-      `- Execute autonomously end-to-end: read the project, plan if needed, make the changes, leave it in a working state.`,
-      `- Ask the user only if blocked; keep the final message concise — it becomes the stored task result automatically.`,
-      `- No status update needed: the board follows your session outcome by itself (end → done, failure → blocked) and captures your last message as the result.`,
-      styleSnippet,
-      `- Write all chat output, task results, and summaries in ${configuredLanguage}.`,
-      `- Use Simplified Technical English (ASD-STE100) principles: short sentences, simple verbs, direct statements, and specific results.`,
-      `- Keep technical names, file paths, API paths, IDs, and code unchanged.`,
-      '',
-      `## Working with other tasks (optional)`,
-      '',
-      `- API base: http://localhost:3001/api (full spec: http://localhost:3001/api/kanban/docs).`,
-      `- Follow-up work: POST /api/kanban/tasks { "projectId": "${task.projectId}", "title": "...", "description": "...", "priority": "medium", "parentSessionId": "${task.sessionId ?? '<your session id>'}" }.`,
-      `- Delegate + WAIT for result (sync): POST /api/kanban/delegate { "projectId": "${task.projectId}", "title": "...", "description": "...", "agentId": "<teammate-id>", "parentSessionId": "${task.sessionId ?? '<your session id>'}" } → returns the finished Task.`,
-      `- Follow-up in the SAME subtask session: POST /api/kanban/message_to { "sessionId": "<from delegate>", "text": "..." } (or { "taskId": "<subtask-id>", "text": "..." }) → { sessionId, resultText }.`,
-      `- List work: GET /api/kanban/tasks?projectId=${task.projectId}.`,
-      '',
-      `## Project instructions and lessons`,
-      '',
-      `- Read the project-local AGENTS.md before planning when it exists.`,
-      `- Add durable project instructions, decisions, conventions, commands, and lessons to AGENTS.md.`,
-      `- Create AGENTS.md in the project root when the user asks to save durable guidance.`,
-      `- Update existing entries instead of adding duplicates.`,
-      `- Keep temporary task notes in the task description or result.`,
-      `- Never store passwords, tokens, private keys, or other secrets in AGENTS.md.`,
-      `- Report AGENTS.md changes in the final task result.`,
-    ].filter(Boolean).join('\n');
-    return headerLines;
-  };
+  // Prompt layers (src/prompts/taskPrompt.ts):
+  //   layer 2 — session instruction: static contract, installed ONCE when the
+  //             session is created;
+  //   layer 3 — execution prompt: short, sent once per run (and once per
+  //             cyclical cycle). Only carries what changes between runs.
+  const taskPromptCtx = (task: Task, sessionId: string, firstRun: boolean) => ({
+    task,
+    project: projects.find((p) => p.id === task.projectId),
+    agents,
+    sessionId,
+    language: resolveLanguageName(readSpeechLang()),
+    firstRun,
+    runTime: new Date().toISOString(),
+  });
 
   const resolveAgentForTask = (task: Task): { id?: string; name?: string } => {
     if (task.agentId) {
@@ -568,7 +516,10 @@ export default function App() {
         : pool.length ? 'project' : 'none';
 
     // Reuse existing session if the task already has one, otherwise create it.
+    // A cyclical task comes back here every cycle with the SAME sessionId, so
+    // the durable instruction below is only written on the very first run.
     let sessionId = task.sessionId;
+    const isNewSession = !sessionId;
     if (!sessionId) {
       // Show progress on the card — chat stays closed until the user opens it.
       upsertTaskInState({ ...task, startupPhase: 'creating-session', startupError: undefined } as Task);
@@ -599,13 +550,31 @@ export default function App() {
       upsertTaskInState({ ...task, startupPhase: 'sending-prompt', startupError: undefined } as Task);
     }
 
-    // Execute the task: title + description go out as the prompt message
-    // on EVERY transition to running — including re-drops of an existing session.
-    const prompt = buildTaskPrompt(task);
-    // Durable task contract, matching the board assistant preamble behavior.
-    await putSessionInstruction(sessionId, 'task-agent', prompt);
-    console.log('startTaskExecution: sending prompt for task', task.id, '→ session', sessionId);
-    const sent = await sendPrompt(sessionId, prompt, resolved.id);
+    // Layer 2 — the durable task contract. Written ONLY when this session is
+    // created. Later runs of the same session (cyclical cycles, re-drops of a
+    // running card) keep the existing entry instead of resending the whole
+    // contract into the conversation.
+    const ctx = taskPromptCtx(task, sessionId!, isNewSession);
+    // Layer 3 — short execution prompt, sent once per run.
+    let prompt = buildTaskRunPrompt(ctx);
+    // Existing sessions created before the three-layer rollout are migrated
+    // lazily on their next run. This avoids sending a short prompt without a
+    // durable contract, while still avoiding repeated PUTs after migration.
+    let needsInstruction = isNewSession;
+    if (!needsInstruction) {
+      needsInstruction = (await getSessionInstruction(sessionId!, TASK_INSTRUCTION_KEY)) === null;
+    }
+    if (needsInstruction) {
+      const put = await putSessionInstruction(sessionId!, TASK_INSTRUCTION_KEY, buildTaskSessionInstruction(ctx));
+      if (!put.ok) {
+        // Degrade to the old behaviour: inline the full contract so a failed
+        // instruction PUT never leaves the agent without rules.
+        console.warn('task instruction entry failed, sending the full prompt inline:', put.error);
+        prompt = buildTaskFallbackPrompt(ctx);
+      }
+    }
+    console.log('startTaskExecution: sending prompt for task', task.id, '→ session', sessionId, isNewSession ? '(new session)' : '(reused session)');
+    const sent = await sendPrompt(sessionId!, prompt, resolved.id);
     if (!sent.ok) {
       await fail(`Failed to send prompt: ${sent.error ?? 'unknown error'}`, task.id);
       await ensureFixTask(
@@ -703,7 +672,10 @@ export default function App() {
     modelId?: string;
     modelProviderID?: string;
     result?: string;
-    resultContext?: string;
+     resultContext?: string;
+     kind?: Task['kind'];
+     cycleIntervalSec?: number;
+     blockedByTaskIds?: string[];
   }) => {
     if (!activeProjectId) return;
 
@@ -724,9 +696,12 @@ export default function App() {
           agentId: data.agentId,
           agentName: data.agentName,
           modelId: data.modelId,
-          modelProviderID: data.modelProviderID,
+         modelProviderID: data.modelProviderID,
+         kind: data.kind,
+         cycleIntervalSec: data.cycleIntervalSec,
           result: data.result,
           resultContext: data.resultContext,
+          blockedByTaskIds: data.blockedByTaskIds ?? [],
         } as unknown as Partial<Task>);
       } catch (e) {
         if (isQueuedOffline(e)) {
@@ -756,6 +731,7 @@ export default function App() {
         agentName: data.agentName,
         modelId: data.modelId,
         modelProviderID: data.modelProviderID,
+        blockedByTaskIds: data.blockedByTaskIds ?? [],
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
@@ -777,8 +753,11 @@ export default function App() {
            data.modelProviderID,
            undefined,
            undefined,
-           data.acceptanceCriteria,
-            queuedId
+             queuedId,
+             data.acceptanceCriteria,
+             data.blockedByTaskIds,
+             data.kind,
+             data.cycleIntervalSec
         );
         // Online path: server echoed its row (same queuedId) — drop the temp
         // card and show the confirmed row.
@@ -1271,6 +1250,8 @@ export default function App() {
         onSave={handleSaveTask}
         task={editingTask}
         availableAgents={availableAgents}
+        tasks={[...tasks.backlog, ...tasks.running, ...tasks.done, ...tasks.blocked]
+          .filter((t) => !activeProjectId || t.projectId === activeProjectId)}
         allowedModels={activeProject?.allowedModels}
       />
 
