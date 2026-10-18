@@ -24,6 +24,7 @@ import {
   saveAssistantPrefs,
 } from '../store/assistantSession';
 import { isModelAllowed } from '../store/modelResolution';
+import { createTask } from '../store/kanban';
 
 interface AssistantChatWindowProps {
   project: Project | null;
@@ -386,6 +387,16 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
     finally { setReviewing(null); }
   };
 
+  const handleForkTask = async (messageId: string) => {
+    if (!sessionId || !project || sending) return;
+    setSending(true);
+    const fork = await forkSession(sessionId, messageId);
+    if (!fork.ok || !fork.sessionId) { setSending(false); setSendError(fork.error ?? 'Could not fork session'); return; }
+    const child = await createTask(project.id, 'Forked chat task', `Forked from assistant session ${sessionId} before message ${messageId}.`, 'medium', selectedAgentId || undefined, selectedAgent?.name, fork.sessionId, selectedModel.split('/').slice(1).join('/') || undefined, selectedModel.split('/')[0] || undefined);
+    setSending(false);
+    if (!child) setSendError('Could not create forked task');
+  };
+
   const selectedAgent = availableAgents.find((a) => a.id === selectedAgentId);
   const sessionAgent = (session as any)?.agent
     ? (typeof (session as any).agent === 'string' ? (session as any).agent : (session as any).agent?.name || (session as any).agent?.id)
@@ -522,7 +533,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
              if (msg.kind === 'error') return <ChatErrorRow key={msg.id} msg={msg} detail={msg.id.endsWith('-outcome') ? sessionError : null} onReview={handleReview} />;
             if (msg.kind === 'reasoning') return <ThinkingBlock key={msg.id} msg={msg} showAvatar={startsTurn} agentName={agentName} modelName={modelHint} onFileClick={(p) => setPreviewPath(p)} />;
              if (msg.kind === 'event') return <div key={msg.id} className="text-center text-[11px] font-bold mono py-1" style={{ color: 'var(--muted)' }}>{msg.markdown}</div>;
-              return <ChatBubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : agentName} modelName={msg.kind === 'user' ? undefined : modelHint} showAvatar={msg.kind === 'user' ? true : startsTurn} onFileClick={(p) => setPreviewPath(p)} onTaskClick={onTaskClick} onReview={handleReview} onEdit={async (m) => { if (!sessionId || !project) return; const fork = await forkSession(sessionId, m.id); if (!fork.ok || !fork.sessionId) { setSendError(fork.error ?? 'Could not edit message'); return; } setSessionId(fork.sessionId); saveAssistantSessionId(project.id, fork.sessionId); const res = await sendPrompt(fork.sessionId, m.markdown, selectedModel); if (!res.ok) setSendError(res.error ?? 'Could not send edited message'); }} />;
+              return <ChatBubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : agentName} modelName={msg.kind === 'user' ? undefined : modelHint} showAvatar={msg.kind === 'user' ? true : startsTurn} onFileClick={(p) => setPreviewPath(p)} onTaskClick={onTaskClick} onReview={handleReview} onEdit={async (m) => { if (!sessionId || !project) return; const fork = await forkSession(sessionId, m.id); if (!fork.ok || !fork.sessionId) { setSendError(fork.error ?? 'Could not edit message'); return; } setSessionId(fork.sessionId); saveAssistantSessionId(project.id, fork.sessionId); const res = await sendPrompt(fork.sessionId, m.markdown, selectedModel); if (!res.ok) setSendError(res.error ?? 'Could not send edited message'); }} onClear={async (m) => { if (!sessionId || !project) return; const fork = await forkSession(sessionId, m.id); if (!fork.ok || !fork.sessionId) { setSendError(fork.error ?? 'Could not clear messages'); return; } setSessionId(fork.sessionId); saveAssistantSessionId(project.id, fork.sessionId); }} onFork={(m) => handleForkTask(m.id)} />;
           })}
           <div ref={bottomRef} />
           {busy && msgCount > 0 && (
@@ -583,3 +594,4 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
     </div>
   );
 }
+

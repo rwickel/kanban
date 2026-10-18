@@ -9,6 +9,7 @@ import { answerTool, sendPrompt, forkSession, interruptSession, fetchModels } fr
 import { isModelAllowed } from '../store/modelResolution';
 import { useSessionStream } from '../hooks/useSessionStream';
 import { chatToMarkdown } from './chatEvents';
+import { createTask } from '../store/kanban';
 import { STATUS_DOT, ThinkingBlock, ToolRow, ChatBubble, ChatErrorRow, ReviewTarget } from './ChatFeed';
 import { useSpeechInput } from '../hooks/useSpeechInput';
 import FilePreviewModal from './FilePreviewModal';
@@ -232,6 +233,26 @@ export default function SessionChatWindow({ task, onClose, standalone, onTaskCli
     if (!res.ok) setSendError(`Edit failed — ${res.error ?? 'could not send replacement'}`);
   };
 
+  const handleClearMessages = async (messageId: string) => {
+    if (!sessionId || sending || busy) return;
+    setSending(true);
+    setSendError(null);
+    const fork = await forkSession(sessionId, messageId);
+    setSending(false);
+    if (!fork.ok || !fork.sessionId) { setSendError(`Clear failed — ${fork.error ?? 'could not create conversation branch'}`); return; }
+    setActiveSessionId(fork.sessionId);
+  };
+
+  const handleForkTask = async (messageId: string) => {
+    if (!sessionId || !task || sending || busy) return;
+    setSending(true);
+    const fork = await forkSession(sessionId, messageId);
+    if (!fork.ok || !fork.sessionId) { setSending(false); setSendError(`Fork failed — ${fork.error ?? 'could not fork session'}`); return; }
+    const child = await createTask(task.projectId, `Fork: ${task.title}`, `Forked from ${task.id} before message ${messageId}.`, task.priority, task.agentId, task.agentName, fork.sessionId, task.modelId, task.modelProviderID);
+    setSending(false);
+    if (!child) setSendError('Fork failed — could not create task');
+  };
+
   // Answer a blocked `question` tool (a pending form server-side). The session
   // stays busy until the form resolves, so the picker lives in the tool row.
   const handleAnswer = async (toolCallId: string, answer: Record<string, string | string[]>) => {
@@ -360,7 +381,7 @@ export default function SessionChatWindow({ task, onClose, standalone, onTaskCli
            if (msg.kind === 'error') return <ChatErrorRow key={msg.id} msg={msg} detail={msg.id.endsWith('-outcome') ? sessionError : null} onReview={handleReview} />;
            if (msg.kind === 'reasoning') return <ThinkingBlock key={msg.id} msg={msg} showAvatar={startsTurn} agentName={task.agentName} modelName={modelHint} onFileClick={(p) => setPreviewPath(p)} />;
            if (msg.kind === 'event') return <div key={msg.id} className="text-center text-[11px] font-bold mono py-1" style={{ color: 'var(--muted)' }}>{msg.markdown}</div>;
-            return <ChatBubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : task.agentName} modelName={msg.kind === 'user' ? undefined : modelHint} showAvatar={msg.kind === 'user' ? true : startsTurn} onFileClick={(p) => setPreviewPath(p)} onTaskClick={onTaskClick} onReview={handleReview} onEdit={(m) => void handleEditMessage(m.id, m.markdown)} />;
+            return <ChatBubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : task.agentName} modelName={msg.kind === 'user' ? undefined : modelHint} showAvatar={msg.kind === 'user' ? true : startsTurn} onFileClick={(p) => setPreviewPath(p)} onTaskClick={onTaskClick} onReview={handleReview} onEdit={(m) => void handleEditMessage(m.id, m.markdown)} onClear={(m) => void handleClearMessages(m.id)} onFork={(m) => handleForkTask(m.id)} />;
         })}
         <div ref={bottomRef} />
         {busy && msgCount > 0 && (
@@ -427,3 +448,4 @@ export default function SessionChatWindow({ task, onClose, standalone, onTaskCli
     </div>
   );
 }
+

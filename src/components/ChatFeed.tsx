@@ -5,7 +5,7 @@
 import { useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Bot, User, ChevronDown, Wrench, Check, Copy, AlertTriangle, Search, Pencil } from 'lucide-react';
+import { Bot, User, ChevronDown, Wrench, Check, Copy, AlertTriangle, Search, Pencil, Trash2, GitFork } from 'lucide-react';
 import type { ChatStatus } from '../hooks/useSessionStream';
 import type { ChatMessage, QuestionItem } from './chatEvents';
 import { linkifyFilePaths, parsePreviewHref } from './filePaths';
@@ -506,10 +506,11 @@ export function ToolRow({ msg, onFileClick, onAnswered, onReview }: { msg: ChatM
   );
 }
 
-export function ChatBubble({ msg, agentName, modelName, showAvatar = true, onFileClick, onTaskClick, onReview, onEdit }: { msg: ChatMessage; agentName?: string; modelName?: string; showAvatar?: boolean; onFileClick: (absPath: string) => void; onTaskClick?: (kind: 'task' | 'session', id: string) => void; onReview?: (target: ReviewTarget) => void; onEdit?: (msg: ChatMessage) => void }) {
+export function ChatBubble({ msg, agentName, modelName, showAvatar = true, onFileClick, onTaskClick, onReview, onEdit, onClear, onFork }: { msg: ChatMessage; agentName?: string; modelName?: string; showAvatar?: boolean; onFileClick: (absPath: string) => void; onTaskClick?: (kind: 'task' | 'session', id: string) => void; onReview?: (target: ReviewTarget) => void; onEdit?: (msg: ChatMessage) => void; onClear?: (msg: ChatMessage) => void; onFork?: (msg: ChatMessage) => void }) {
   const [copied, setCopied] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(msg.markdown);
+  const [forkNotice, setForkNotice] = useState(false);
   const isUser = msg.kind === 'user';
   const metaAgent = msg.meta?.agent ?? agentName;
   const metaModel = msg.meta?.model ?? modelName;
@@ -604,6 +605,9 @@ export function ChatBubble({ msg, agentName, modelName, showAvatar = true, onFil
           >{linkifyKanbanRefs(linkifyFilePaths(msg.markdown))}</Markdown>}
           {onReview && !isUser && msg.markdown.trim() && <button type="button" onClick={() => onReview({ messageId: msg.id, kind: 'assistant', markdown: msg.markdown })} className="btn absolute right-7 bottom-1 inline-flex items-center justify-center p-1" title="Review this message" aria-label="Review this message"><Search className="w-3 h-3" strokeWidth={1.75} /></button>}
           {onEdit && isUser && !editing && <button type="button" onClick={() => { setDraft(msg.markdown); setEditing(true); }} className="btn absolute left-1 bottom-1 z-10 inline-flex items-center justify-center p-1" style={{ color: 'var(--accent-text)', background: 'color-mix(in srgb, var(--accent-text) 18%, var(--accent))', borderColor: 'color-mix(in srgb, var(--accent-text) 35%, var(--accent))' }} title="Edit message" aria-label="Edit message"><Pencil className="w-3 h-3" strokeWidth={1.75} /></button>}
+          {onClear && isUser && !editing && <button type="button" onClick={() => onClear(msg)} className="btn absolute left-7 bottom-1 z-10 inline-flex items-center justify-center p-1" style={{ color: 'var(--accent-text)', background: 'color-mix(in srgb, var(--accent-text) 18%, var(--accent))', borderColor: 'color-mix(in srgb, var(--accent-text) 35%, var(--accent))' }} title="Clear this and following messages" aria-label="Clear this and following messages"><Trash2 className="w-3 h-3" strokeWidth={1.75} /></button>}
+          {onFork && isUser && !editing && <button type="button" onClick={async () => { await onFork(msg); setForkNotice(true); window.setTimeout(() => setForkNotice(false), 2200); }} className="btn absolute left-[52px] bottom-1 z-10 inline-flex items-center justify-center p-1" style={{ color: 'var(--accent-text)', background: 'color-mix(in srgb, var(--accent-text) 18%, var(--accent))', borderColor: 'color-mix(in srgb, var(--accent-text) 35%, var(--accent))' }} title="Fork into new task" aria-label="Fork into new task"><GitFork className="w-3 h-3" strokeWidth={1.75} /></button>}
+          {forkNotice && <span className="fixed left-1/2 bottom-6 z-[100] -translate-x-1/2 rounded-lg px-4 py-2.5 text-[12px] font-semibold mono whitespace-nowrap shadow-lg" style={{ background: 'var(--emerald)', color: 'var(--bg)', border: '1px solid var(--emerald)' }}>✓ Forked chat into new task</span>}
           <button
             type="button"
             onClick={copyMessage}
