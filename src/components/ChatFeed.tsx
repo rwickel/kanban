@@ -566,11 +566,11 @@ export function ChatBubble({ msg, agentName, modelName, showAvatar = true, onFil
           <Bot className="w-3.5 h-3.5 muted" strokeWidth={1.75} />
         </div>
       ) : <div className="w-6 shrink-0" />)}
-      <div className={`min-w-0 max-w-[88%] ${isUser ? 'order-first' : ''}`}>
+       <div className={`min-w-0 w-full max-w-[88%] ${isUser ? 'order-first' : ''}`}>
         {!isUser && showAvatar && agentName && (
           <p className="text-[10px] font-semibold uppercase tracking-widest muted mb-1 ml-1 mono">{agentName}</p>
         )}
-        <div className="md-body relative text-[12.5px] leading-relaxed break-words"
+         <div className="md-body relative w-full text-[12.5px] leading-relaxed break-words"
           style={isUser
             ? { background: 'var(--accent)', color: 'var(--accent-text)', border: '1px solid var(--accent)', borderRadius: 6, padding: '8px 10px 28px' }
             : { background: 'var(--surface)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 6, padding: '8px 10px 28px' }}>
@@ -603,7 +603,7 @@ export function ChatBubble({ msg, agentName, modelName, showAvatar = true, onFil
             }}
           >{linkifyKanbanRefs(linkifyFilePaths(msg.markdown))}</Markdown>}
           {onReview && !isUser && msg.markdown.trim() && <button type="button" onClick={() => onReview({ messageId: msg.id, kind: 'assistant', markdown: msg.markdown })} className="btn absolute right-7 bottom-1 inline-flex items-center justify-center p-1" title="Review this message" aria-label="Review this message"><Search className="w-3 h-3" strokeWidth={1.75} /></button>}
-          {onEdit && isUser && !editing && <button type="button" onClick={() => { setDraft(msg.markdown); setEditing(true); }} className="btn absolute left-1 bottom-1 z-10 inline-flex items-center justify-center p-1.5" style={{ color: 'var(--accent-text)', background: 'color-mix(in srgb, var(--accent-text) 18%, var(--accent))', borderColor: 'color-mix(in srgb, var(--accent-text) 35%, var(--accent))' }} title="Edit message" aria-label="Edit message"><Pencil className="w-3.5 h-3.5" strokeWidth={2} /></button>}
+          {onEdit && isUser && !editing && <button type="button" onClick={() => { setDraft(msg.markdown); setEditing(true); }} className="btn absolute left-1 bottom-1 z-10 inline-flex items-center justify-center p-1" style={{ color: 'var(--accent-text)', background: 'color-mix(in srgb, var(--accent-text) 18%, var(--accent))', borderColor: 'color-mix(in srgb, var(--accent-text) 35%, var(--accent))' }} title="Edit message" aria-label="Edit message"><Pencil className="w-3 h-3" strokeWidth={1.75} /></button>}
           <button
             type="button"
             onClick={copyMessage}
