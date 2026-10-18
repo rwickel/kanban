@@ -6,7 +6,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { X, Send, Loader2, Copy, Check, RefreshCw, Plus, Download, Square, Mic, MicOff, ExternalLink } from 'lucide-react';
 import { Agent, OpenCodeModelInfo, Project } from '../types';
-import { answerTool, createSession, sendPrompt, switchSessionAgent, switchSessionModel, interruptSession, fetchModels } from '../api/opencode';
+import { answerTool, createSession, sendPrompt, forkSession, switchSessionAgent, switchSessionModel, interruptSession, fetchModels } from '../api/opencode';
 import { useSessionStream } from '../hooks/useSessionStream';
 import { useSpeechInput } from '../hooks/useSpeechInput';
 import { useAutoContinue } from '../hooks/useAutoContinue';
@@ -20,6 +20,7 @@ import {
   readAssistantAgentPref,
   readAssistantModelPref,
   readAssistantSessionId,
+  saveAssistantSessionId,
   saveAssistantPrefs,
 } from '../store/assistantSession';
 import { isModelAllowed } from '../store/modelResolution';
@@ -52,6 +53,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [input, setInput] = useState('');
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
@@ -352,16 +354,22 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
   const handleSend = async (e?: React.FormEvent) => {
     e?.preventDefault();
     const text = input.trim();
-    if (!text || sending) return;
+    if (!text || sending || !project) return;
     setInterrupted(false);
     setSending(true);
     setSendError(null);
     const sid = await ensureSession();
     if (!sid) { setSending(false); return; }
-    const res = await sendPrompt(sid, text, selectedModel);
+    const fork = editingMessageId ? await forkSession(sid, editingMessageId) : { ok: true, sessionId: sid };
+    if (fork.ok && fork.sessionId && editingMessageId) {
+      setSessionId(fork.sessionId);
+      saveAssistantSessionId(project.id, fork.sessionId);
+    }
+    const res = fork.ok && fork.sessionId ? await sendPrompt(fork.sessionId, text, selectedModel) : { ok: false, error: fork.error ?? 'Could not create edited conversation' };
     setSending(false);
     if (res.ok) {
       setInput('');
+      setEditingMessageId(null);
       retry();
     } else {
       setSendError(`Failed to send — ${res.error ?? 'unknown error'}`);
@@ -513,7 +521,8 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
              if (msg.kind === 'tool') return <ToolRow key={msg.id} msg={msg} onFileClick={(p) => setPreviewPath(p)} onAnswered={(id, out) => { answerTool(sessionId!, id, out).then((r) => { if (!r.ok) setSendError(`Could not send the answer — ${r.error ?? 'unknown error'}`); retry(); }); }} onReview={handleReview} />;
              if (msg.kind === 'error') return <ChatErrorRow key={msg.id} msg={msg} detail={msg.id.endsWith('-outcome') ? sessionError : null} onReview={handleReview} />;
             if (msg.kind === 'reasoning') return <ThinkingBlock key={msg.id} msg={msg} showAvatar={startsTurn} agentName={agentName} modelName={modelHint} onFileClick={(p) => setPreviewPath(p)} />;
-             return <ChatBubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : agentName} modelName={msg.kind === 'user' ? undefined : modelHint} showAvatar={msg.kind === 'user' ? true : startsTurn} onFileClick={(p) => setPreviewPath(p)} onTaskClick={onTaskClick} onReview={handleReview} />;
+             if (msg.kind === 'event') return <div key={msg.id} className="text-center text-[11px] font-bold mono py-1" style={{ color: 'var(--muted)' }}>{msg.markdown}</div>;
+              return <ChatBubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : agentName} modelName={msg.kind === 'user' ? undefined : modelHint} showAvatar={msg.kind === 'user' ? true : startsTurn} onFileClick={(p) => setPreviewPath(p)} onTaskClick={onTaskClick} onReview={handleReview} onEdit={async (m) => { if (!sessionId || !project) return; const fork = await forkSession(sessionId, m.id); if (!fork.ok || !fork.sessionId) { setSendError(fork.error ?? 'Could not edit message'); return; } setSessionId(fork.sessionId); saveAssistantSessionId(project.id, fork.sessionId); const res = await sendPrompt(fork.sessionId, m.markdown, selectedModel); if (!res.ok) setSendError(res.error ?? 'Could not send edited message'); }} />;
           })}
           <div ref={bottomRef} />
           {busy && msgCount > 0 && (

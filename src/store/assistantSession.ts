@@ -29,6 +29,10 @@ export function clearAssistantSession(projectId: string): void {
   try { localStorage.removeItem(assistantSessionKey(projectId)); } catch {}
 }
 
+export function saveAssistantSessionId(projectId: string, sessionId: string): void {
+  try { localStorage.setItem(assistantSessionKey(projectId), sessionId); } catch {}
+}
+
 export function readAssistantAgentPref(projectId: string): string {
   try { return localStorage.getItem(`${AGENT_PREFIX}${projectId}`) || ''; } catch { return ''; }
 }

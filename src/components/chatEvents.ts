@@ -54,7 +54,7 @@ export interface MessageMeta {
 export interface ChatMessage {
   /** message id (msg_...) — stable across polls */
   id: string;
-  kind: 'user' | 'assistant' | 'reasoning' | 'tool' | 'error';
+  kind: 'user' | 'assistant' | 'reasoning' | 'tool' | 'error' | 'event';
   /** Markdown body for user/assistant/reasoning/error messages. */
   markdown: string;
   tool?: ToolCallInfo;
@@ -648,7 +648,13 @@ export function toChatMessage(raw: unknown): ChatMessage[] {
     }
   }
 
-  // idle / compaction / agent-switched / ... without content: noise
+  if (type === 'agent-switched') {
+    const agent = str(m.agent) || 'unknown';
+    const previous = str(m.previous);
+    return [{ id, kind: 'event', markdown: `Agent switched to ${agent}${previous ? ` (previously ${previous})` : ''}.`, ...at }];
+  }
+
+  // idle / compaction / ... without content: noise
   const content = Array.isArray(m.content) ? (m.content as Payload[]) : [];
   if (content.length === 0) return [];
 

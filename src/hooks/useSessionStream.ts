@@ -260,6 +260,10 @@ export function useSessionStream(sessionId: string | null, opts?: { taskAgentNam
       setMessages([]);
       return;
     }
+    // A fork is a different transcript. Clear the previous session before the
+    // first poll so messages after an edited turn cannot leak into the branch.
+    setMessages([]);
+    setRawList([]);
     setStatus('connecting');
 
     let stopped = false;

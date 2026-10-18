@@ -193,6 +193,16 @@ export async function sendPrompt(
   }
 }
 
+export async function forkSession(sessionId: string, before: string): Promise<{ ok: boolean; sessionId?: string; error?: string }> {
+  try {
+    const res = await fetch(`${baseUrl()}/session/${sessionId}/fork`, { method: 'POST', headers: headers({ 'Content-Type': 'application/json' }), body: JSON.stringify({ before }) });
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status} — ${(await res.text().catch(() => '')).slice(0, 200)}` };
+    const data = unwrapData<{ id?: string; sessionID?: string }>(await res.json());
+    const id = data?.id ?? data?.sessionID;
+    return id ? { ok: true, sessionId: id } : { ok: false, error: 'Fork response did not include a session id' };
+  } catch (error) { return { ok: false, error: String((error as Error).message || error) }; }
+}
+
 export async function switchSessionModel(sessionId: string, model: string): Promise<boolean> {
   const [providerID, ...rest] = model.split('/');
   const id = rest.join('/');

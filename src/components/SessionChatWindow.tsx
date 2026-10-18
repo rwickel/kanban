@@ -5,7 +5,7 @@ import {
   X, Send, Loader2, ExternalLink, Copy, Check, Download, Square, RefreshCw, Mic, MicOff,
 } from 'lucide-react';
 import { Task } from '../types';
-import { answerTool, sendPrompt, interruptSession, fetchModels } from '../api/opencode';
+import { answerTool, sendPrompt, forkSession, interruptSession, fetchModels } from '../api/opencode';
 import { isModelAllowed } from '../store/modelResolution';
 import { useSessionStream } from '../hooks/useSessionStream';
 import { chatToMarkdown } from './chatEvents';
@@ -22,7 +22,8 @@ interface SessionChatWindowProps {
 }
 
 export default function SessionChatWindow({ task, onClose, standalone, onTaskClick }: SessionChatWindowProps) {
-  const sessionId = task?.sessionId ?? null;
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(task?.sessionId ?? null);
+  const sessionId = activeSessionId;
   const [models, setModels] = useState<Awaited<ReturnType<typeof fetchModels>>>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelSearch, setModelSearch] = useState('');
@@ -33,6 +34,7 @@ export default function SessionChatWindow({ task, onClose, standalone, onTaskCli
     taskAgentName: task?.agentName ?? null,
   });
   useEffect(() => {
+    setActiveSessionId(task?.sessionId ?? null);
     setSelectedModel(task?.modelProviderID && task?.modelId ? `${task.modelProviderID}/${task.modelId}` : '');
     if (task) void loadModels();
   }, [task?.id]);
@@ -108,9 +110,11 @@ export default function SessionChatWindow({ task, onClose, standalone, onTaskCli
     const patch: Partial<Task> = { status: next };
     if (!task.result && lastResultRef.current) (patch as Record<string, unknown>).result = lastResultRef.current;
     if (!task.resultContext && next === 'blocked' && outcome) {
+      // No fabricated network diagnosis: report the real session error when
+      // the API provides one, otherwise state plainly that none was reported.
       (patch as Record<string, unknown>).resultContext = sessionError
         ? `session outcome: ${outcome}; error: ${sessionError}`
-        : `session outcome: ${outcome}; error: ConnectionRefused: Unable to connect. Is the computer able to access the URL?`;
+        : `session outcome: ${outcome}; no error detail reported by the session`;
     }
     import('../store/kanban').then(({ updateTask }) => updateTask(task.id, patch)).catch(() => { autoMovedRef.current = false; });
   }, [task?.id, task?.status, status, outcome]);
@@ -208,6 +212,24 @@ export default function SessionChatWindow({ task, onClose, standalone, onTaskCli
     } else {
       setSendError(`Failed to send — ${res.error ?? 'unknown error'}`);
     }
+  };
+
+  const handleEditMessage = async (messageId: string, text: string) => {
+    if (!sessionId || sending || busy) return;
+    setSending(true);
+    setSendError(null);
+    const fork = await forkSession(sessionId, messageId);
+    if (!fork.ok || !fork.sessionId) {
+      setSending(false);
+      setSendError(`Edit failed — ${fork.error ?? 'could not fork before the selected message'}`);
+      return;
+    }
+    // Switch first: the fork contains only messages before messageId, so every
+    // selected-and-later message disappears before the replacement is sent.
+    setActiveSessionId(fork.sessionId);
+    const res = await sendPrompt(fork.sessionId, text.trim(), task.agentId ?? task.agentName);
+    setSending(false);
+    if (!res.ok) setSendError(`Edit failed — ${res.error ?? 'could not send replacement'}`);
   };
 
   // Answer a blocked `question` tool (a pending form server-side). The session
@@ -336,8 +358,9 @@ export default function SessionChatWindow({ task, onClose, standalone, onTaskCli
           const modelHint = task.modelProviderID && task.modelId ? `${task.modelProviderID}/${task.modelId}` : task.modelId ?? undefined;
            if (msg.kind === 'tool') return <ToolRow key={msg.id} msg={msg} onFileClick={(p) => setPreviewPath(p)} onAnswered={handleAnswer} onReview={handleReview} />;
            if (msg.kind === 'error') return <ChatErrorRow key={msg.id} msg={msg} detail={msg.id.endsWith('-outcome') ? sessionError : null} onReview={handleReview} />;
-          if (msg.kind === 'reasoning') return <ThinkingBlock key={msg.id} msg={msg} showAvatar={startsTurn} agentName={task.agentName} modelName={modelHint} onFileClick={(p) => setPreviewPath(p)} />;
-           return <ChatBubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : task.agentName} modelName={msg.kind === 'user' ? undefined : modelHint} showAvatar={msg.kind === 'user' ? true : startsTurn} onFileClick={(p) => setPreviewPath(p)} onTaskClick={onTaskClick} onReview={handleReview} />;
+           if (msg.kind === 'reasoning') return <ThinkingBlock key={msg.id} msg={msg} showAvatar={startsTurn} agentName={task.agentName} modelName={modelHint} onFileClick={(p) => setPreviewPath(p)} />;
+           if (msg.kind === 'event') return <div key={msg.id} className="text-center text-[11px] font-bold mono py-1" style={{ color: 'var(--muted)' }}>{msg.markdown}</div>;
+            return <ChatBubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : task.agentName} modelName={msg.kind === 'user' ? undefined : modelHint} showAvatar={msg.kind === 'user' ? true : startsTurn} onFileClick={(p) => setPreviewPath(p)} onTaskClick={onTaskClick} onReview={handleReview} onEdit={(m) => void handleEditMessage(m.id, m.markdown)} />;
         })}
         <div ref={bottomRef} />
         {busy && msgCount > 0 && (
@@ -352,7 +375,7 @@ export default function SessionChatWindow({ task, onClose, standalone, onTaskCli
 
       {sendError && <div className="px-3.5 pt-2 text-[11px]" style={{ color: 'var(--danger)' }}>{sendError}</div>}
       {speechError && <div className="px-3.5 pt-2 text-[11px]" style={{ color: 'var(--amber)' }}>{speechError}</div>}
-      <form onSubmit={busy ? (e) => { e.preventDefault(); handleStop(); } : handleSend} className="p-3 border-t hairline" style={{ borderTopWidth: 1, borderTopStyle: 'solid', background: 'var(--surface)' }}>
+      <form data-chat-composer onSubmit={busy ? (e) => { e.preventDefault(); handleStop(); } : handleSend} className="p-3 border-t hairline" style={{ borderTopWidth: 1, borderTopStyle: 'solid', background: 'var(--surface)' }}>
         <div className="flex gap-1.5 items-end">
           <input type="text" value={input} onChange={(e) => setInput(e.target.value)}
             placeholder={speechTranscribing ? 'Transcribing locally…' : speechListening ? (speechPct != null && speechPct >= 0 ? `Loading voice model ${Math.min(100, Math.round(speechPct * 100))}%…` : 'Listening — speak now…') : busy ? 'Session running — Stop to interrupt…' : 'Reply to agent…  (↵ send)'} className="input" disabled={busy} />
