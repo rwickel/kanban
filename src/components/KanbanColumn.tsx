@@ -53,7 +53,7 @@ export default function KanbanColumn({
 
   return (
     <div
-      className="column-shell flex flex-col min-w-[320px] w-[340px] max-h-[calc(100vh-170px)]"
+      className="column-shell flex flex-col min-w-0 flex-1 max-h-[calc(100vh-170px)]"
       style={isOver ? { borderColor: 'var(--border-strong)' } : undefined}
     >
       <div className="flex items-center justify-between px-3.5 py-3 border-b hairline" style={{ borderBottomStyle: 'solid', borderBottomWidth: 1 }}>

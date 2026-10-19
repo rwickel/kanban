@@ -285,7 +285,7 @@ export default function SessionChatWindow({ task, onClose, standalone, onTaskCli
   };
 
   const popOut = () => {
-    window.open(`${window.location.pathname}#session/${sessionId}`, '_blank', 'width=480,height=720');
+    window.open(`${window.location.pathname}#session/${sessionId}`, '_blank', 'popup=yes,width=480,height=720,toolbar=no,location=no,menubar=no,status=no');
   };
 
   const exportMarkdown = () => {

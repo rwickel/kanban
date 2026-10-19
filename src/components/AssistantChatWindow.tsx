@@ -314,7 +314,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
   };
 
   const popOut = () => {
-    window.open(`${window.location.pathname}#assistant/${encodeURIComponent(project.id)}`, '_blank', 'width=480,height=720');
+    window.open(`${window.location.pathname}#assistant/${encodeURIComponent(project.id)}`, '_blank', 'popup=yes,width=480,height=720,toolbar=no,location=no,menubar=no,status=no');
   };
 
   const copySessionId = async () => {

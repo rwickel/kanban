@@ -680,7 +680,8 @@ export default function App() {
      resultContext?: string;
      kind?: Task['kind'];
      cycleIntervalSec?: number;
-     blockedByTaskIds?: string[];
+      blockedByTaskIds?: string[];
+      dueDate?: string;
   }) => {
     if (!activeProjectId) return;
 
@@ -703,7 +704,8 @@ export default function App() {
           modelId: data.modelId,
          modelProviderID: data.modelProviderID,
          kind: data.kind,
-         cycleIntervalSec: data.cycleIntervalSec,
+          cycleIntervalSec: data.cycleIntervalSec,
+          dueDate: data.dueDate || null,
           result: data.result,
           resultContext: data.resultContext,
           blockedByTaskIds: data.blockedByTaskIds ?? [],
@@ -730,6 +732,7 @@ export default function App() {
         title: data.title,
          description: data.description,
          acceptanceCriteria: data.acceptanceCriteria,
+         dueDate: data.dueDate || null,
         status: 'backlog',
         priority: data.priority,
         agentId: data.agentId,
@@ -762,7 +765,8 @@ export default function App() {
              data.acceptanceCriteria,
              data.blockedByTaskIds,
              data.kind,
-             data.cycleIntervalSec
+              data.cycleIntervalSec,
+              data.dueDate
         );
         // Online path: server echoed its row (same queuedId) — drop the temp
         // card and show the confirmed row.
@@ -1218,7 +1222,7 @@ export default function App() {
               {(taskQuery || taskStatusFilter || taskPriorityFilter || taskAssigneeFilter) && <button className="btn px-3 py-2 text-sm" onClick={() => { setTaskQuery(''); setTaskStatusFilter(''); setTaskPriorityFilter(''); setTaskAssigneeFilter(''); }}>Clear filters</button>}
             </div>
             {COLUMNS.every(col => filterTasks(tasks[col.status], { query: taskQuery, status: taskStatusFilter, priority: taskPriorityFilter, assignee: taskAssigneeFilter }).length === 0) && <p className="muted mb-3 text-sm" role="status">No tasks match these filters.</p>}
-            <div className="flex gap-3 overflow-x-auto pb-4">
+            <div className="flex w-full gap-3 overflow-x-auto pb-4">
               {COLUMNS.map((col) => (
                 <KanbanColumn
                   key={col.status}
