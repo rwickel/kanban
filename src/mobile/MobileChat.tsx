@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Agent, OpenCodeModelInfo, Project, Task } from '../types';
-import { sendPrompt, interruptSession, answerTool, fetchModels } from '../api/opencode';
+import { sendPrompt, interruptSession, answerTool, fetchModels, getSessionInstruction } from '../api/opencode';
+import { PREAMBLE_KEY } from '../prompts/boardAssistantPreamble';
 import { ensureAssistantSession, clearAssistantSession, readAssistantSessionId, readAssistantAgentPref, readAssistantModelPref, saveAssistantPrefs } from '../store/assistantSession';
 import { isModelAllowed } from '../store/modelResolution';
 import { useSessionStream } from '../hooks/useSessionStream';
@@ -234,9 +235,15 @@ export default function MobileChat({
     setCreateError(null);
   };
 
-  const exportMarkdown = () => {
+  const exportMarkdown = async () => {
     const title = task ? task.title : `Board assistant — ${project?.name ?? ''}`;
-    const md = chatToMarkdown(messages, { title, sessionId: activeSessionId, agentName });
+    // The board assistant's session prompt injection (instruction entry) is
+    // not a chat message — fetch it so the export carries the preamble the
+    // session ran under. Only assistant chats have it; task chats don't.
+    const preamble = isAssistant && activeSessionId
+      ? await getSessionInstruction(activeSessionId, PREAMBLE_KEY)
+      : null;
+    const md = chatToMarkdown(messages, { title, sessionId: activeSessionId, agentName, preamble: preamble ?? undefined });
     const name = `${isAssistant ? 'board-assistant' : 'task-chat'}-${(activeSessionId ?? 'no-session').slice(0, 12)}.md`;
     try {
       const blob = new Blob([md], { type: 'text/markdown' });

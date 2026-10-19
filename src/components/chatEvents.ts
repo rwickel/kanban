@@ -695,13 +695,19 @@ export function toChatMessages(rawList: unknown): ChatMessage[] {
 }
 
 /** Serialize the current chat feed to Markdown (user/assistant text, thinking, tool calls). */
-export function chatToMarkdown(messages: ChatMessage[], opts?: { title?: string; sessionId?: string | null; agentName?: string }): string {
+export function chatToMarkdown(messages: ChatMessage[], opts?: { title?: string; sessionId?: string | null; agentName?: string; preamble?: string }): string {
   const lines: string[] = [];
   if (opts?.title) lines.push(`# ${opts.title}`, '');
   const meta: string[] = [];
   if (opts?.agentName) meta.push(`agent: ${opts.agentName}`);
   if (opts?.sessionId) meta.push(`session: ${opts.sessionId}`);
   if (meta.length) lines.push(`_${meta.join(' · ')}_`, '');
+  // The session prompt injection (durable instruction entry, e.g. the board
+  // assistant preamble) is not a message — it never appears in the feed —
+  // so an export without it would miss the context the session ran under.
+  if (opts?.preamble?.trim()) {
+    lines.push('<details><summary>📌 Session prompt injection</summary>', '', opts.preamble.trim(), '', '</details>', '');
+  }
   for (const m of messages) {
     const mBits: string[] = [];
     if (m.kind !== 'user' && m.meta) {

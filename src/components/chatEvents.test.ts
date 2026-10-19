@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { messageTimestamp, toChatMessage, toChatMessages } from './chatEvents.ts';
+import { chatToMarkdown, messageTimestamp, toChatMessage, toChatMessages } from './chatEvents.ts';
 
 test('messageTimestamp reads ms, seconds, and info-nested time', () => {
   assert.equal(messageTimestamp({ time: { created: 1790000000000 } }), 1790000000000);
@@ -188,6 +188,44 @@ test('keeps a running execute row with its code', () => {
   assert.equal(messages[0]?.tool?.tool, 'execute');
   assert.equal(messages[0]?.tool?.status, 'running');
   assert.ok((messages[0]?.tool?.input ?? '').includes('const x = 1'));
+});
+
+test('chatToMarkdown embeds the session prompt injection between header and messages', () => {
+  const md = chatToMarkdown(
+    [
+      { id: 'm_user', kind: 'user', markdown: 'hello' },
+      { id: 'm_assistant', kind: 'assistant', markdown: 'hi' },
+    ],
+    {
+      title: 'Board assistant — Demo',
+      sessionId: 'ses_1',
+      agentName: 'Assistant',
+      preamble: '# Board assistant — Demo\n\nRole + delegate rules…',
+    },
+  );
+  const injection = md.indexOf('📌 Session prompt injection');
+  const firstMessage = md.indexOf('## 🧑 User');
+  assert.notEqual(injection, -1, 'export must include the prompt injection section');
+  assert.notEqual(firstMessage, -1);
+  assert.ok(injection < firstMessage, 'injection precedes the first message');
+  assert.ok(md.includes('# Board assistant — Demo\n\nRole + delegate rules…'), 'full preamble text is embedded');
+  const close = md.indexOf('</details>', injection);
+  assert.notEqual(close, -1, 'section is closed');
+  assert.ok(close < firstMessage, 'section is closed before the first message');
+});
+
+test('chatToMarkdown omits the prompt injection section when no preamble is given', () => {
+  const md = chatToMarkdown(
+    [{ id: 'm_user', kind: 'user', markdown: 'hello' }],
+    { title: 'Task', sessionId: 'ses_1', agentName: 'Agent' },
+  );
+  assert.ok(!md.includes('Session prompt injection'));
+  // Blank preambles must not leave an empty section behind.
+  const blank = chatToMarkdown(
+    [{ id: 'm_user', kind: 'user', markdown: 'hello' }],
+    { title: 'Task', sessionId: 'ses_1', agentName: 'Agent', preamble: '   ' },
+  );
+  assert.ok(!blank.includes('Session prompt injection'));
 });
 
 test('renders apply_patch input as a file diff', () => {
