@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import net from 'node:net';
 
 import { loadEnvFile } from './env.mjs';
+import { BRIDGE_PORT, startBridge } from './http-bridge.mjs';
 
 loadEnvFile();
 
@@ -22,6 +23,14 @@ const services = [
   },
   { name: 'opencode', command: 'opencode serve --port 4099', port: 4099, env: {} },
 ];
+
+// `dev:https` puts the board behind a self-signed cert, which Node `fetch` and
+// PowerShell both reject. Mirror it on plain HTTP so agents can call the API
+// with either runtime.
+if (process.argv.includes('--https') && !portInUse(BRIDGE_PORT)) {
+  startBridge();
+  console.log(`[kanban] plain-HTTP API bridge on http://127.0.0.1:${BRIDGE_PORT} (use this from agents)`);
+}
 
 const children = [];
 for (const service of services) {

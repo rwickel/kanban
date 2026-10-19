@@ -905,13 +905,35 @@ main();
 </html>`;
 }
 
+// How to reach this server from a tool. Agents repeatedly lost turns to the
+// self-signed cert in https mode (Node fetch throws "self signed certificate",
+// PowerShell has no -SkipCertificateCheck on Invoke-RestMethod), so name the
+// working call per runtime. `socket.encrypted` is the ground truth — the
+// KANBAN_HTTPS env var is absent when the server was started some other way.
+function accessNote(req) {
+  const tls = Boolean(req?.socket?.encrypted);
+  if (!tls) {
+    return { base: "http://localhost:3001", selfSigned: false, tips: ["Plain HTTP. Any runtime works: fetch, Invoke-RestMethod, curl."] };
+  }
+  return {
+    base: "https://localhost:3001",
+    selfSigned: true,
+    tips: [
+      'https://localhost:3001 uses a SELF-SIGNED certificate. Do NOT use https:// with Node fetch (throws "self signed certificate") and do NOT use plain http:// against it (socket closes with "Empty reply from server").',
+      "Node fetch / PowerShell Invoke-RestMethod / curl without -k: use the plain-HTTP bridge http://localhost:3002 - same routes, started by `npm run dev:https`.",
+      "curl.exe against the board directly: always pass -k (curl.exe -k -sS ...). Note Invoke-RestMethod has NO -SkipCertificateCheck parameter; that belongs to Invoke-WebRequest on PowerShell 7.4+.",
+    ],
+  };
+}
+
 // JSON catalogue (machine-readable route list). Served at ?format=json
 // so /api/kanban/docs itself can be the human try-it-out page.
-function kanbanDocs() {
+function kanbanDocs(req) {
   return {
     ok: true,
     base: "/api/kanban",
     auth: "none - local store only. Other /api/* paths proxy to OpenCode :4096 and need Basic opencode:<password>.",
+    access: accessNote(req),
     routes: [
       { method: "GET", path: "/api/kanban/tasks", query: "projectId?, status=backlog|running|done|blocked?", returns: "Task[]" },
       { method: "GET", path: "/api/kanban/tasks/:id", returns: "Task (404 when missing)" },
@@ -1224,6 +1246,7 @@ function kanbanApi() {
              if (b.acceptanceCriteria !== undefined && b.acceptanceCriteria !== null) argv.push("--acceptance-criteria", String(b.acceptanceCriteria));
              if (b.kind) argv.push("--kind", String(b.kind));
              if (b.cycleIntervalSec !== undefined && b.cycleIntervalSec !== null) argv.push("--cycle-interval-sec", String(b.cycleIntervalSec));
+             if (b.dueDate !== undefined && b.dueDate !== null) argv.push("--due-date", String(b.dueDate));
             if (b.blockedByTaskIds !== undefined && b.blockedByTaskIds !== null) {
               argv.push("--blocked-by", Array.isArray(b.blockedByTaskIds) ? b.blockedByTaskIds.join(",") : String(b.blockedByTaskIds));
             }
@@ -1247,9 +1270,10 @@ function kanbanApi() {
               ["--parent-session-id", "parentSessionId"],
               ["--result", "result"], ["--result-context", "resultContext"],
                ["--acceptance-criteria", "acceptanceCriteria"],
-               ["--kind", "kind"], ["--cycle-interval-sec", "cycleIntervalSec"],
+                ["--kind", "kind"], ["--cycle-interval-sec", "cycleIntervalSec"], ["--due-date", "dueDate"],
             ]) {
-              if (b[key] !== undefined && b[key] !== null) argv.push(flag, String(b[key]));
+              if (key === "dueDate" && b[key] === null) argv.push(flag, "");
+              else if (b[key] !== undefined && b[key] !== null) argv.push(flag, String(b[key]));
             }
             // blockedByTaskIds: array replaces the list, [] clears it (server validates).
             if (b.blockedByTaskIds !== undefined && b.blockedByTaskIds !== null) {
@@ -1534,7 +1558,7 @@ function kanbanApi() {
           // GET /api/kanban/docs → interactive try-it-out page (HTML, no auth).
           // Append ?format=json for the machine-readable route catalogue.
           if (req.method === "GET" && parts[0] === "docs" && parts.length === 1) {
-            if (q.get("format") === "json") return json(res, 200, kanbanDocs());
+            if (q.get("format") === "json") return json(res, 200, kanbanDocs(req));
             return html(res, 200, kanbanDocsPage());
           }
           // GET /api/kanban/openapi.json → OpenAPI 3.0 spec for the local store

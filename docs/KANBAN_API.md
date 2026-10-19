@@ -3,6 +3,42 @@
 Vite dev server on port `3001` serves **two** API surfaces.
 They look similar but differ in auth and ownership.
 
+## Calling this API from an agent (read this first)
+
+`npm run dev:https` puts the board behind a **self-signed** certificate
+(Android mic requires HTTPS). That breaks most tooling in a way that is easy
+to misdiagnose:
+
+| Attempt | What happens |
+| ------- | ------------ |
+| `fetch("https://localhost:3001/...")` | `TypeError: self signed certificate` |
+| `fetch("http://localhost:3001/...")` | socket closed / `Empty reply from server` |
+| `Invoke-RestMethod -SkipCertificateCheck` | `NamedParameterNotFound` — that parameter is on `Invoke-WebRequest` (PowerShell 7.4+), **not** `Invoke-RestMethod` |
+
+**Use the plain-HTTP bridge on port `3002`.** `npm run dev:https` starts it
+automatically (`scripts/http-bridge.mjs`); it forwards to `3001` over whichever
+transport that server is actually speaking and accepts WebSocket upgrades.
+
+```js
+// Node fetch — works with or without TLS on the board
+await fetch("http://localhost:3002/api/kanban/tasks");
+```
+
+```powershell
+# PowerShell — plain HTTP, no certificate flag needed
+Invoke-RestMethod http://localhost:3002/api/kanban/tasks
+```
+
+```sh
+curl.exe -sS http://localhost:3002/api/kanban/tasks     # preferred
+curl.exe -k -sS https://localhost:3001/api/kanban/tasks  # direct, -k required
+```
+
+`GET /api/kanban/docs?format=json` reports the live answer in its `access`
+field (`selfSigned`, `base`, `tips`) — it inspects the actual socket, so it is
+never wrong. On plain HTTP (`npm run dev`) port `3001` works directly and no
+bridge is needed.
+
 | Prefix | Owner | Auth | Backed by |
 | ------ | ----- | ---- | --------- |
 | `/api/kanban/*` | Local kanban store | none | `server/kanban.py` (SQLite `.kanban-data/kanban.db`), via `kanbanApi()` in `vite.config.js` |

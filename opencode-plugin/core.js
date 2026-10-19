@@ -137,6 +137,36 @@ export function callingSessionId(explicit, context) {
   return fromEnv || null;
 }
 
+// --- Kanban API client ----------------------------------------------------
+
+export const KANBAN_BRIDGE_PORT = 3002;
+
+/**
+ * Candidate board bases, most direct first.
+ * `npm run dev:https` serves 3001 over TLS with a self-signed certificate, which
+ * Node `fetch` rejects outright; plain http against a TLS listener just drops
+ * the socket. The dev script mirrors https mode onto plain HTTP at 3002, so that
+ * is the fallback that actually works from a plugin.
+ */
+export function kanbanBases() {
+  const explicit = env("KANBAN_API_URL", "");
+  if (explicit) return [explicit];
+  return [`http://127.0.0.1:3001`, `http://127.0.0.1:${KANBAN_BRIDGE_PORT}`];
+}
+
+/** fetch against the first board base that accepts a connection. */
+export async function kanbanFetch(path, init = {}) {
+  let lastError;
+  for (const base of kanbanBases()) {
+    try {
+      return await fetch(`${base}${path}`, init);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError ?? new Error("kanban API unreachable");
+}
+
 // --- OpenCode server client ----------------------------------------------
 
 export function serverCreds() {

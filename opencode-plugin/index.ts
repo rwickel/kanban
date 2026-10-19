@@ -10,7 +10,7 @@
 // through the running server's own ctx.session client, so no extra
 // `opencode serve` and no port or password is needed for delegation.
 
-import { callingSessionId, cliResult, env, jsonResult, ocBase, ocH, runCli, toolError } from "./core.js"
+import { callingSessionId, cliResult, jsonResult, kanbanFetch, ocBase, ocH, runCli, toolError } from "./core.js"
 import { delegateTool, messageToTool } from "./delegate.js"
 
 // Optional arguments are expressed by leaving the key out of `required`,
@@ -340,7 +340,7 @@ export default {
         execute: async (input: any) => {
           const row = runCli(["task", "show", input.taskId])
           if (!row.ok) return cliResult(row)
-          const r = await fetch(`${env("KANBAN_API_URL", "http://localhost:3001")}/api/kanban/tasks/${encodeURIComponent(input.taskId)}/start`, {
+          const r = await kanbanFetch(`/api/kanban/tasks/${encodeURIComponent(input.taskId)}/start`, {
             method: "POST", headers: ocH(), body: JSON.stringify(input),
           })
           const payload = await r.json().catch(() => ({}))

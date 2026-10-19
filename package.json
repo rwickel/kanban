@@ -8,6 +8,8 @@
     "dev:https": "node scripts/dev.mjs --https",
     "dev:ui": "vite",
     "dev:opencode": "opencode serve --port 4099",
+    "stop": "node scripts/stop.mjs",
+    "stop:all": "node scripts/stop.mjs --all",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "test": "node --test src/**/*.test.ts scripts/**/*.test.mjs server/**/*.test.mjs"
