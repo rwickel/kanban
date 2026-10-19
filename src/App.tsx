@@ -1299,7 +1299,7 @@ export default function App() {
       <SessionChatWindow task={chatTask} onClose={() => setChatTask(null)} onTaskClick={handleChatReference} />
       {showAssistant && (
         <AssistantChatWindow
-          project={activeProject}
+          project={activeProject ?? projects[0] ?? null}
           availableAgents={availableAgents}
           onClose={() => setShowAssistant(false)}
           onTaskClick={handleChatReference}

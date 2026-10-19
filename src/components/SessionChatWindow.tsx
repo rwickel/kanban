@@ -12,8 +12,10 @@ import { chatToMarkdown } from './chatEvents';
 import { createTask } from '../store/kanban';
 import { STATUS_DOT, ThinkingBlock, ToolRow, ChatBubble, ChatErrorRow, ReviewTarget } from './ChatFeed';
 import { useSpeechInput } from '../hooks/useSpeechInput';
+import { useChatSize, CHAT_EDGE_GAP } from '../hooks/useChatSize';
 import FilePreviewModal from './FilePreviewModal';
 import AttachmentList from './AttachmentList';
+import ChatExportModal from './ChatExportModal';
 
 interface SessionChatWindowProps {
   task: Task | null;
@@ -130,44 +132,11 @@ export default function SessionChatWindow({ task, onClose, standalone, onTaskCli
   // otherwise the button flips back to Send while the session shuts down.
   const [interrupted, setInterrupted] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [exported, setExported] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const [reviewing, setReviewing] = useState<string | null>(null);
   const { supported: speechSupported, listening: speechListening, transcribing: speechTranscribing, downloadPct: speechPct, speechError, toggle: toggleSpeech } = useSpeechInput();
   const bottomRef = useRef<HTMLDivElement>(null);
-  const [width, setWidth] = useState(() => {
-    try {
-      const raw = localStorage.getItem('kanban_chat_width');
-      const n = raw ? Number(raw) : 448;
-      return Number.isFinite(n) ? Math.min(800, Math.max(320, n)) : 448;
-    } catch { return 448; }
-  });
-  const draggingRef = useRef(false);
-
-  const onHandlePointerDown = (e: React.PointerEvent) => {
-    draggingRef.current = true;
-    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = width;
-    const onMove = (ev: PointerEvent) => {
-      if (!draggingRef.current) return;
-      const dx = startX - ev.clientX;
-      const next = Math.min(800, Math.max(320, startW + dx));
-      setWidth(next);
-    };
-    const onUp = () => {
-      draggingRef.current = false;
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      requestAnimationFrame(() => {
-        const el = document.querySelector('[data-chat-width]') as HTMLElement | null;
-        const w = el ? el.getBoundingClientRect().width : startW;
-        try { localStorage.setItem('kanban_chat_width', String(Math.round(w))); } catch {}
-      });
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  };
+  const { width, height, startResize } = useChatSize(448);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages.length]);
   useEffect(() => { setInput(''); setSendError(null); setInterrupted(false); }, [sessionId]);
@@ -288,21 +257,9 @@ export default function SessionChatWindow({ task, onClose, standalone, onTaskCli
     window.open(`${window.location.pathname}#session/${sessionId}`, '_blank', 'popup=yes,width=480,height=720,toolbar=no,location=no,menubar=no,status=no');
   };
 
-  const exportMarkdown = () => {
-    const md = chatToMarkdown(messages, { title: task.title, sessionId, agentName: task.agentName ?? undefined });
-    const name = `${(task.title || 'session').replace(/[^\w\-]+/g, '-').slice(0, 60) || 'session'}-${(sessionId ?? 'no-session').slice(0, 12)}.md`;
-    try {
-      const blob = new Blob([md], { type: 'text/markdown' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = name; document.body.appendChild(a); a.click();
-      document.body.removeChild(a); URL.revokeObjectURL(url);
-    } catch {
-      // clipboard fallback
-      try { navigator.clipboard.writeText(md); } catch { /* ignore */ }
-    }
-    setExported(true); setTimeout(() => setExported(false), 1500);
-  };
+  const exportMarkdown = () => setExportOpen(true);
+  const exportContent = chatToMarkdown(messages, { title: task.title, sessionId, agentName: task.agentName ?? undefined });
+  const exportName = `${(task.title || 'session').replace(/[^\w\-]+/g, '-').slice(0, 60) || 'session'}-${(sessionId ?? 'no-session').slice(0, 12)}.md`;
 
   const msgCount = messages.length;
 
@@ -346,8 +303,8 @@ export default function SessionChatWindow({ task, onClose, standalone, onTaskCli
             </div>
           </div>
           <div className="flex items-center gap-1 shrink-0">
-            <button onClick={exportMarkdown} className="btn p-1.5" title="Export chat as Markdown">
-              {exported ? <Check className="w-3.5 h-3.5" style={{ color: 'var(--emerald)' }} strokeWidth={1.75} /> : <Download className="w-3.5 h-3.5" strokeWidth={1.75} />}
+            <button onClick={exportMarkdown} className="btn p-1.5" title="Preview, copy, or download chat">
+              <Download className="w-3.5 h-3.5" strokeWidth={1.75} />
             </button>
             {!standalone && (
               <button onClick={popOut} className="btn p-1.5" title="Pop out"><ExternalLink className="w-3.5 h-3.5" strokeWidth={1.75} /></button>
@@ -434,19 +391,27 @@ export default function SessionChatWindow({ task, onClose, standalone, onTaskCli
       <div className="h-screen flex flex-col" style={{ background: 'var(--surface)' }}>
         {body}
         {previewPath && <FilePreviewModal absPath={previewPath} onClose={() => setPreviewPath(null)} />}
+        {exportOpen && <ChatExportModal title="Export chat" content={exportContent} fileName={exportName} onClose={() => setExportOpen(false)} />}
       </div>
     );
   }
 
   return (
-    <div className="fixed top-3 right-3 bottom-3 z-50 flex justify-end pointer-events-none">
-      <div data-chat-width className="relative h-full flex flex-col shrink-0 pointer-events-auto panel overflow-hidden" style={{ width, maxWidth: '90vw', borderRadius: 10, boxShadow: '0 12px 40px rgba(0,0,0,0.25)', background: 'var(--surface)', border: '1px solid var(--border)' }}>
-        <div onPointerDown={onHandlePointerDown} title="Drag to resize"
+    <div className="fixed z-50 pointer-events-none" style={{ right: CHAT_EDGE_GAP, bottom: CHAT_EDGE_GAP }}>
+      <div data-chat-width className="relative flex flex-col pointer-events-auto panel overflow-hidden" style={{ width, height, maxWidth: '90vw', borderRadius: 10, boxShadow: '0 12px 40px rgba(0,0,0,0.25)', background: 'var(--surface)', border: '1px solid var(--border)' }}>
+        <div onPointerDown={startResize('x')} title="Drag to resize width"
           className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-violet-500/40 transition-colors z-10"
+          style={{ touchAction: 'none' }} />
+        <div onPointerDown={startResize('y')} title="Drag to resize height"
+          className="absolute left-1.5 right-0 bottom-0 h-1.5 cursor-ns-resize hover:bg-violet-500/40 transition-colors z-10"
+          style={{ touchAction: 'none' }} />
+        <div onPointerDown={startResize('xy')} title="Drag to resize"
+          className="absolute bottom-0 right-0 w-3 h-3 cursor-nwse-resize hover:bg-violet-500/40 transition-colors z-10"
           style={{ touchAction: 'none' }} />
         {body}
       </div>
       {previewPath && <FilePreviewModal absPath={previewPath} onClose={() => setPreviewPath(null)} />}
+      {exportOpen && <ChatExportModal title="Export chat" content={exportContent} fileName={exportName} onClose={() => setExportOpen(false)} />}
     </div>
   );
 }

@@ -6,14 +6,17 @@
 import { useEffect, useRef, useState } from 'react';
 import { X, Send, Loader2, Copy, Check, RefreshCw, Plus, Download, Square, Mic, MicOff, ExternalLink } from 'lucide-react';
 import { Agent, OpenCodeModelInfo, Project } from '../types';
-import { answerTool, createSession, sendPrompt, forkSession, switchSessionAgent, switchSessionModel, interruptSession, fetchModels } from '../api/opencode';
+import { answerTool, createSession, sendPrompt, forkSession, switchSessionAgent, switchSessionModel, interruptSession, fetchModels, getSessionInstruction } from '../api/opencode';
+import { PREAMBLE_KEY } from '../prompts/boardAssistantPreamble';
 import { useSessionStream } from '../hooks/useSessionStream';
 import { useSpeechInput } from '../hooks/useSpeechInput';
+import { useChatSize, CHAT_EDGE_GAP } from '../hooks/useChatSize';
 import { useAutoContinue } from '../hooks/useAutoContinue';
 import { autoContinueMinToMs, hasUserHistory, readAutoContinueIdleMin, readAutoContinuePref, saveAutoContinuePref } from '../hooks/autoContinue';
 import { STATUS_DOT, ThinkingBlock, ToolRow, ChatBubble, ChatErrorRow, ReviewTarget } from './ChatFeed';
 import { chatToMarkdown, ChatMessage } from './chatEvents';
 import FilePreviewModal from './FilePreviewModal';
+import ChatExportModal from './ChatExportModal';
 import {
   clearAssistantSession,
   ensureAssistantSession,
@@ -62,7 +65,11 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
   // otherwise the button vanishes before the session reports closed.
   const [interrupted, setInterrupted] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [exported, setExported] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  // The session prompt injection (instruction entry) is not a chat message,
+  // so it must be fetched when the export opens — otherwise the exported
+  // markdown would miss the preamble the session ran under.
+  const [exportPreamble, setExportPreamble] = useState<string | null>(null);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [reviewing, setReviewing] = useState<string | null>(null);
   // Opt-in auto-continue: default OFF. Persisted per project so desktop and
@@ -73,27 +80,37 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
   );
   const { supported: speechSupported, listening: speechListening, transcribing: speechTranscribing, downloadPct: speechPct, speechError, toggle: toggleSpeech } = useSpeechInput();
   const bottomRef = useRef<HTMLDivElement>(null);
-  const [width, setWidth] = useState(() => {
-    try {
-      const raw = localStorage.getItem('kanban_chat_width');
-      const n = raw ? Number(raw) : 400;
-      return Number.isFinite(n) ? Math.min(800, Math.max(320, n)) : 400;
-    } catch { return 400; }
-  });
-  const draggingRef = useRef(false);
+  const { width, height, startResize } = useChatSize(400);
   const [position, setPosition] = useState(() => {
     try { return JSON.parse(localStorage.getItem('kanban_assistant_position') || '{"x":0,"y":0}') as { x: number; y: number }; } catch { return { x: 0, y: 0 }; }
   });
 
+  // Offsets are measured inward from the right/bottom edges. Clamp them to the
+  // free space so a saved offset (or a screen that shrank since) can never
+  // park the panel off-screen where it looks like it failed to open.
+  useEffect(() => {
+    setPosition((p) => {
+      const next = {
+        x: Math.min(p.x, Math.max(0, window.innerWidth - width - CHAT_EDGE_GAP * 2)),
+        y: Math.min(p.y, Math.max(0, window.innerHeight - height - CHAT_EDGE_GAP * 2)),
+      };
+      if (next.x === p.x && next.y === p.y) return p;
+      try { localStorage.setItem('kanban_assistant_position', JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, [width, height]);
+
+  // Drag the panel by its header. x grows to the right, y grows upward
+  // because the panel hangs from its bottom edge.
   const onWindowPointerDown = (e: React.PointerEvent) => {
     if ((e.target as HTMLElement).closest('button, input, select, textarea')) return;
     const startX = e.clientX - position.x;
-    const startY = e.clientY - position.y;
-    const move = (ev: PointerEvent) => setPosition({ x: ev.clientX - startX, y: ev.clientY - startY });
+    const startY = e.clientY + position.y;
+    const move = (ev: PointerEvent) => setPosition({ x: ev.clientX - startX, y: startY - ev.clientY });
     const up = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
-      try { localStorage.setItem('kanban_assistant_position', JSON.stringify(position)); } catch {}
+      setPosition((p) => { try { localStorage.setItem('kanban_assistant_position', JSON.stringify(p)); } catch {} return p; });
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
@@ -184,32 +201,6 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
   // should do that — a stale tool row must not lock the input forever.
   const streamActive = status === 'live' || status === 'connecting';
   const busy = streamActive || sending || stopping || interrupted;
-
-  const onHandlePointerDown = (e: React.PointerEvent) => {
-    draggingRef.current = true;
-    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = width;
-    const onMove = (ev: PointerEvent) => {
-      if (!draggingRef.current) return;
-      const dx = startX - ev.clientX;
-      const next = Math.min(800, Math.max(320, startW + dx));
-      setWidth(next);
-    };
-    const onUp = () => {
-      draggingRef.current = false;
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      requestAnimationFrame(() => {
-        const el = document.querySelector('[data-assistant-width]') as HTMLElement | null;
-        const w = el ? el.getBoundingClientRect().width : startW;
-        try { localStorage.setItem('kanban_chat_width', String(Math.round(w))); } catch {}
-      });
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  };
 
   // Agent changes start a fresh session because the session owns its agent.
   // Save the pref only after the switch succeeds — otherwise a failed
@@ -324,19 +315,13 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
     setTimeout(() => setCopied(false), 1500);
   };
 
-  const exportMarkdown = () => {
-    const md = chatToMarkdown(messages, { title: `Board assistant — ${project.name}`, sessionId, agentName: selectedAgent?.name });
-    const name = `board-assistant-${(sessionId ?? 'no-session').slice(0, 12)}.md`;
-    try {
-      const blob = new Blob([md], { type: 'text/markdown' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = name; document.body.appendChild(a); a.click();
-      document.body.removeChild(a); URL.revokeObjectURL(url);
-    } catch {
-      try { navigator.clipboard.writeText(md); } catch { /* ignore */ }
-    }
-    setExported(true); setTimeout(() => setExported(false), 1500);
+  const exportMarkdown = async () => {
+    // Fresh read on every open: the entry can be re-pushed on attach or
+    // agent/model change, so a cached copy could be stale. A failed read
+    // (server down) still exports the chat — just without the preamble.
+    const preamble = sessionId ? await getSessionInstruction(sessionId, PREAMBLE_KEY) : null;
+    setExportPreamble(preamble);
+    setExportOpen(true);
   };
 
   const handleStop = async () => {
@@ -398,6 +383,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
   };
 
   const selectedAgent = availableAgents.find((a) => a.id === selectedAgentId);
+  const exportContent = chatToMarkdown(messages, { title: `Board assistant — ${project.name}`, sessionId, agentName: selectedAgent?.name, preamble: exportPreamble ?? undefined });
   const sessionAgent = (session as any)?.agent
     ? (typeof (session as any).agent === 'string' ? (session as any).agent : (session as any).agent?.name || (session as any).agent?.id)
     : undefined;
@@ -415,10 +401,16 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
   };
 
   return (
-    <div className={standalone ? 'fixed inset-0 z-50 flex pointer-events-none' : 'fixed top-3 right-3 bottom-3 z-50 flex justify-end pointer-events-none'}>
-      <div data-assistant-width className="relative h-full w-full flex flex-col shrink-0 pointer-events-auto panel overflow-hidden" style={{ width: standalone ? '100%' : width, maxWidth: standalone ? '100%' : '90vw', borderRadius: standalone ? 0 : 10, boxShadow: standalone ? 'none' : '0 12px 40px rgba(0,0,0,0.25)', background: 'var(--surface)', border: '1px solid var(--border)', transform: standalone ? undefined : `translate(${position.x}px, ${position.y}px)` }}>
-        {!standalone && <div onPointerDown={onHandlePointerDown} title="Drag to resize"
+    <div className={standalone ? 'fixed inset-0 z-50 flex pointer-events-none' : 'fixed z-50 pointer-events-none'} style={standalone ? undefined : { right: CHAT_EDGE_GAP + position.x, bottom: CHAT_EDGE_GAP + position.y }}>
+      <div data-assistant-width className="relative w-full flex flex-col pointer-events-auto panel overflow-hidden" style={{ width: standalone ? '100%' : width, height: standalone ? '100%' : height, maxWidth: standalone ? '100%' : '90vw', borderRadius: standalone ? 0 : 10, boxShadow: standalone ? 'none' : '0 12px 40px rgba(0,0,0,0.25)', background: 'var(--surface)', border: '1px solid var(--border)' }}>
+        {!standalone && <div onPointerDown={startResize('x')} title="Drag to resize width"
           className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-violet-500/40 transition-colors z-10"
+          style={{ touchAction: 'none' }} />}
+        {!standalone && <div onPointerDown={startResize('y')} title="Drag to resize height"
+          className="absolute left-1.5 right-0 bottom-0 h-1.5 cursor-ns-resize hover:bg-violet-500/40 transition-colors z-10"
+          style={{ touchAction: 'none' }} />}
+        {!standalone && <div onPointerDown={startResize('xy')} title="Drag to resize"
+          className="absolute bottom-0 right-0 w-3 h-3 cursor-nwse-resize hover:bg-violet-500/40 transition-colors z-10"
           style={{ touchAction: 'none' }} />}
         <div onPointerDown={standalone ? undefined : onWindowPointerDown} className={`modal-head px-3.5 py-3 ${standalone ? '' : 'cursor-move'}`} title={standalone ? undefined : 'Drag to move the assistant chat'}>
           <div className="flex items-start justify-between gap-2">
@@ -439,8 +431,8 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
               )}
             </div>
             <div className="flex items-center gap-1 shrink-0">
-              <button onClick={exportMarkdown} className="btn p-1.5" title="Export chat as Markdown">
-                {exported ? <Check className="w-3.5 h-3.5" style={{ color: 'var(--emerald)' }} strokeWidth={1.75} /> : <Download className="w-3.5 h-3.5" strokeWidth={1.75} />}
+              <button onClick={exportMarkdown} className="btn p-1.5" title="Preview, copy, or download chat">
+                <Download className="w-3.5 h-3.5" strokeWidth={1.75} />
               </button>
               {sessionId && (
                 <button onClick={handleNewChat} className="btn p-1.5" title="New assistant chat"><Plus className="w-3.5 h-3.5" strokeWidth={1.75} /></button>
@@ -591,6 +583,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
         </form>
       </div>
       {previewPath && <FilePreviewModal absPath={previewPath} onClose={() => setPreviewPath(null)} />}
+      {exportOpen && <ChatExportModal title="Export board assistant chat" content={exportContent} fileName={`board-assistant-${(sessionId ?? 'no-session').slice(0, 12)}.md`} onClose={() => setExportOpen(false)} />}
     </div>
   );
 }
