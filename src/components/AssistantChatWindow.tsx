@@ -37,6 +37,9 @@ interface AssistantChatWindowProps {
   standalone?: boolean;
 }
 
+/** How much of the floating panel must stay reachable when it is dragged. */
+const MIN_ONSCREEN = 120;
+
 export default function AssistantChatWindow({ project, availableAgents, onClose, onTaskClick, standalone = false }: AssistantChatWindowProps) {
   const [sessionId, setSessionId] = useState<string | null>(() => {
     if (!project) return null;
@@ -81,36 +84,49 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
   const { supported: speechSupported, listening: speechListening, transcribing: speechTranscribing, downloadPct: speechPct, speechError, toggle: toggleSpeech } = useSpeechInput();
   const bottomRef = useRef<HTMLDivElement>(null);
   const { width, height, startResize } = useChatSize(400);
+  // `position` is an offset measured inward from the right/bottom viewport
+  // edges. Positive moves the panel away from those edges, negative slides it
+  // partly under them — a full-height panel still has to be movable, so the
+  // range is not limited to the positive free space. At least this much of the
+  // panel always stays reachable on screen.
   const [position, setPosition] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('kanban_assistant_position') || '{"x":0,"y":0}') as { x: number; y: number }; } catch { return { x: 0, y: 0 }; }
+    try { return JSON.parse(localStorage.getItem('kanban_assistant_position_v2') || '{"x":0,"y":0}') as { x: number; y: number }; } catch { return { x: 0, y: 0 }; }
   });
 
-  // Offsets are measured inward from the right/bottom edges. Clamp them to the
-  // free space so a saved offset (or a screen that shrank since) can never
-  // park the panel off-screen where it looks like it failed to open.
+  const clampPosition = (p: { x: number; y: number }, w: number, h: number) => ({
+    x: Math.min(Math.max(MIN_ONSCREEN - w, p.x), Math.max(0, window.innerWidth - w - CHAT_EDGE_GAP * 2)),
+    y: Math.min(Math.max(MIN_ONSCREEN - h, p.y), Math.max(0, window.innerHeight - h - CHAT_EDGE_GAP * 2)),
+  });
+
+  // Re-clamp when the panel is resized or the viewport shrinks; persist the
+  // result so a reload restores a reachable position.
   useEffect(() => {
     setPosition((p) => {
-      const next = {
-        x: Math.min(p.x, Math.max(0, window.innerWidth - width - CHAT_EDGE_GAP * 2)),
-        y: Math.min(p.y, Math.max(0, window.innerHeight - height - CHAT_EDGE_GAP * 2)),
-      };
+      const next = clampPosition(p, width, height);
       if (next.x === p.x && next.y === p.y) return p;
-      try { localStorage.setItem('kanban_assistant_position', JSON.stringify(next)); } catch {}
+      try { localStorage.setItem('kanban_assistant_position_v2', JSON.stringify(next)); } catch {}
       return next;
     });
   }, [width, height]);
 
-  // Drag the panel by its header. x grows to the right, y grows upward
-  // because the panel hangs from its bottom edge.
+  // Drag the panel by its header. The anchor is derived from the panel's actual
+  // right/bottom edges instead of a raw delta: adding the pointer delta to the
+  // offset would send the panel the opposite way.
   const onWindowPointerDown = (e: React.PointerEvent) => {
     if ((e.target as HTMLElement).closest('button, input, select, textarea')) return;
-    const startX = e.clientX - position.x;
-    const startY = e.clientY + position.y;
-    const move = (ev: PointerEvent) => setPosition({ x: ev.clientX - startX, y: startY - ev.clientY });
+    // Distance from the pointer to the panel's right/bottom edges, constant
+    // for the whole drag.
+    const grabRight = e.clientX - (window.innerWidth - CHAT_EDGE_GAP - position.x);
+    const grabBottom = e.clientY - (window.innerHeight - CHAT_EDGE_GAP - position.y);
+    const move = (ev: PointerEvent) => {
+      const x = window.innerWidth - CHAT_EDGE_GAP - (ev.clientX - grabRight);
+      const y = window.innerHeight - CHAT_EDGE_GAP - (ev.clientY - grabBottom);
+      setPosition(clampPosition({ x, y }, width, height));
+    };
     const up = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
-      setPosition((p) => { try { localStorage.setItem('kanban_assistant_position', JSON.stringify(p)); } catch {} return p; });
+      setPosition((p) => { try { localStorage.setItem('kanban_assistant_position_v2', JSON.stringify(p)); } catch {} return p; });
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
