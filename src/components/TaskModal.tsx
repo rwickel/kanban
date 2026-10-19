@@ -24,6 +24,7 @@ interface TaskModalProps {
     kind?: Task['kind'];
     cycleIntervalSec?: number;
     blockedByTaskIds?: string[];
+    dueDate?: string;
   }) => void;
   task?: Task | null;
   availableAgents: Agent[];
@@ -39,6 +40,7 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
   const [description, setDescription] = useState('');
   const [acceptanceCriteria, setAcceptanceCriteria] = useState('');
   const [priority, setPriority] = useState<TaskPriority>('medium');
+  const [dueDate, setDueDate] = useState('');
   const [selectedAgentId, setSelectedAgentId] = useState<string>('');
   const [models, setModels] = useState<OpenCodeModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -62,6 +64,7 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
       setDescription(task.description);
       setAcceptanceCriteria(task.acceptanceCriteria || '');
       setPriority(task.priority);
+      setDueDate(task.dueDate || '');
       setSelectedAgentId(task.agentId || '');
       setResult(task.result || '');
       setResultContext(task.resultContext || '');
@@ -73,6 +76,7 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
       setDescription('');
       setAcceptanceCriteria('');
       setPriority('medium');
+      setDueDate('');
       setSelectedAgentId('');
       setResult('');
       setResultContext('');
@@ -153,6 +157,7 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
       kind,
       cycleIntervalSec: kind === 'cyclic' ? Math.max(1, Number(cycleIntervalSec) || 3600) : undefined,
       blockedByTaskIds: cleanBlockedBy,
+      dueDate: dueDate || undefined,
     });
     onClose();
   };
@@ -207,6 +212,11 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
                 </button>
               ))}
             </div>
+          </div>
+          <div>
+            <label htmlFor="task-due-date" className="block text-[12px] font-medium t-soft mb-1">Due date <span className="muted font-normal">(optional)</span></label>
+            <input id="task-due-date" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} className="input" />
+            {dueDate && <button type="button" className="text-[11px] muted mt-1" onClick={() => setDueDate('')}>Clear due date</button>}
           </div>
           <div>
             <label className="block text-[12px] font-medium t-soft mb-1">Depends on <span className="muted font-normal">(predecessors that must be done first)</span></label>

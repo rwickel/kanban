@@ -113,6 +113,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     result TEXT,
     result_context TEXT,
     notified_at TEXT,
+    due_date TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -169,6 +170,7 @@ def get_conn(db_path: Path) -> sqlite3.Connection:
         # into its parent session (see vite.config.js reconcileResultsLoop).
         # NULL means "not yet delivered", so restarts retry automatically.
         ("notified_at", "TEXT"),
+        ("due_date", "TEXT"),
     ):
         if col not in cols:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {ddl}")
@@ -273,6 +275,7 @@ def row_to_task(r: sqlite3.Row) -> dict:
         "heartbeatAt": r["heartbeat_at"] if "heartbeat_at" in keys else None,
         "expectedSec": r["expected_sec"] if "expected_sec" in keys else None,
         "cycleIntervalSec": r["cycle_interval_sec"] if "cycle_interval_sec" in keys else None,
+        "dueDate": r["due_date"] if "due_date" in keys else None,
         "progress": r["progress"] if "progress" in keys and r["progress"] else "",
         "parentSessionId": r["parent_session_id"] if "parent_session_id" in keys else None,
         "blockedByTaskIds": parse_id_list(
@@ -702,10 +705,10 @@ def cmd_task_create(args):
                               agent_id, agent_name, session_id, model_id, model_provider_id,
                               startup_phase, startup_error, kind, heartbeat_at,
                                expected_sec, cycle_interval_sec, progress, parent_session_id,
-                               result, result_context, acceptance_criteria,
+                                result, result_context, acceptance_criteria, due_date,
                               blocked_by_task_ids,
                               created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (tid, args.project, args.title, args.description or "", status, priority,
          args.agent_id, args.agent_name, args.session_id,
          args.model_id, args.model_provider,
@@ -713,7 +716,7 @@ def cmd_task_create(args):
           expected, cycle_interval, getattr(args, "progress", None) or "",
          getattr(args, "parent_session_id", None),
           getattr(args, "result", None), getattr(args, "result_context", None),
-          getattr(args, "acceptance_criteria", None),
+           getattr(args, "acceptance_criteria", None), getattr(args, "due_date", None),
          json.dumps(blocked_ids),
          ts, ts),
     )
@@ -775,6 +778,7 @@ def cmd_task_update(args):
         ("result_context", getattr(args, "result_context", None)),
         ("acceptance_criteria", getattr(args, "acceptance_criteria", None)),
         ("notified_at", getattr(args, "notified_at", None)),
+        ("due_date", getattr(args, "due_date", None)),
     ]
     for col, val in mapping:
         if val is not None:
@@ -1131,6 +1135,7 @@ def main(argv=None):
     tc.add_argument("--result", default=None, help="Task result: last message + context on done/blocked")
     tc.add_argument("--result-context", default=None, help="Extra context for the task result")
     tc.add_argument("--acceptance-criteria", default=None, help="Optional acceptance criteria")
+    tc.add_argument("--due-date", default=None, help="Optional due date (YYYY-MM-DD)")
     tc.add_argument("--blocked-by", default=None, help="Comma-separated predecessor task ids that must be done first (validated: exists, same project, no self/cycle)")
     tc.add_argument("--actor", default="cli")
     tc.set_defaults(func=cmd_task_create)
@@ -1167,6 +1172,7 @@ def main(argv=None):
     tu.add_argument("--result", default=None)
     tu.add_argument("--result-context", default=None)
     tu.add_argument("--acceptance-criteria", default=None)
+    tu.add_argument("--due-date", default=None)
     tu.add_argument("--blocked-by", default=None, help="Comma-separated predecessor ids; '' clears the list (validated: exists, same project, no self/cycle)")
     tu.add_argument("--actor", default="cli")
     tu.set_defaults(func=cmd_task_update)

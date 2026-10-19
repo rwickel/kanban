@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { MessageSquare, Pencil, Trash2, Loader2, AlertTriangle, Copy, Check, Play, RotateCcw } from 'lucide-react';
 import { useDraggable } from '@dnd-kit/core';
 import { useState } from 'react';
+import { formatDueDate, isOverdue } from '../dueDate';
 
 interface TaskCardProps {
   task: Task;
@@ -35,6 +36,7 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat, onMove, o
     : undefined;
 
   const priority = priorityConfig[task.priority];
+  const overdue = isOverdue(task.dueDate) && task.status !== 'done';
   const [copied, setCopied] = useState(false);
   const [copiedParent, setCopiedParent] = useState(false);
 
@@ -117,6 +119,7 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat, onMove, o
       </div>
 
       <h4 className="text-[15px] font-medium t-strong leading-snug line-clamp-2">{task.title}</h4>
+      {task.dueDate && <p className={`mt-1 text-[11px] flex items-center gap-1 ${overdue ? 'text-red-400' : 'muted'}`}><span>{overdue ? 'Overdue' : 'Due'}</span> {formatDueDate(task.dueDate)}</p>}
       {!!task.labels?.length && <div className="mt-2 flex flex-wrap gap-1" aria-label="Task labels">{task.labels.map((label) => <span key={label} className="pill p-neutral max-w-full truncate">{label}</span>)}</div>}
       {task.description && (
         <p className="text-[13px] muted mt-1 line-clamp-2 leading-snug">{task.description}</p>

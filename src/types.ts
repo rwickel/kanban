@@ -8,6 +8,7 @@ export interface Task {
   labels?: string[];
   /** Optional conditions that define when the task is accepted. */
   acceptanceCriteria?: string | null;
+  dueDate?: string | null;
   status: TaskStatus;
   priority: TaskPriority;
   agentId?: string;

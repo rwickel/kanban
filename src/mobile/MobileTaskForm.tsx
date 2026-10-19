@@ -5,7 +5,7 @@ import { fetchModels } from '../api/opencode';
 import { getTaskModelPref, saveTaskModelPref } from '../store/serverConfig';
 import { formatModelRef, isModelAllowed, resolveSessionModel } from '../store/modelResolution';
 
-// Copied field-by-field from TaskModal. Desktop TaskModal must not change.
+// Mobile task form uses the same task fields as the desktop form.
 export type MobileTaskFormData = {
   title: string;
   description: string;
@@ -19,6 +19,7 @@ export type MobileTaskFormData = {
   resultContext?: string;
   kind?: Task['kind'];
   cycleIntervalSec?: number;
+  dueDate?: string;
 };
 
 export default function MobileTaskForm({
@@ -39,6 +40,7 @@ export default function MobileTaskForm({
   const [description, setDescription] = useState(task?.description ?? '');
   const [acceptanceCriteria, setAcceptanceCriteria] = useState(task?.acceptanceCriteria ?? '');
   const [priority, setPriority] = useState<TaskPriority>(task?.priority ?? 'medium');
+  const [dueDate, setDueDate] = useState(task?.dueDate ?? '');
   const [selectedAgentId, setSelectedAgentId] = useState(task?.agentId ?? '');
   const [models, setModels] = useState<OpenCodeModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -100,6 +102,7 @@ export default function MobileTaskForm({
       resultContext: (task?.resultContext ?? undefined) as string | undefined,
       kind,
       cycleIntervalSec: kind === 'cyclic' ? Math.max(1, Number(cycleIntervalSec) || 3600) : undefined,
+      dueDate: dueDate || undefined,
     });
     onClose();
   };
@@ -153,6 +156,11 @@ export default function MobileTaskForm({
               </button>
             ))}
           </div>
+        </div>
+        <div className="m-field">
+          <label className="m-label" htmlFor="mt-due-date">Due date (optional)</label>
+          <input id="mt-due-date" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} className="input" />
+          {dueDate && <button type="button" className="muted" onClick={() => setDueDate('')}>Clear due date</button>}
         </div>
 
         <div className="m-field">

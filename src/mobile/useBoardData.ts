@@ -311,7 +311,7 @@ export function useBoardData() {
   }, [loadData, moveTaskInState, refreshSyncState, upsertTaskInState]);
 
   const handleSave = useCallback(async (
-    data: { title: string; description: string; acceptanceCriteria?: string; priority: TaskPriority; agentId?: string; agentName?: string; modelId?: string; modelProviderID?: string; result?: string; resultContext?: string },
+    data: { title: string; description: string; acceptanceCriteria?: string; priority: TaskPriority; agentId?: string; agentName?: string; modelId?: string; modelProviderID?: string; result?: string; resultContext?: string; dueDate?: string },
     editingTask?: Task | null,
   ) => {
     if (!activeProjectId) return;
@@ -337,6 +337,7 @@ export function useBoardData() {
         title: data.title,
         description: data.description,
         acceptanceCriteria: data.acceptanceCriteria,
+        dueDate: data.dueDate || null,
         status: 'backlog',
         priority: data.priority,
         agentId: data.agentId,
@@ -351,7 +352,7 @@ export function useBoardData() {
       // row and the auto-start guard treats the queued card as normal.
       const queuedId = `q-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       try {
-        const created = await createTask(activeProjectId, data.title, data.description, data.priority, data.agentId, data.agentName, undefined, data.modelId, data.modelProviderID, undefined, undefined, queuedId, data.acceptanceCriteria);
+        const created = await createTask(activeProjectId, data.title, data.description, data.priority, data.agentId, data.agentName, undefined, data.modelId, data.modelProviderID, undefined, undefined, queuedId, data.acceptanceCriteria, undefined, undefined, undefined, data.dueDate);
         // Online: server echoed its row (same queuedId) — drop the temp card.
         setTasks((prev) => ({ ...prev, backlog: prev.backlog.filter((t) => t.id !== tempId) }));
         delete optimisticRef.current[tempId];

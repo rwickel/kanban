@@ -270,6 +270,8 @@
   overflow: hidden;
 }
 
+.m-card-desc.due-overdue { color: var(--danger); font-weight: 600; }
+
 .m-card-actions {
   display: flex;
   gap: 8px;

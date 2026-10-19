@@ -14,7 +14,7 @@ export type QueuedOp =
       priority: TaskPriority;
       agentId?: string; agentName?: string; sessionId?: string;
       modelId?: string; modelProviderID?: string;
-      taskKind?: 'oneshot' | 'cyclic' | 'service'; cycleIntervalSec?: number;
+      taskKind?: 'oneshot' | 'cyclic' | 'service'; cycleIntervalSec?: number; dueDate?: string;
     }
   | { qid: string; kind: 'update'; at: number; id: string; updates: Record<string, unknown> };
 

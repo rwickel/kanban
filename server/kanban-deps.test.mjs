@@ -65,6 +65,15 @@ test('kanban.py task dependencies', async (t) => {
     assert.deepEqual(runJson(['task', 'show', C]).blockedByTaskIds, []);
   });
 
+  await t.test('due dates can be set, changed, and cleared', () => {
+    const dated = runJson(['task', 'create', '--project', P, '--title', 'Dated', '--due-date', '2026-10-19']);
+    assert.equal(dated.dueDate, '2026-10-19');
+    assert.equal(runJson(['task', 'update', A, '--due-date', '2026-10-20']).dueDate, '2026-10-20');
+    assert.equal(runJson(['task', 'update', A, '--due-date', '2026-10-21']).dueDate, '2026-10-21');
+    assert.equal(runJson(['task', 'update', A, '--due-date', '']).dueDate, '');
+    runJson(['task', 'delete', dated.id]);
+  });
+
   await t.test('create with --blocked-by stores the relation', () => {
     const d = runJson(['task', 'create', '--project', P, '--title', 'D', '--blocked-by', `${A},${B}`]);
     assert.deepEqual(d.blockedByTaskIds, [A, B]);

@@ -1,5 +1,6 @@
 import { Task, TaskPriority } from '../types';
 import { MessageSquare, Pencil, Trash2, Loader2, AlertTriangle, Play } from 'lucide-react';
+import { formatDueDate, isOverdue } from '../dueDate';
 
 const prioCls: Record<TaskPriority, string> = {
   low: 'p-green', medium: 'p-blue', high: 'p-amber', critical: 'p-red',
@@ -53,6 +54,7 @@ export default function MobileCard({
           )}
         </div>
         <p className="m-card-title">{task.title || 'Untitled task'}</p>
+        {task.dueDate && <p className={`m-card-desc ${isOverdue(task.dueDate) && task.status !== 'done' ? 'due-overdue' : ''}`}>{isOverdue(task.dueDate) && task.status !== 'done' ? 'Overdue' : 'Due'} {formatDueDate(task.dueDate)}</p>}
         {task.description && <p className="m-card-desc">{task.description}</p>}
         {task.acceptanceCriteria && <p className="m-card-desc"><strong>Accept:</strong> {task.acceptanceCriteria}</p>}
       </button>
