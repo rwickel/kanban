@@ -16,8 +16,9 @@ import {
   isServerDown,
   pollDelayMs,
   replayOfflineQueue,
+  createTaskWorktree,
 } from '../store/kanban';
-import { fetchAgents, createSession, sendPrompt, getServerInfo, getSessionInstruction, putSessionInstruction } from '../api/opencode';
+import { fetchAgents, createSession, sendPrompt, getServerInfo, getSessionInstruction, putSessionInstruction, moveSession } from '../api/opencode';
 import { getTaskModelPref } from '../store/serverConfig';
 import { resolveSessionModel } from '../store/modelResolution';
 import { ensureAssistantSession } from '../store/assistantSession';
@@ -209,12 +210,38 @@ export function useBoardData() {
       upsertTaskInState(task);
     }
     const activeProj = projects.find((p) => p.id === task.projectId);
-    const directory = activeProj?.path?.trim() || undefined;
+    // Isolation: the task works in its own git worktree (see App.tsx).
+    let worktree: { path: string; branch: string; base?: string | null; reused: boolean } | null = null;
+    try {
+      worktree = await createTaskWorktree(task.id);
+    } catch { /* no git repo or server down — use the project folder */ }
+    if (worktree) {
+      task = { ...task, worktreePath: worktree.path, worktreeBranch: worktree.branch, worktreeState: 'active' };
+      upsertTaskInState(task);
+    }
+    const directory = worktree?.path || activeProj?.path?.trim() || undefined;
     // Model: task pick → allowed pref → project pool → omit (server default).
     const resolvedModel = resolveSessionModel(task, activeProj, getTaskModelPref());
     const model = resolvedModel ? { providerID: resolvedModel.providerID, id: resolvedModel.modelID } : undefined;
 
     let sessionId = task.sessionId;
+    // A session from an older run lives in the old folder. When the task now
+    // runs in a fresh worktree, the session must follow it.
+    let sessionMoved = false;
+    if (sessionId && worktree && !worktree.reused) {
+      const moved = await moveSession(sessionId, worktree.path).catch(() => false);
+      if (moved) {
+        sessionMoved = true;
+      } else {
+        // The session cannot follow. Start a new one in the worktree and say
+        // so, so the lost context is visible and not silent.
+        const note = 'The old session could not move into the new worktree. A new session started; the old chat stays in the session list.';
+        sessionId = undefined;
+        task = { ...task, sessionId: undefined, worktreeNote: note };
+        await updateTask(task.id, { sessionId: undefined, worktreeNote: note } as Partial<Task>).catch(() => {});
+        upsertTaskInState(task);
+      }
+    }
     // A cyclical task re-enters here with the same sessionId every cycle, so
     // the durable instruction is written only on the very first run.
     const isNewSession = !sessionId;
@@ -246,6 +273,9 @@ export function useBoardData() {
     if (!needsInstruction) {
       needsInstruction = (await getSessionInstruction(sessionId, TASK_INSTRUCTION_KEY)) === null;
     }
+    // A moved session keeps its old instruction entry, which has no worktree
+    // rules. Write the contract again so the agent knows the new folder.
+    if (!needsInstruction && sessionMoved) needsInstruction = true;
     if (needsInstruction) {
       const put = await putSessionInstruction(sessionId, TASK_INSTRUCTION_KEY, buildTaskSessionInstruction(ctx));
       if (!put.ok) {

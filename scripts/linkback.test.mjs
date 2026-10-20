@@ -117,6 +117,40 @@ describe("buildLinkbackPrompt", () => {
     }]);
     assert.match(text, /\*\*Blocker:\*\* delegate timed out after 600s - still running/);
   });
+  it("quotes the worktree branch, state and folder of a finished task", () => {
+    const text = buildLinkbackPrompt([{
+      id: "t11",
+      title: "Isolated work",
+      status: "done",
+      result: "ok",
+      worktreeBranch: "kanban/task-1a2b3c4d",
+      worktreeState: "merged",
+      worktreePath: "C:/work/.kanban-worktrees/proj/t11",
+      worktreeNote: "Merged kanban/task-1a2b3c4d into main",
+    }]);
+    assert.match(text, /\*\*Worktree branch:\*\* `kanban\/task-1a2b3c4d`/);
+    assert.match(text, /\*\*Worktree state:\*\* merged/);
+    assert.match(text, /\*\*Worktree folder:\*\* `C:\/work\/\.kanban-worktrees\/proj\/t11`/);
+    assert.match(text, /\*\*Merge note:\*\* Merged kanban\/task-1a2b3c4d into main/);
+    assert.match(text, /worktree merge state/);
+  });
+  it("marks a conflicting worktree as not merged", () => {
+    const text = buildLinkbackPrompt([{
+      id: "t12",
+      title: "Conflicting work",
+      status: "done",
+      worktreeBranch: "kanban/task-9f8e7d6c",
+      worktreeState: "conflict",
+      worktreeNote: "Automatic merge failed",
+    }]);
+    assert.match(text, /\*\*Worktree state:\*\* conflict/);
+    assert.match(text, /was \*\*not merged\*\*/);
+    assert.match(text, /kanban_worktree/);
+  });
+  it("omits worktree lines when the task has no worktree", () => {
+    const text = buildLinkbackPrompt([{ id: "t13", title: "Plain", status: "done" }]);
+    assert.doesNotMatch(text, /Worktree/);
+  });
 });
 
 describe("blockerText", () => {

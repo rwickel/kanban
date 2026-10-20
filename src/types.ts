@@ -38,6 +38,14 @@ export interface Task {
   blockedByTaskIds?: string[];
   /** Queued offline, not yet confirmed by the server. Cleared on next server echo. */
   pendingSync?: boolean;
+  /** Git worktree that isolates this task from parallel tasks. */
+  worktreePath?: string | null;
+  /** Branch inside the worktree (e.g. "kanban/task-1a2b3c4d"). */
+  worktreeBranch?: string | null;
+  /** Worktree lifecycle: active | merged | conflict | pending | removed. */
+  worktreeState?: string | null;
+  /** Last merge message (conflict details, error text). */
+  worktreeNote?: string | null;
   projectId: string;
   createdAt: string;
   updatedAt: string;

@@ -34,11 +34,12 @@ import {
   isServerDown,
   pollDelayMs,
   replayOfflineQueue,
+  createTaskWorktree,
 } from './store/kanban';
 import { isQueuedOffline } from './store/offlineQueue';
 import { useOfflineSync } from './hooks/useOfflineSync';
 import OfflineBanner from './components/OfflineBanner';
-import { fetchAgents, createSession, sendPrompt, getServerInfo, getSessionInstruction, putSessionInstruction } from './api/opencode';
+import { fetchAgents, createSession, sendPrompt, getServerInfo, getSessionInstruction, putSessionInstruction, moveSession } from './api/opencode';
 import { getTaskModelPref } from './store/serverConfig';
 import { resolveSessionModel, normalizeAllowedModels, isModelAllowed, formatModelRef } from './store/modelResolution';
 import { ensureAssistantSession } from './store/assistantSession';
@@ -481,7 +482,18 @@ export default function App() {
     }
 
     const project = projects.find((p) => p.id === task.projectId);
-    const directory = project?.path?.trim() || undefined;
+    // Isolation: the task gets its own git worktree, so parallel tasks never
+    // share files, git index or build output. The board merges the branch when
+    // the task is done. Projects without git keep the plain project folder.
+    let worktree: { path: string; branch: string; base?: string | null; reused: boolean } | null = null;
+    try {
+      worktree = await createTaskWorktree(task.id);
+    } catch { /* no git repo or server down — use the project folder */ }
+    if (worktree) {
+      task = { ...task, worktreePath: worktree.path, worktreeBranch: worktree.branch, worktreeState: 'active' };
+      upsertTaskInState(task);
+    }
+    const directory = worktree?.path || project?.path?.trim() || undefined;
 
     // Pinned branch: warn (not block) if the checkout differs from project.gitBranch.
     // Never auto-switches — that would nuke WIP when parallel tasks run.
@@ -524,6 +536,24 @@ export default function App() {
     // A cyclical task comes back here every cycle with the SAME sessionId, so
     // the durable instruction below is only written on the very first run.
     let sessionId = task.sessionId;
+    // A session from an older run lives in the old folder (the project folder
+    // or an old worktree). When the task now runs in a fresh worktree, the
+    // session must follow it — otherwise the agent works in the wrong folder.
+    let sessionMoved = false;
+    if (sessionId && worktree && !worktree.reused) {
+      const moved = await moveSession(sessionId, worktree.path).catch(() => false);
+      if (moved) {
+        sessionMoved = true;
+      } else {
+        // The session cannot follow. Start a new one in the worktree and say
+        // so, so the lost context is visible and not silent.
+        const note = 'The old session could not move into the new worktree. A new session started; the old chat stays in the session list.';
+        sessionId = undefined;
+        task = { ...task, sessionId: undefined, worktreeNote: note };
+        await updateTask(task.id, { sessionId: undefined, worktreeNote: note } as unknown as Partial<Task>).catch(() => {});
+        upsertTaskInState(task);
+      }
+    }
     const isNewSession = !sessionId;
     if (!sessionId) {
       // Show progress on the card — chat stays closed until the user opens it.
@@ -569,6 +599,9 @@ export default function App() {
     if (!needsInstruction) {
       needsInstruction = (await getSessionInstruction(sessionId!, TASK_INSTRUCTION_KEY)) === null;
     }
+    // A moved session keeps its old instruction entry, which has no worktree
+    // rules. Write the contract again so the agent knows the new folder.
+    if (!needsInstruction && sessionMoved) needsInstruction = true;
     if (needsInstruction) {
       const put = await putSessionInstruction(sessionId!, TASK_INSTRUCTION_KEY, buildTaskSessionInstruction(ctx));
       if (!put.ok) {

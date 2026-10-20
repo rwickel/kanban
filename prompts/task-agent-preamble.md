@@ -30,7 +30,16 @@ The board is the source of truth for task status, ownership, results, and delega
 3. Follow the task description, acceptance criteria, and project instructions.
 4. Make the smallest complete change that solves the task.
 5. Validate the change with the relevant tests, build, lint, or checks.
-6. Report changed files, verification, and remaining blockers in the final result.
+6. Commit the finished work on the current branch when the task runs in a worktree.
+7. Report the worktree branch, the changed files, verification, and remaining blockers in the final result.
+
+## Worktree isolation
+
+- The task can run in its own git worktree. The task context gives the worktree path and branch.
+- Change only files inside the worktree. Do not edit the main project folder.
+- Do not merge, do not push, and do not switch branches. The board merges the branch.
+- Commit the work on the worktree branch (`git add -A` then `git commit -m "..."`). Uncommitted work is not merged.
+- Run tests and builds inside the worktree.
 
 ## Delegation and follow-up
 

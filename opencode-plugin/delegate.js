@@ -19,8 +19,8 @@ import {
 const clamp = (value, min, max, fallback) =>
   Math.min(Math.max(Number(value) || fallback, min), max)
 
-function projectRow(projectId) {
-  const pj = runCli(["project", "list", "--json"])
+async function projectRow(projectId) {
+  const pj = await runCli(["project", "list", "--json"])
   if (!pj.ok) return null
   const list = parseJson(pj.text)
   return Array.isArray(list) ? list.find((p) => p.id === projectId) || null : null
@@ -34,16 +34,53 @@ function buildDelegatePrompt({
   description,
   projectPath,
   sessionId,
+  worktree,
+  feature,
 }) {
   const styleGuide = loadStyleGuide()
+  const place = worktree?.path || projectPath || "the project"
+  let isolation
+  if (feature?.path) {
+    isolation =
+      `You work in a FEATURE worktree that is shared with the other steps of this feature: ${feature.path}\n` +
+      `Feature branch: ${feature.branch}\n` +
+      `Rules: change only files inside this worktree. Commit your work on the feature branch ` +
+      `(git add -A && git commit -m "..."). Do NOT merge, do NOT push, do NOT switch branches, ` +
+      `and do NOT reset, clean or delete the folder — the work of the earlier steps is in it. ` +
+      `Only one step works here at a time. The integrator merges the feature branch into main at the end.\n`
+  } else if (worktree?.path) {
+    isolation =
+      `You work in an ISOLATED git worktree: ${worktree.path}\n` +
+      `Branch: ${worktree.branch} (base ${worktree.base || "the project branch"})\n` +
+      `Rules: change only files inside this worktree. Commit your work on this branch ` +
+      `(git add -A && git commit -m "..."). Do NOT merge, do NOT push, do NOT switch branches, ` +
+      `and do NOT edit the main project folder. The board merges your branch when the task is done. ` +
+      `State the branch name and the changed files in your final message.\n`
+  } else {
+    isolation = `You work in the project folder: ${place}\n`
+  }
   return (
-    `You are ${agentLabel || "a teammate"} executing a delegated subtask. Complete it end-to-end in ${projectPath || "the project"}.\n` +
+    `You are ${agentLabel || "a teammate"} executing a delegated subtask. Complete it end-to-end in ${place}.\n` +
+    isolation +
     `Task id: ${taskId}\nProject id: ${projectId}\nTask: ${title}\nDescription: ${description || "(none)"}\n` +
     `Session id: ${sessionId} (pass as parentSessionId when you create/delegate follow-up tasks).\n\n` +
     `Before finishing, verify every acceptance criterion and required check. End with KANBAN_TASK_COMPLETE only when all are met; otherwise explain what remains and end with KANBAN_TASK_INCOMPLETE. A successful session alone does not prove completion. Do NOT call kanban_update_status or PATCH the task status yourself. Never write your answer into the description.` +
     (styleGuide ? `\n${styleGuide}\n` : "") +
     ` Fire-and-forget: the delegator already returned.`
   )
+}
+
+/**
+ * Give the task its own git worktree so parallel tasks never share files,
+ * git index or build output. Returns { path, branch, base } or null when the
+ * project is not a git repo (the caller then uses the plain project folder).
+ */
+async function createWorktree(taskId) {
+  const created = await runCli(["worktree", "create", taskId])
+  if (!created.ok) return null
+  const info = parseJson(created.text)
+  if (!info || !info.ok || !info.path) return null
+  return { path: info.path, branch: info.branch, base: info.base }
 }
 
 /** Flatten an assistant message payload to plain text, or "" when not text. */
@@ -114,11 +151,12 @@ export async function delegateTool(args, context, ctx) {
   const interval = clamp(args.pollMs, 1000, 15000, 3000)
   const shouldWait = args.wait === true
   const parentSessionId = args.parentSessionId ?? null
+  const featureId = (args.featureId ?? "").trim() || null
   const blockedBy = Array.isArray(args.blockedByTaskIds)
     ? args.blockedByTaskIds.map((v) => String(v ?? "").trim()).filter(Boolean)
     : []
 
-  const created = runCli([
+  const created = await runCli([
     "task", "create",
     "--project", projectId,
     "--title", title,
@@ -131,17 +169,19 @@ export async function delegateTool(args, context, ctx) {
     ...(args.modelProviderID ? ["--model-provider", args.modelProviderID] : []),
     ...(parentSessionId ? ["--parent-session-id", parentSessionId] : []),
     ...(blockedBy.length ? ["--blocked-by", blockedBy.join(",")] : []),
+    ...(featureId ? ["--feature", featureId] : []),
   ])
   if (!created.ok) toolError(created.text)
 
-  const tid = parseJson(created.text)?.id
+  const taskRow = parseJson(created.text)
+  const tid = taskRow?.id
   if (!tid) toolError(created.text)
 
   // Depends-on: only start the teammate when every predecessor is done.
   // Otherwise the task stays in the backlog; the caller can poll it with
   // kanban_task_status or re-delegate once the predecessors finish.
   if (blockedBy.length) {
-    const deps = runCli(["task", "deps", tid])
+    const deps = await runCli(["task", "deps", tid])
     const info = deps.ok ? parseJson(deps.text) : null
     if (info && info.ready === false) {
       const pending = (info.predecessors || [])
@@ -160,13 +200,13 @@ export async function delegateTool(args, context, ctx) {
     }
   }
 
-  const moved = runCli(["task", "move", tid, "running", "--actor", "delegate"])
+  const moved = await runCli(["task", "move", tid, "running", "--actor", "delegate"])
   if (!moved.ok) toolError(moved.text)
 
   // The project path drives the session location, and it validates the agent team.
   let projectPath = ""
   try {
-    const row = projectRow(projectId)
+    const row = await projectRow(projectId)
     if (row) {
       projectPath = row.path || ""
       const team = Array.isArray(row.agentIds) ? row.agentIds : []
@@ -180,17 +220,30 @@ export async function delegateTool(args, context, ctx) {
 
   const agentLabel = args.agentName || args.agentId || ""
 
+  // Isolation: a feature task works in the feature worktree (shared by all
+  // steps). A normal task gets its own worktree. Without a git repo the
+  // session falls back to the plain project folder.
+  const feature = featureId
+    ? {
+        id: featureId,
+        path: taskRow?.worktreePath || "",
+        branch: taskRow?.worktreeBranch || "",
+      }
+    : null
+  const worktree = feature ? null : await createWorktree(tid)
+  const workDir = feature?.path || worktree?.path || projectPath
+
   try {
     const session = await ctx.session.create({
       agent: agentLabel || undefined,
       ...(args.modelId && args.modelProviderID
         ? { model: { id: args.modelId, providerID: args.modelProviderID } }
         : {}),
-      ...(projectPath ? { location: { directory: projectPath } } : {}),
+      ...(workDir ? { location: { directory: workDir } } : {}),
     })
     if (!session?.id) throw new Error("session create returned no id")
 
-    runCli([
+    await runCli([
       "task", "update", tid, "--actor", "delegate",
       "--session-id", session.id,
       ...(args.agentId ? ["--agent-id", args.agentId] : []),
@@ -206,17 +259,20 @@ export async function delegateTool(args, context, ctx) {
       description,
       projectPath,
       sessionId: session.id,
+      worktree,
+      feature,
     })
 
     await ctx.session.prompt({ sessionID: session.id, text: prompt })
 
     if (!shouldWait) {
-      const cur = runCli(["task", "show", tid])
+      const cur = await runCli(["task", "show", tid])
       return jsonResult({
         task: cur.ok ? parseJson(cur.text) ?? cur.text : cur.text,
         sessionId: session.id,
         waited: false,
         parentSessionId,
+        ...(worktree ? { worktree } : {}),
       })
     }
 
@@ -224,7 +280,7 @@ export async function delegateTool(args, context, ctx) {
   } catch (e) {
     let cur = null
     try {
-      const u = runCli([
+      const u = await runCli([
         "task", "update", tid, "--actor", "delegate",
         "--status", "blocked",
         "--startup-phase", "error",
@@ -244,7 +300,7 @@ async function awaitTask({ ctx, taskId, sessionId, parentSessionId, timeoutMs, i
 
   for (;;) {
     // The board is the source of truth for status, so keep polling it.
-    const cur = runCli(["task", "show", taskId])
+    const cur = await runCli(["task", "show", taskId])
     const row = cur.ok ? parseJson(cur.text) : null
 
     if (row && (row.status === "done" || row.status === "blocked")) {
@@ -329,7 +385,7 @@ async function detectStuckTool(ctx, sessionId, lastNotifiedAt, taskId) {
 
     const msg = `stalled: tool '${stuck.name}' running for ${Math.round(stuck.ageMs / 1000)}s without completion`
     await ctx.session.interrupt({ sessionID: sessionId }).catch(() => {})
-    runCli([
+    await runCli([
       "task", "update", taskId, "--actor", "watchdog",
       "--status", "blocked",
       "--startup-phase", "error",
@@ -357,7 +413,7 @@ export async function messageToTool(args, context, ctx) {
   let taskRow = null
 
   if (!sessionId && taskId) {
-    const row = runCli(["task", "show", taskId])
+    const row = await runCli(["task", "show", taskId])
     if (!row.ok) toolError(row.text)
     taskRow = parseJson(row.text)
     sessionId = (taskRow?.sessionId || "").trim()
@@ -366,7 +422,7 @@ export async function messageToTool(args, context, ctx) {
   if (!sessionId) toolError("sessionId or taskId required")
 
   if (!taskRow) {
-    const listed = runCli(["task", "list", "--json"])
+    const listed = await runCli(["task", "list", "--json"])
     const rows = listed.ok ? parseJson(listed.text) : []
     taskRow = Array.isArray(rows) ? rows.find((row) => row?.sessionId === sessionId) || null : null
     if (!taskId) taskId = taskRow?.id || null
@@ -395,9 +451,11 @@ export async function messageToTool(args, context, ctx) {
             const full = assistantText(fresh)
             const result = full.length > 4000 ? full.slice(0, 4000) : full
             const title = String(taskRow?.title || "(unknown task)").slice(0, 200)
+            const branch = String(taskRow?.worktreeBranch ?? taskRow?.worktree_branch ?? "").trim()
+            const branchLine = branch ? `\n  Worktree branch: ${branch}` : ""
             await ctx.session.prompt({
               sessionID: parentSessionId,
-              text: `[Board] Subtask follow-up update:\n- "${title}" returned a follow-up answer.\n  Task ID: ${taskId || "(missing)"}\n  Session ID: ${sessionId}\n  Answer: ${result}\n\nReport the task title, task ID, session ID, and answer. Start no new work unless asked.`,
+              text: `[Board] Subtask follow-up update:\n- "${title}" returned a follow-up answer.\n  Task ID: ${taskId || "(missing)"}\n  Session ID: ${sessionId}${branchLine}\n  Answer: ${result}\n\nReport the task title, task ID, session ID, worktree branch, and answer. Start no new work unless asked.`,
               delivery: "queue",
             })
             return

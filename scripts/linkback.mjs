@@ -77,6 +77,28 @@ export function groupPending(rows) {
 }
 
 /**
+ * Worktree lines of a finished task: branch, state, folder, merge note.
+ * The state tells the parent if the work reached the project branch.
+ */
+export function worktreeLines(task) {
+  const branch = String(task?.worktreeBranch ?? task?.worktree_branch ?? "").trim();
+  if (!branch) return [];
+  const state = String(task?.worktreeState ?? task?.worktree_state ?? "").trim() || "unknown";
+  const path = String(task?.worktreePath ?? task?.worktree_path ?? "").trim();
+  const note = String(task?.worktreeNote ?? task?.worktree_note ?? "").trim();
+  const lines = [
+    `- **Worktree branch:** \`${branch}\``,
+    `- **Worktree state:** ${state}`,
+  ];
+  if (path) lines.push(`- **Worktree folder:** \`${path}\``);
+  if (note) lines.push(`- **Merge note:** ${note}`);
+  if (state === "conflict") {
+    lines.push("- The branch was **not merged** because of a conflict. Resolve it with `kanban_worktree` (action `merge`) or report it.");
+  }
+  return lines;
+}
+
+/**
  * One queued message for a parent. Style follows ASD-STE100: short sentences,
  * one instruction per sentence.
  */
@@ -98,12 +120,13 @@ export function buildLinkbackPrompt(tasks) {
     ];
     if (result) detail.push(`- **Result:** ${result}`);
     if (ctx && status === "BLOCKED") detail.push(`- **Blocker:** ${ctx}`);
+    detail.push(...worktreeLines(t));
     return detail.join("\n");
   });
   return (
     `[Board] Delegated task update\n\n` +
     lines.join("\n\n---\n\n") +
-    `\n\nReport the task title, status, task ID, session ID, result, and blocker. Start no new work unless asked.`
+    `\n\nReport the task title, status, task ID, session ID, result, blocker, and worktree merge state. Start no new work unless asked.`
   );
 }
 

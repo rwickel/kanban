@@ -231,6 +231,73 @@ Branch pin check → `{ ok, current, pinned }`, e.g.
 `POST /api/kanban/clone` without `url`/`folder` →
 `400 { ok:false, error:"url and folder required" }`.
 
+## Worktree isolation — `/api/kanban/tasks/:id/worktree`
+
+Every task can run in its own **git worktree**. The agent session then works in
+that folder, so two parallel tasks never share files, git index or build
+output. The board merges the task branch into the project branch when the task
+reaches `done`.
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| GET | `/api/kanban/tasks/:id/worktree` | `{ taskId, path, branch, state, note }` |
+| POST | `/api/kanban/tasks/:id/worktree` | create the worktree → `{ ok, path, branch, base, reused }` |
+| POST | `/api/kanban/tasks/:id/worktree/merge` | merge the branch → `{ ok, merged, conflict, files[], error }` |
+| DELETE | `/api/kanban/tasks/:id/worktree` | remove the worktree folder → `{ ok, removed, path, branch, error }` |
+
+- Worktree folder: `<KANBAN_WORKTREES_ROOT>/<project folder>/<task id>`.
+  Default root: `<KANBAN_PROJECTS_ROOT>/.kanban-worktrees`.
+- Branch: `kanban/task-<first 8 chars of the task id>`.
+- Base branch: the project branch (`projects.gitBranch`), or `HEAD` when that
+  branch does not exist locally.
+- `state`: `active` → `merged` | `conflict` | `pending` | `removed`.
+- A failed merge never breaks the status change. The task keeps `done` and the
+  board shows `worktreeState: "conflict"` plus the conflict note.
+- Set `KANBAN_WORKTREE_AUTOMERGE=0` to switch the automatic merge off.
+- Projects without a git repo keep the plain project folder.
+
+CLI (same store, used by the plugin and the board):
+
+```powershell
+python server/kanban.py worktree create <taskId>
+python server/kanban.py worktree merge  <taskId> [--target main] [--cleanup]
+python server/kanban.py worktree remove <taskId> [--force] [--delete-branch]
+python server/kanban.py worktree list   [--project <projectId>]
+```
+
+## Features — `/api/kanban/features`
+
+A feature groups the steps of one unit of work. All its tasks share **one**
+git worktree and **one** branch, so the steps build on each other.
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| GET | `/api/kanban/features?projectId=` | `Feature[]` — the features of a board |
+| GET | `/api/kanban/features/:id` | `Feature` with its tasks |
+| POST | `/api/kanban/features` | create a feature: worktree + branch. Body: `projectId*`, `title*`, `description?`, `base?` |
+| POST | `/api/kanban/features/:id/merge` | merge the feature branch into the project branch. Body: `target?` |
+| DELETE | `/api/kanban/features/:id` | delete the feature, remove its worktree. The tasks stay on the board |
+
+- Worktree folder: `<KANBAN_WORKTREES_ROOT>/<project folder>/feature-<featureId>`.
+- Branch: `kanban/feature-<first 8 chars of the feature id>`.
+- `status`: `active` / `done`. `mergeNote` holds the last merge message.
+- A task of a feature is created with `featureId`. Its row then carries the
+  feature worktree path and branch.
+- **The board never merges a feature by itself.** The `integrator` agent calls
+  the merge. A task that reaches `done` does not merge the feature.
+- Only one step of a feature may run at a time. The board refuses the second
+  running step with `Feature worktree is busy`.
+
+CLI:
+
+```powershell
+python server/kanban.py feature create --project <projectId> --title "Feature A"
+python server/kanban.py feature list   [--project <projectId>]
+python server/kanban.py feature show   <featureId>
+python server/kanban.py feature merge  <featureId>
+python server/kanban.py feature delete <featureId>
+```
+
 ## Delegate — `POST /api/kanban/delegate` (sync, like read/write)
 
 Create a task **for another agent on the team**, execute it **immediately**,
@@ -414,6 +481,8 @@ Same SQLite rows, native plugin tools, actor recorded as `"agent"`:
 | `kanban_task_status {taskId?}` | `GET /api/kanban/tasks/:id` or `GET /api/kanban/events` |
 | `kanban_delegate {projectId,title,...}` | `POST /api/kanban/delegate` — sync: create + run + WAIT for done |
 | `kanban_message_to {sessionId?|taskId?,text,...}` | `POST /api/kanban/message_to` — follow-up in SAME session, returns last message |
+| `kanban_worktree {action,taskId?}` | `POST/GET/DELETE /api/kanban/tasks/:id/worktree` — create, read, merge or remove the task worktree |
+| `kanban_feature {action,featureId?}` | `POST/GET/DELETE /api/kanban/features/:id` — create, read, merge or delete the feature worktree |
 
 Canonical reference: [`vite.config.js` `kanbanApi()`](../vite.config.js) (routes),
 [`server/kanban.py`](../server/kanban.py) (store/CLI), [`README.md`](../README.md) (workflow).

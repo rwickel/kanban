@@ -31,6 +31,10 @@ Usage:
   python server/kanban.py task move <taskId> <backlog|running|done|blocked>
   python server/kanban.py task deps <taskId>
   python server/kanban.py task delete <taskId>
+  python server/kanban.py worktree create <taskId> [--base <branch>]
+  python server/kanban.py worktree merge  <taskId> [--target <branch>] [--cleanup]
+  python server/kanban.py worktree remove <taskId> [--force] [--delete-branch]
+  python server/kanban.py worktree list   [--project <projectId>]
   python server/kanban.py events list [--task <taskId>] [--limit 50]
 
 All write commands print JSON to stdout (machine-readable for plugin/HTTP).
@@ -40,8 +44,10 @@ Human-readable errors go to stderr with non-zero exit.
 import argparse
 import json
 import os
+import shutil
 import sqlite3
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,7 +61,7 @@ DEFAULT_DATA_DIR = Path(
 DEFAULT_DB = Path(os.getenv("KANBAN_DB", str(DEFAULT_DATA_DIR / "kanban.db")))
 
 # Base path: all projects must live under this folder (folder NAME only from browser).
-for _k in ("KANBAN_PROJECTS_ROOT",):
+for _k in ("KANBAN_PROJECTS_ROOT", "KANBAN_WORKTREES_ROOT"):
     # Load .env manually so kanban.py works even when not launched via vite.
     _envp = REPO / ".env"
     if _envp.exists() and not os.getenv(_k):
@@ -114,12 +120,34 @@ CREATE TABLE IF NOT EXISTS tasks (
     result_context TEXT,
     notified_at TEXT,
     due_date TEXT,
+    worktree_path TEXT,
+    worktree_branch TEXT,
+    worktree_state TEXT,
+    worktree_note TEXT,
+    feature_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id);
+-- A feature groups the tasks of one unit of work. All its tasks share one
+-- git worktree and one branch, so the steps of a feature never fight over
+-- files. The feature branch is merged into the project branch at the end.
+CREATE TABLE IF NOT EXISTS features (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    worktree_path TEXT,
+    worktree_branch TEXT,
+    base_branch TEXT,
+    merge_note TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_features_project ON features(project_id);
 -- NOTE: idx_tasks_parent_notified is created in get_conn() AFTER the
 -- notified_at backfill, so old DBs (table exists, column missing) don't
 -- fail here with "no such column" at executescript time.
@@ -171,6 +199,14 @@ def get_conn(db_path: Path) -> sqlite3.Connection:
         # NULL means "not yet delivered", so restarts retry automatically.
         ("notified_at", "TEXT"),
         ("due_date", "TEXT"),
+        # Worktree isolation: every task can run in its own git worktree.
+        # path = worktree folder, branch = branch inside it, state = lifecycle.
+        ("worktree_path", "TEXT"),
+        ("worktree_branch", "TEXT"),
+        ("worktree_state", "TEXT"),
+        ("worktree_note", "TEXT"),
+        # Feature group: the task works in the feature worktree, not its own.
+        ("feature_id", "TEXT"),
     ):
         if col not in cols:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {ddl}")
@@ -254,6 +290,755 @@ def check_branch_pinned(project_row, folder: str) -> dict:
     return {"ok": (cur == pinned), "current": cur, "pinned": pinned}
 
 
+# ---------- worktree isolation ----------
+#
+# Every task can run in its own git worktree. The agent session then works in
+# that folder, so two parallel tasks never share files, git index or build
+# output. The work is merged back into the pinned branch when the task is done.
+
+def worktrees_root() -> Path:
+    """Root folder that holds all worktrees. Default: <PROJECTS_ROOT>/.kanban-worktrees."""
+    root = os.getenv("KANBAN_WORKTREES_ROOT", "").strip()
+    path = Path(root) if root else projects_root() / ".kanban-worktrees"
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return path
+
+
+def git_run(repo, *args, timeout=120):
+    """Run git in `repo`. Returns (code, stdout, stderr). Never raises."""
+    try:
+        r = _sp.run(["git", "-C", str(repo), *[str(a) for a in args]],
+                    capture_output=True, text=True, timeout=timeout)
+        return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
+    except Exception as exc:  # git missing, timeout, ...
+        return 1, "", str(exc)
+
+
+def git_toplevel(repo) -> str:
+    code, out, _ = git_run(repo, "rev-parse", "--show-toplevel")
+    return out if code == 0 else ""
+
+
+def worktree_branch_for(task_id: str) -> str:
+    """Branch name of a task worktree: kanban/task-<short id>."""
+    safe = "".join(ch for ch in str(task_id) if ch.isalnum() or ch in "-_")[:8] or "task"
+    return f"kanban/task-{safe}"
+
+
+def worktree_path_for(project_row, task_id: str) -> Path:
+    """Folder of the task worktree: <WORKTREES_ROOT>/<project folder>/<task id>."""
+    folder = (project_row["folder"] or "").strip() or "project"
+    safe_folder = "".join(ch for ch in folder if ch.isalnum() or ch in "-_.") or "project"
+    safe_task = "".join(ch for ch in str(task_id) if ch.isalnum() or ch in "-_")[:64] or "task"
+    return worktrees_root() / safe_folder / safe_task
+
+
+def same_path(a, b) -> bool:
+    """Compare two paths. Git prints worktree paths with forward slashes."""
+    try:
+        return os.path.normcase(os.path.realpath(str(a))) == os.path.normcase(os.path.realpath(str(b)))
+    except Exception:
+        return str(a) == str(b)
+
+
+def registered_worktrees(repo) -> list:
+    """Paths of the worktrees that git knows for this repo."""
+    code, out, _ = git_run(repo, "worktree", "list", "--porcelain")
+    if code != 0:
+        return []
+    paths = []
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            paths.append(line[len("worktree "):].strip())
+    return paths
+
+
+def project_row_for_task(conn, task_id: str):
+    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if not row:
+        fail(f"Task not found: {task_id}")
+    project = conn.execute("SELECT * FROM projects WHERE id = ?", (row["project_id"],)).fetchone()
+    if not project:
+        fail(f"Project not found: {row['project_id']}")
+    return row, project
+
+
+_CLEAR = object()
+
+
+def set_worktree_fields(conn, task_id, path=None, branch=None, state=None, note=None):
+    sets, params = [], []
+    for col, val in (("worktree_path", path), ("worktree_branch", branch),
+                     ("worktree_state", state), ("worktree_note", note)):
+        if val is _CLEAR:
+            val = None
+        elif val is None:
+            continue
+        sets.append(f"{col} = ?")
+        params.append(val)
+    if not sets:
+        return
+    sets.append("updated_at = ?")
+    params.append(now_iso())
+    params.append(task_id)
+    conn.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", params)
+
+
+def copy_setup_files(repo, path):
+    """Copy the local setup files into a fresh worktree.
+
+    A new worktree has no .env and no build output. The .env is small and
+    needed by the steps, so it is copied. node_modules and other build output
+    are not copied: the verification step installs or links them.
+
+    The agent definitions are copied too. They are the team of the project, and
+    a worktree without them has no agents at all ("Agent not found"). They are
+    kept out of the commits of the agent: tracked files get the skip-worktree
+    flag, new files go into the exclude file of the worktree.
+    """
+    copied = []
+    for name in (".env", ".env.local"):
+        src = Path(repo) / name
+        dst = Path(path) / name
+        try:
+            if src.exists() and not dst.exists():
+                shutil.copyfile(src, dst)
+                copied.append(name)
+        except Exception:
+            pass
+    copied += copy_agent_definitions(repo, path)
+    return copied
+
+
+def copy_agent_definitions(repo, path):
+    """Copy .opencode/agents into the worktree and keep them out of commits.
+
+    The agent team is environment, not task work. The worktree gets the
+    current files, so a new agent works there at once. The files stay out of
+    the commit of the agent:
+    - tracked files get the skip-worktree flag,
+    - new files are covered by a per-worktree exclude file.
+    """
+    src_dir = Path(repo) / ".opencode" / "agents"
+    if not src_dir.is_dir():
+        return []
+    dst_dir = Path(path) / ".opencode" / "agents"
+    copied = []
+    try:
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        for md in sorted(src_dir.glob("*.md")):
+            shutil.copyfile(md, dst_dir / md.name)
+            copied.append(f".opencode/agents/{md.name}")
+    except Exception:
+        return copied
+    if not copied:
+        return copied
+    # Tracked files: git must not stage the copy.
+    for rel in copied:
+        code, _, _ = git_run(path, "ls-files", "--error-unmatch", rel)
+        if code == 0:
+            git_run(path, "update-index", "--skip-worktree", rel)
+    # New files: a per-worktree exclude file. The shared exclude file would
+    # also hide the files in the main checkout, where they must stay
+    # committable.
+    try:
+        code, _, _ = git_run(path, "rev-parse", "--git-common-dir")
+        git_run(path, "config", "extensions.worktreeConfig", "true")
+        exclude_file = Path(path).parent.parent / f".exclude-{Path(path).name}"
+        exclude_file.write_text(
+            "# Added by the kanban board: the agent team is not task work.\n"
+            ".opencode/agents/\n",
+            encoding="utf-8",
+        )
+        git_run(path, "config", "--worktree", "core.excludesFile", str(exclude_file))
+    except Exception:
+        pass
+    return copied
+
+
+def cmd_worktree_create(args):
+    """Create a git worktree for one task. Prints {ok, path, branch, base, reused}."""
+    conn = get_conn(args.db)
+    task, project = project_row_for_task(conn, args.task_id)
+    # A task of a feature uses the feature worktree. It never gets one of its own.
+    feature_id = (task["feature_id"] if "feature_id" in task.keys() else "") or ""
+    if feature_id:
+        feature = conn.execute("SELECT * FROM features WHERE id = ?", (feature_id,)).fetchone()
+        if not feature:
+            fail(f"Feature not found: {feature_id}")
+        path = (feature["worktree_path"] if "worktree_path" in feature.keys() else "") or ""
+        branch = (feature["worktree_branch"] if "worktree_branch" in feature.keys() else "") or ""
+        print(json.dumps({"ok": True, "path": path, "branch": branch, "base": None,
+                          "reused": True, "featureId": feature_id}, indent=2))
+        conn.close()
+        return
+    repo = (project["path"] or "").strip()
+    if not repo or not Path(repo).exists():
+        fail(f"Project path does not exist: {repo or '(empty)'}")
+    top = git_toplevel(repo)
+    if not top:
+        fail(f"Project is not a git repository: {repo}")
+
+    path = worktree_path_for(project, task["id"])
+    branch = worktree_branch_for(task["id"])
+
+    # Reuse: the worktree folder already exists and is registered.
+    known = registered_worktrees(top)
+    if any(same_path(p, path) for p in known):
+        set_worktree_fields(conn, task["id"], path=str(path), branch=branch,
+                            state=task["worktree_state"] if "worktree_state" in task.keys() else "active")
+        conn.commit()
+        print(json.dumps({"ok": True, "path": str(path), "branch": branch,
+                          "base": None, "reused": True}, indent=2))
+        conn.close()
+        return
+
+    # Base branch: the pinned branch, else HEAD when the pinned one is unknown.
+    base = (args.base or "").strip() or (project["git_branch"] or "main")
+    code, _, _ = git_run(top, "rev-parse", "--verify", base)
+    if code != 0:
+        base = "HEAD"
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Per-worktree config (used for the exclude file of the agent team).
+    git_run(top, "config", "extensions.worktreeConfig", "true")
+    # A leftover folder from a failed run must not block the new worktree.
+    # Only a folder that git made (it has a .git marker) is removed. Any other
+    # folder stops the run, so no data is ever deleted.
+    if path.exists():
+        if (path / ".git").exists():
+            import shutil
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            fail(f"Worktree folder exists and is not a git worktree: {path}")
+    # A leftover branch from a failed run must not block the new worktree.
+    code, _, _ = git_run(top, "rev-parse", "--verify", branch)
+    if code == 0:
+        git_run(top, "branch", "-D", branch)
+
+    code, out, err = git_run(top, "worktree", "add", "-b", branch, str(path), base)
+    if code != 0:
+        fail(f"git worktree add failed: {(err or out).strip()[:400]}")
+    copied = copy_setup_files(repo, path)
+
+    set_worktree_fields(conn, task["id"], path=str(path), branch=branch, state="active", note=_CLEAR)
+    log_event(conn, task["id"], "worktree", "worktree.created",
+              {"path": str(path), "branch": branch, "base": base, "copied": copied})
+    conn.commit()
+    print(json.dumps({"ok": True, "path": str(path), "branch": branch,
+                      "base": base, "reused": False, "copied": copied}, indent=2))
+    conn.close()
+
+
+def _merge_lock_path(repo: str) -> Path:
+    key = "".join(ch for ch in str(repo).lower() if ch.isalnum())[-24:] or "repo"
+    return worktrees_root() / f".merge-{key}.lock"
+
+
+class _MergeLock:
+    """Simple file lock so two merges never touch one repo at the same time."""
+
+    def __init__(self, repo):
+        self.path = _merge_lock_path(repo)
+        self.acquired = False
+
+    def __enter__(self):
+        for _ in range(10):
+            try:
+                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, str(os.getpid()).encode())
+                os.close(fd)
+                self.acquired = True
+                return self
+            except FileExistsError:
+                # A stale lock (dead process) must not block the board forever.
+                try:
+                    if time.time() - self.path.stat().st_mtime > 300:
+                        self.path.unlink(missing_ok=True)
+                        continue
+                except Exception:
+                    pass
+                time.sleep(0.5)
+        return self
+
+    def __exit__(self, *exc):
+        if self.acquired:
+            try:
+                self.path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        return False
+
+
+def merge_worktree(task, project, target=None, cleanup=False):
+    """Merge the task branch into the target branch of the main repo.
+
+    Returns a dict: {ok, merged, conflict, files, error, branch, target}.
+    Never raises: the caller decides what to do with the result.
+    """
+    repo = (project["path"] or "").strip()
+    top = git_toplevel(repo)
+    if not top:
+        return {"ok": False, "merged": False, "error": f"Project is not a git repository: {repo}"}
+    branch = (task["worktree_branch"] if "worktree_branch" in task.keys() else "") or ""
+    if not branch:
+        return {"ok": False, "merged": False, "error": "Task has no worktree branch"}
+    target = (target or "").strip() or (project["git_branch"] or "main")
+
+    code, out, _ = git_run(top, "rev-parse", "--verify", target)
+    if code != 0:
+        return {"ok": False, "merged": False, "error": f"Target branch does not exist: {target}"}
+
+    code, current, _ = git_run(top, "rev-parse", "--abbrev-ref", "HEAD")
+    if code == 0 and current and current != target:
+        return {"ok": False, "merged": False,
+                "error": f"Main repo is on branch '{current}', not '{target}'. "
+                         f"Check out '{target}' first, then merge again."}
+
+    with _MergeLock(top):
+        # The main checkout may hold uncommitted work. Git refuses the merge
+        # when the merge would touch those files. Report the dirty state, so
+        # the reason is clear on the board.
+        _, dirty, _ = git_run(top, "status", "--porcelain")
+        dirty_files = [f for f in dirty.splitlines() if f.strip()]
+        code, out, err = git_run(top, "merge", "--no-edit", branch)
+        if code != 0:
+            # A failed merge leaves the repo mid-merge. Undo it and report.
+            git_run(top, "merge", "--abort")
+            _, files, _ = git_run(top, "diff", "--name-only", "--diff-filter=U")
+            reason = (err or out).strip()[:500]
+            if dirty_files:
+                reason = (f"{reason} The main checkout has uncommitted changes: "
+                          f"{', '.join(dirty_files[:8])}")
+            return {"ok": False, "merged": False, "conflict": True,
+                    "files": [f for f in files.splitlines() if f.strip()],
+                    "error": reason,
+                    "branch": branch, "target": target}
+        if cleanup:
+            path = (task["worktree_path"] if "worktree_path" in task.keys() else "") or ""
+            if path:
+                git_run(top, "worktree", "remove", "--force", path)
+                git_run(top, "worktree", "prune")
+    return {"ok": True, "merged": True, "conflict": False, "files": [],
+            "error": None, "branch": branch, "target": target}
+
+
+def cmd_worktree_merge(args):
+    """Merge the task worktree branch into the pinned branch of the project."""
+    conn = get_conn(args.db)
+    task, project = project_row_for_task(conn, args.task_id)
+    result = merge_worktree(task, project, target=args.target, cleanup=args.cleanup)
+    if result.get("merged"):
+        set_worktree_fields(conn, args.task_id, state="merged",
+                            note=f"Merged {result.get('branch')} into {result.get('target')}")
+        log_event(conn, args.task_id, "worktree", "worktree.merged",
+                  {"branch": result.get("branch"), "target": result.get("target")})
+    elif result.get("conflict"):
+        set_worktree_fields(conn, args.task_id, state="conflict",
+                            note=(result.get("error") or "merge conflict")[:500])
+        log_event(conn, args.task_id, "worktree", "worktree.conflict",
+                  {"files": result.get("files"), "error": result.get("error")})
+    else:
+        set_worktree_fields(conn, args.task_id, state="pending",
+                            note=(result.get("error") or "merge failed")[:500])
+        log_event(conn, args.task_id, "worktree", "worktree.merge_failed",
+                  {"error": result.get("error")})
+    conn.commit()
+    print(json.dumps(result, indent=2))
+    conn.close()
+
+
+def cmd_worktree_remove(args):
+    """Remove the worktree folder of a task. Keeps the branch unless asked."""
+    conn = get_conn(args.db)
+    task, project = project_row_for_task(conn, args.task_id)
+    repo = (project["path"] or "").strip()
+    top = git_toplevel(repo)
+    path = (task["worktree_path"] if "worktree_path" in task.keys() else "") or ""
+    branch = (task["worktree_branch"] if "worktree_branch" in task.keys() else "") or ""
+    removed = False
+    error = None
+    if top and path:
+        argv = ["worktree", "remove"]
+        if args.force:
+            argv.append("--force")
+        argv.append(path)
+        code, out, err = git_run(top, *argv)
+        if code != 0:
+            error = (err or out).strip()[:400]
+        else:
+            removed = True
+        git_run(top, "worktree", "prune")
+    if args.delete_branch and top and branch:
+        git_run(top, "branch", "-D", branch)
+    set_worktree_fields(conn, args.task_id, state="removed", note=error)
+    log_event(conn, args.task_id, "worktree", "worktree.removed",
+              {"path": path, "branch": branch, "removed": removed, "error": error})
+    conn.commit()
+    print(json.dumps({"ok": error is None, "removed": removed, "path": path,
+                      "branch": branch, "error": error}, indent=2))
+    conn.close()
+
+
+def cmd_worktree_list(args):
+    """List the worktrees of one project (or of every project)."""
+    conn = get_conn(args.db)
+    sql = "SELECT * FROM tasks WHERE worktree_path IS NOT NULL AND worktree_path != ''"
+    params = []
+    if args.project:
+        sql += " AND project_id = ?"
+        params.append(args.project)
+    sql += " ORDER BY updated_at DESC"
+    rows = conn.execute(sql, params).fetchall()
+    out = []
+    for r in rows:
+        out.append({
+            "taskId": r["id"],
+            "title": r["title"],
+            "projectId": r["project_id"],
+            "status": r["status"],
+            "path": r["worktree_path"],
+            "branch": r["worktree_branch"],
+            "state": r["worktree_state"],
+            "note": r["worktree_note"],
+            "exists": Path(r["worktree_path"]).exists() if r["worktree_path"] else False,
+        })
+    print(json.dumps(out, indent=2))
+    conn.close()
+
+
+def cleanup_worktree(repo, path, branch):
+    """Remove the worktree folder after a successful merge.
+
+    Only a clean worktree is removed. Uncommitted work is kept, so no result
+    is ever lost. Returns (removed, note).
+    """
+    top = git_toplevel(repo)
+    if not top or not path:
+        return False, "no worktree folder"
+    code, out, _ = git_run(path, "status", "--porcelain")
+    if code != 0:
+        return False, "cannot read the worktree state"
+    if out.strip():
+        return False, "worktree kept: it still has uncommitted changes"
+    code, _, err = git_run(top, "worktree", "remove", path)
+    if code != 0:
+        return False, f"worktree kept: {(err or '').strip()[:200]}"
+    git_run(top, "worktree", "prune")
+    if branch:
+        git_run(top, "branch", "-D", branch)
+    return True, "worktree removed"
+
+
+# ---------- features: one worktree for a group of tasks ----------
+
+def feature_branch_for(feature_id: str) -> str:
+    """Branch of a feature worktree: kanban/feature-<short id>."""
+    safe = "".join(ch for ch in str(feature_id) if ch.isalnum() or ch in "-_")[:8] or "feature"
+    return f"kanban/feature-{safe}"
+
+
+def feature_path_for(project_row, feature_id: str) -> Path:
+    """Folder of the feature worktree: <WORKTREES_ROOT>/<project>/feature-<id>."""
+    folder = (project_row["folder"] or "").strip() or "project"
+    safe_folder = "".join(ch for ch in folder if ch.isalnum() or ch in "-_.") or "project"
+    safe_id = "".join(ch for ch in str(feature_id) if ch.isalnum() or ch in "-_")[:64] or "feature"
+    return worktrees_root() / safe_folder / f"feature-{safe_id}"
+
+
+def row_to_feature(r, tasks=None) -> dict:
+    keys = r.keys()
+    return {
+        "id": r["id"],
+        "projectId": r["project_id"],
+        "title": r["title"],
+        "description": r["description"] or "",
+        "status": r["status"],
+        "worktreePath": r["worktree_path"] if "worktree_path" in keys else None,
+        "worktreeBranch": r["worktree_branch"] if "worktree_branch" in keys else None,
+        "baseBranch": r["base_branch"] if "base_branch" in keys else None,
+        "mergeNote": r["merge_note"] if "merge_note" in keys else None,
+        "taskIds": tasks or [],
+        "createdAt": r["created_at"],
+        "updatedAt": r["updated_at"],
+    }
+
+
+def feature_task_ids(conn, feature_id) -> list:
+    rows = conn.execute("SELECT id FROM tasks WHERE feature_id = ? ORDER BY created_at", (feature_id,)).fetchall()
+    return [r["id"] for r in rows]
+
+
+def cmd_feature_create(args):
+    """Create a feature: one git worktree and one branch for all its tasks."""
+    conn = get_conn(args.db)
+    project = conn.execute("SELECT * FROM projects WHERE id = ?", (args.project,)).fetchone()
+    if not project:
+        fail(f"Project not found: {args.project}")
+    repo = (project["path"] or "").strip()
+    if not repo or not Path(repo).exists():
+        fail(f"Project path does not exist: {repo or '(empty)'}")
+    top = git_toplevel(repo)
+    if not top:
+        fail(f"Project is not a git repository: {repo}")
+
+    fid = args.id or new_uuid()
+    if conn.execute("SELECT id FROM features WHERE id = ?", (fid,)).fetchone():
+        fail(f"Feature already exists: {fid}")
+
+    branch = feature_branch_for(fid)
+    path = feature_path_for(project, fid)
+    base = (args.base or "").strip() or (project["git_branch"] or "main")
+    code, _, _ = git_run(top, "rev-parse", "--verify", base)
+    if code != 0:
+        base = "HEAD"
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Per-worktree config (used for the exclude file of the agent team).
+    git_run(top, "config", "extensions.worktreeConfig", "true")
+    if path.exists():
+        if (path / ".git").exists():
+            import shutil
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            fail(f"Worktree folder exists and is not a git worktree: {path}")
+    code, _, _ = git_run(top, "rev-parse", "--verify", branch)
+    if code == 0:
+        git_run(top, "branch", "-D", branch)
+    code, out, err = git_run(top, "worktree", "add", "-b", branch, str(path), base)
+    if code != 0:
+        fail(f"git worktree add failed: {(err or out).strip()[:400]}")
+    copied = copy_setup_files(repo, path)
+
+    ts = now_iso()
+    conn.execute(
+        """INSERT INTO features (id, project_id, title, description, status,
+                                worktree_path, worktree_branch, base_branch,
+                                created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)""",
+        (fid, args.project, args.title, args.description or "", str(path), branch, base, ts, ts),
+    )
+    log_event(conn, None, args.actor, "feature.created",
+              {"id": fid, "projectId": args.project, "title": args.title, "branch": branch,
+               "copied": copied})
+    conn.commit()
+    row = conn.execute("SELECT * FROM features WHERE id = ?", (fid,)).fetchone()
+    print(json.dumps({**row_to_feature(row), "copied": copied}, indent=2))
+    conn.close()
+
+
+def cmd_feature_list(args):
+    """List the features of one project (or of every project)."""
+    conn = get_conn(args.db)
+    sql = "SELECT * FROM features"
+    params = []
+    if args.project:
+        sql += " WHERE project_id = ?"
+        params.append(args.project)
+    sql += " ORDER BY updated_at DESC"
+    rows = conn.execute(sql, params).fetchall()
+    out = [row_to_feature(r, feature_task_ids(conn, r["id"])) for r in rows]
+    print(json.dumps(out, indent=2))
+    conn.close()
+
+
+def cmd_feature_show(args):
+    """Show one feature with its tasks."""
+    conn = get_conn(args.db)
+    row = conn.execute("SELECT * FROM features WHERE id = ?", (args.feature_id,)).fetchone()
+    if not row:
+        fail(f"Feature not found: {args.feature_id}")
+    tasks = conn.execute(
+        "SELECT * FROM tasks WHERE feature_id = ? ORDER BY created_at", (args.feature_id,)
+    ).fetchall()
+    print(json.dumps({**row_to_feature(row, [t["id"] for t in tasks]),
+                      "tasks": [row_to_task(t) for t in tasks]}, indent=2))
+    conn.close()
+
+
+def merge_feature(conn, feature_row, target=None):
+    """Merge the feature branch into the project branch.
+
+    Returns {ok, merged, conflict, files, error, branch, target}.
+    """
+    project = conn.execute("SELECT * FROM projects WHERE id = ?", (feature_row["project_id"],)).fetchone()
+    if not project:
+        return {"ok": False, "merged": False, "error": "Project not found"}
+    branch = (feature_row["worktree_branch"] if "worktree_branch" in feature_row.keys() else "") or ""
+    if not branch:
+        return {"ok": False, "merged": False, "error": "Feature has no worktree branch"}
+    task_like = {
+        "worktree_branch": branch,
+        "worktree_path": (feature_row["worktree_path"] if "worktree_path" in feature_row.keys() else "") or "",
+    }
+    result = merge_worktree(task_like, project, target=target)
+    if result.get("merged"):
+        conn.execute(
+            "UPDATE features SET status = 'done', merge_note = ?, updated_at = ? WHERE id = ?",
+            (f"Merged {branch} into {result.get('target')}", now_iso(), feature_row["id"]),
+        )
+        log_event(conn, None, "feature", "feature.merged",
+                  {"id": feature_row["id"], "branch": branch, "target": result.get("target")})
+    elif result.get("conflict"):
+        conn.execute(
+            "UPDATE features SET merge_note = ?, updated_at = ? WHERE id = ?",
+            ((result.get("error") or "merge conflict")[:500], now_iso(), feature_row["id"]),
+        )
+        log_event(conn, None, "feature", "feature.conflict",
+                  {"id": feature_row["id"], "files": result.get("files")})
+    else:
+        conn.execute(
+            "UPDATE features SET merge_note = ?, updated_at = ? WHERE id = ?",
+            ((result.get("error") or "merge failed")[:500], now_iso(), feature_row["id"]),
+        )
+        log_event(conn, None, "feature", "feature.merge_failed",
+                  {"id": feature_row["id"], "error": result.get("error")})
+    conn.commit()
+    return result
+
+
+def cmd_feature_merge(args):
+    """Merge the feature branch into the project branch."""
+    conn = get_conn(args.db)
+    row = conn.execute("SELECT * FROM features WHERE id = ?", (args.feature_id,)).fetchone()
+    if not row:
+        fail(f"Feature not found: {args.feature_id}")
+    result = merge_feature(conn, row, target=args.target)
+    print(json.dumps(result, indent=2))
+    conn.close()
+
+
+def cmd_feature_delete(args):
+    """Delete a feature: remove its worktree and detach its tasks."""
+    conn = get_conn(args.db)
+    row = conn.execute("SELECT * FROM features WHERE id = ?", (args.feature_id,)).fetchone()
+    if not row:
+        fail(f"Feature not found: {args.feature_id}")
+    # The tasks stay on the board. They lose the feature link and the worktree
+    # location, so they fall back to the per-task worktree mode.
+    conn.execute(
+        """UPDATE tasks SET feature_id = NULL, worktree_path = NULL,
+                            worktree_branch = NULL, worktree_state = NULL
+            WHERE feature_id = ?""",
+        (args.feature_id,),
+    )
+    # Remove the feature worktree folder and its branch.
+    path = (row["worktree_path"] if "worktree_path" in row.keys() else "") or ""
+    branch = (row["worktree_branch"] if "worktree_branch" in row.keys() else "") or ""
+    project = conn.execute("SELECT * FROM projects WHERE id = ?", (row["project_id"],)).fetchone()
+    removed = False
+    error = None
+    if project and path:
+        top = git_toplevel((project["path"] or "").strip())
+        if top:
+            code, out, err = git_run(top, "worktree", "remove", "--force", path)
+            if code != 0:
+                error = (err or out).strip()[:400]
+            else:
+                removed = True
+            git_run(top, "worktree", "prune")
+            if branch and error is None:
+                git_run(top, "branch", "-D", branch)
+    conn.execute("DELETE FROM features WHERE id = ?", (args.feature_id,))
+    log_event(conn, None, args.actor, "feature.deleted",
+              {"id": args.feature_id, "title": row["title"], "removed": removed, "error": error})
+    conn.commit()
+    print(json.dumps({"ok": error is None, "deleted": args.feature_id, "removed": removed,
+                      "path": path, "branch": branch, "error": error}, indent=2))
+    conn.close()
+
+
+def feature_workspace(conn, feature_id):
+    """Worktree folder + branch of a feature. Returns None when unknown."""
+    row = conn.execute("SELECT * FROM features WHERE id = ?", (feature_id,)).fetchone()
+    if not row:
+        return None
+    return {
+        "path": (row["worktree_path"] if "worktree_path" in row.keys() else "") or "",
+        "branch": (row["worktree_branch"] if "worktree_branch" in row.keys() else "") or "",
+        "title": row["title"],
+    }
+
+
+def auto_merge_feature(conn, feature_id):
+    """The board never merges a feature on its own.
+
+    The merge is a task for the `integrator` agent. It calls
+    `kanban_feature merge` (or `feature merge` on the CLI), which runs the git
+    merge in the main checkout. This function only exists to report that no
+    automatic merge happened.
+    """
+    return None
+
+
+def auto_merge_worktree(conn, task_id, status=None, actor=None):
+    """Merge a finished task back into the project branch.
+
+    Runs when a task moves to `done`, and when the reconciler finishes a
+    cyclical task (it goes back to `backlog`). Failures never break the status
+    change: they are stored in worktree_state/worktree_note and reported on the
+    board.
+
+    A task that belongs to a feature does not merge on its own: the feature
+    branch is merged by the `integrator` agent (a task of the feature), always
+    into the main branch.
+    """
+    if os.getenv("KANBAN_WORKTREE_AUTOMERGE", "1").strip() == "0":
+        return None
+    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if not row:
+        return None
+    feature_id = (row["feature_id"] if "feature_id" in row.keys() else "") or ""
+    if feature_id:
+        # No automatic merge. The integrator task does it.
+        return None
+    kind = (row["kind"] if "kind" in row.keys() else "") or "oneshot"
+    if status == "done":
+        pass
+    elif kind == "cyclic" and status == "backlog" and (actor or "") == "reconciler":
+        pass
+    else:
+        return None
+    path = (row["worktree_path"] if "worktree_path" in row.keys() else "") or ""
+    state = (row["worktree_state"] if "worktree_state" in row.keys() else "") or ""
+    # No folder means nothing to merge (the board already merged and cleaned up).
+    if not path or state == "removed" or not Path(path).exists():
+        return None
+    project = conn.execute("SELECT * FROM projects WHERE id = ?", (row["project_id"],)).fetchone()
+    if not project:
+        return None
+    try:
+        result = merge_worktree(row, project)
+    except Exception as exc:  # never break the status change
+        result = {"ok": False, "merged": False, "error": str(exc)[:400]}
+    if result.get("merged"):
+        note = f"Merged {result.get('branch')} into {result.get('target')}"
+        repo = (project["path"] or "").strip()
+        if kind == "cyclic":
+            # A cyclical task keeps its session, so its folder must stay.
+            note = f"{note}. Worktree kept for the next cycle."
+        else:
+            removed, cleanup_note = cleanup_worktree(repo, path, result.get("branch") or "")
+            if not removed and cleanup_note:
+                note = f"{note}. {cleanup_note}"
+        set_worktree_fields(conn, task_id, state="merged", note=note)
+        log_event(conn, task_id, "worktree", "worktree.merged",
+                  {"branch": result.get("branch"), "target": result.get("target"), "auto": True})
+    else:
+        note = (result.get("error") or "merge failed")[:500]
+        set_worktree_fields(conn, task_id,
+                            state="conflict" if result.get("conflict") else "pending", note=note)
+        log_event(conn, task_id, "worktree",
+                  "worktree.conflict" if result.get("conflict") else "worktree.merge_failed",
+                  {"error": note, "files": result.get("files"), "auto": True})
+    conn.commit()
+    return result
+
+
+
 def row_to_task(r: sqlite3.Row) -> dict:
     keys = r.keys()
     return {
@@ -284,6 +1069,11 @@ def row_to_task(r: sqlite3.Row) -> dict:
         "result": r["result"] if "result" in keys else None,
         "resultContext": r["result_context"] if "result_context" in keys else None,
         "notifiedAt": r["notified_at"] if "notified_at" in keys else None,
+        "worktreePath": r["worktree_path"] if "worktree_path" in keys else None,
+        "worktreeBranch": r["worktree_branch"] if "worktree_branch" in keys else None,
+        "worktreeState": r["worktree_state"] if "worktree_state" in keys else None,
+        "worktreeNote": r["worktree_note"] if "worktree_note" in keys else None,
+        "featureId": r["feature_id"] if "feature_id" in keys else None,
         "createdAt": r["created_at"],
         "updatedAt": r["updated_at"],
     }
@@ -697,6 +1487,16 @@ def cmd_task_create(args):
     # A brand-new row cannot close a cycle yet, so only id checks run here.
     blocked_raw = getattr(args, "blocked_by", None)
     blocked_ids = require_blocked_by(conn, tid, blocked_raw, project_id=args.project) if blocked_raw is not None else []
+    # Feature group: the task works in the feature worktree, on the feature
+    # branch. The worktree location is on the task row from the start.
+    feature_id = (getattr(args, "feature", None) or "").strip()
+    feature_row = None
+    if feature_id:
+        feature_row = conn.execute("SELECT * FROM features WHERE id = ?", (feature_id,)).fetchone()
+        if not feature_row:
+            fail(f"Feature not found: {feature_id}")
+        if feature_row["project_id"] != args.project:
+            fail(f"Feature {feature_id} belongs to another project")
     expected = getattr(args, "expected_sec", None)
     cycle_interval = getattr(args, "cycle_interval_sec", None)
     ts = now_iso()
@@ -706,9 +1506,10 @@ def cmd_task_create(args):
                               startup_phase, startup_error, kind, heartbeat_at,
                                expected_sec, cycle_interval_sec, progress, parent_session_id,
                                 result, result_context, acceptance_criteria, due_date,
-                              blocked_by_task_ids,
+                              blocked_by_task_ids, feature_id,
+                              worktree_path, worktree_branch, worktree_state,
                               created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (tid, args.project, args.title, args.description or "", status, priority,
          args.agent_id, args.agent_name, args.session_id,
          args.model_id, args.model_provider,
@@ -718,10 +1519,16 @@ def cmd_task_create(args):
           getattr(args, "result", None), getattr(args, "result_context", None),
            getattr(args, "acceptance_criteria", None), getattr(args, "due_date", None),
          json.dumps(blocked_ids),
+         feature_id or None,
+         # A feature task points at the feature worktree and branch.
+         (feature_row["worktree_path"] if feature_row is not None else None),
+         (feature_row["worktree_branch"] if feature_row is not None else None),
+         ("active" if feature_row is not None else None),
          ts, ts),
     )
     log_event(conn, tid, args.actor, "task.created",
-              {"projectId": args.project, "title": args.title, "status": status})
+              {"projectId": args.project, "title": args.title, "status": status,
+               "featureId": feature_id or None})
     conn.commit()
     row = conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
     print(json.dumps(row_to_task(row), indent=2))
@@ -758,6 +1565,28 @@ def cmd_task_show(args):
     conn.close()
 
 
+def reset_stale_worktree(conn, task_id):
+    """A removed worktree invalidates the session that works in it.
+
+    After the board merged and cleaned up a worktree, a re-run must start in a
+    new folder with a new session. The stale session id is cleared here, so the
+    board creates a fresh session in the fresh worktree.
+    """
+    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if not row:
+        return False
+    path = (row["worktree_path"] if "worktree_path" in row.keys() else "") or ""
+    if not path or Path(path).exists():
+        return False
+    conn.execute(
+        "UPDATE tasks SET session_id = NULL, worktree_path = NULL, worktree_state = NULL, "
+        "worktree_branch = NULL, worktree_note = ? WHERE id = ?",
+        ("worktree removed — a new worktree is created on the next run", task_id),
+    )
+    log_event(conn, task_id, "worktree", "worktree.reset", {"path": path})
+    return True
+
+
 def cmd_task_update(args):
     conn = get_conn(args.db)
     row = conn.execute("SELECT * FROM tasks WHERE id = ?", (args.task_id,)).fetchone()
@@ -779,6 +1608,7 @@ def cmd_task_update(args):
         ("acceptance_criteria", getattr(args, "acceptance_criteria", None)),
         ("notified_at", getattr(args, "notified_at", None)),
         ("due_date", getattr(args, "due_date", None)),
+        ("worktree_note", getattr(args, "worktree_note", None)),
     ]
     for col, val in mapping:
         if val is not None:
@@ -839,9 +1669,40 @@ def cmd_task_update(args):
     conn.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", params)
     log_event(conn, args.task_id, args.actor, "task.edited", changes)
     conn.commit()
+    if args.status == "running":
+        # One writer per feature worktree (same rule as cmd_task_move).
+        sibling = feature_running_sibling(
+            conn, args.task_id, (row["feature_id"] if "feature_id" in row.keys() else "") or ""
+        )
+        if sibling:
+            fail(f"Feature worktree is busy: task {sibling['id']} ({sibling['title']}) is running. "
+                 f"Run one step of a feature at a time.")
+        # A removed worktree invalidates the old session — start fresh.
+        reset_stale_worktree(conn, args.task_id)
+    # A finished task merges its worktree back into the project branch.
+    auto_merge_worktree(conn, args.task_id, status=args.status, actor=args.actor)
     row = conn.execute("SELECT * FROM tasks WHERE id = ?", (args.task_id,)).fetchone()
     print(json.dumps(row_to_task(row), indent=2))
     conn.close()
+
+
+def feature_running_sibling(conn, task_id, feature_id):
+    """The other running task of the same feature, or None.
+
+    A feature worktree has one writer. A second running task of the same
+    feature would fight over the same files, so the board refuses it.
+    """
+    row = conn.execute("SELECT id, title FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if not row or not feature_id:
+        return None
+    other = conn.execute(
+        """SELECT id, title FROM tasks
+             WHERE feature_id = ? AND id != ? AND status = 'running' LIMIT 1""",
+        (feature_id, task_id),
+    ).fetchone()
+    if not other:
+        return None
+    return {"id": other["id"], "title": other["title"]}
 
 
 def cmd_task_move(args):
@@ -851,6 +1712,15 @@ def cmd_task_move(args):
         fail(f"Task not found: {args.task_id}")
     status = require_status(args.status)
     old = row["status"]
+    # One writer per feature worktree: a second running task of the same
+    # feature is refused, so the steps cannot overwrite each other.
+    if status == "running":
+        sibling = feature_running_sibling(
+            conn, args.task_id, (row["feature_id"] if "feature_id" in row.keys() else "") or ""
+        )
+        if sibling:
+            fail(f"Feature worktree is busy: task {sibling['id']} ({sibling['title']}) is running. "
+                 f"Run one step of a feature at a time.")
     # Arming: any transition TO running resets the runner handshake so the
     # frontend watcher and the server reconciler see a fresh start. Without
     # this, a re-run of a finished task (done → backlog → running) keeps the
@@ -864,6 +1734,11 @@ def cmd_task_move(args):
     log_event(conn, args.task_id, args.actor, "task.moved",
               {"from": old, "to": status, "comment": args.comment})
     conn.commit()
+    if status == "running":
+        # A removed worktree invalidates the old session — start fresh.
+        reset_stale_worktree(conn, args.task_id)
+    # A finished task merges its worktree back into the project branch.
+    auto_merge_worktree(conn, args.task_id, status=status, actor=args.actor)
     row = conn.execute("SELECT * FROM tasks WHERE id = ?", (args.task_id,)).fetchone()
     print(json.dumps(row_to_task(row), indent=2))
     conn.close()
@@ -904,6 +1779,18 @@ def cmd_task_delete(args):
     row = conn.execute("SELECT * FROM tasks WHERE id = ?", (args.task_id,)).fetchone()
     if not row:
         fail(f"Task not found: {args.task_id}")
+    # A deleted task must not leave a worktree folder behind.
+    wt_path = (row["worktree_path"] if "worktree_path" in row.keys() else "") or ""
+    if wt_path:
+        try:
+            project = conn.execute("SELECT * FROM projects WHERE id = ?", (row["project_id"],)).fetchone()
+            if project:
+                top = git_toplevel((project["path"] or "").strip())
+                if top:
+                    git_run(top, "worktree", "remove", "--force", wt_path)
+                    git_run(top, "worktree", "prune")
+        except Exception:
+            pass
     # Referential cleanup: other tasks must not keep pointing at a dead id.
     scrub_dependency_refs(conn, args.task_id)
     conn.execute("DELETE FROM tasks WHERE id = ?", (args.task_id,))
@@ -1111,6 +1998,51 @@ def main(argv=None):
     fg3.add_argument("--branch", default="main")
     fg3.set_defaults(func=cmd_git_clone)
 
+    wp = sub.add_parser("worktree", help="Per-task git worktree isolation.")
+    wsub = wp.add_subparsers(dest="wcmd", required=True)
+    wc = wsub.add_parser("create", help="Create the git worktree of one task.")
+    wc.add_argument("task_id")
+    wc.add_argument("--base", default=None, help="Base branch (default: the project branch)")
+    wc.set_defaults(func=cmd_worktree_create)
+    wm = wsub.add_parser("merge", help="Merge the task worktree into the project branch.")
+    wm.add_argument("task_id")
+    wm.add_argument("--target", default=None, help="Target branch (default: the project branch)")
+    wm.add_argument("--cleanup", action="store_true", help="Remove the worktree after a successful merge")
+    wm.set_defaults(func=cmd_worktree_merge)
+    wr = wsub.add_parser("remove", help="Remove the worktree folder of a task.")
+    wr.add_argument("task_id")
+    wr.add_argument("--force", action="store_true", help="Remove even with uncommitted changes")
+    wr.add_argument("--delete-branch", action="store_true", help="Also delete the branch")
+    wr.set_defaults(func=cmd_worktree_remove)
+    wl = wsub.add_parser("list", help="List worktrees of a project.")
+    wl.add_argument("--project", default=None)
+    wl.set_defaults(func=cmd_worktree_list)
+
+    fp = sub.add_parser("feature", help="Feature groups: one worktree and branch for many tasks.")
+    fsub = fp.add_subparsers(dest="fcmd", required=True)
+    fc = fsub.add_parser("create", help="Create a feature (git worktree + branch).")
+    fc.add_argument("--project", required=True)
+    fc.add_argument("--title", required=True)
+    fc.add_argument("--description", default="")
+    fc.add_argument("--base", default=None, help="Base branch (default: the project branch)")
+    fc.add_argument("--id", default=None)
+    fc.add_argument("--actor", default="cli")
+    fc.set_defaults(func=cmd_feature_create)
+    fl = fsub.add_parser("list", help="List features.")
+    fl.add_argument("--project", default=None)
+    fl.set_defaults(func=cmd_feature_list)
+    fs = fsub.add_parser("show", help="Show one feature with its tasks.")
+    fs.add_argument("feature_id")
+    fs.set_defaults(func=cmd_feature_show)
+    fm = fsub.add_parser("merge", help="Merge the feature branch into the project branch (main).")
+    fm.add_argument("feature_id")
+    fm.add_argument("--target", default=None, help="Target branch (default: the project branch)")
+    fm.set_defaults(func=cmd_feature_merge)
+    fd = fsub.add_parser("delete", help="Delete a feature. Its tasks stay on the board.")
+    fd.add_argument("feature_id")
+    fd.add_argument("--actor", default="cli")
+    fd.set_defaults(func=cmd_feature_delete)
+
     tp = sub.add_parser("task", help="Task commands.")
     tsub = tp.add_subparsers(dest="tcmd", required=True)
     tc = tsub.add_parser("create", help="Create task (status defaults to backlog).")
@@ -1137,6 +2069,7 @@ def main(argv=None):
     tc.add_argument("--acceptance-criteria", default=None, help="Optional acceptance criteria")
     tc.add_argument("--due-date", default=None, help="Optional due date (YYYY-MM-DD)")
     tc.add_argument("--blocked-by", default=None, help="Comma-separated predecessor task ids that must be done first (validated: exists, same project, no self/cycle)")
+    tc.add_argument("--feature", default=None, help="Feature uuid: the task works in the feature worktree and branch")
     tc.add_argument("--actor", default="cli")
     tc.set_defaults(func=cmd_task_create)
 
@@ -1174,6 +2107,7 @@ def main(argv=None):
     tu.add_argument("--acceptance-criteria", default=None)
     tu.add_argument("--due-date", default=None)
     tu.add_argument("--blocked-by", default=None, help="Comma-separated predecessor ids; '' clears the list (validated: exists, same project, no self/cycle)")
+    tu.add_argument("--worktree-note", default=None, help="Note about the worktree (merge result, session loss, conflict)")
     tu.add_argument("--actor", default="cli")
     tu.set_defaults(func=cmd_task_update)
 

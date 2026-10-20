@@ -2,10 +2,13 @@
 // Owns the CLI bridge helpers used by all plugin tools.
 // The added capability over HTTP is the caller session id, taken from the tool context.
 
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+
+const execFileAsync = promisify(execFile);
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -74,13 +77,21 @@ export function loadStyleGuide() {
 
 // --- CLI bridge -----------------------------------------------------------
 
-export function runCli(argv) {
+/**
+ * Run the board CLI.
+ *
+ * Async on purpose: a synchronous child process blocks the whole OpenCode
+ * server event loop while it runs. A plugin that blocks the loop freezes
+ * every session on the server, so the CLI runs in the background.
+ */
+export async function runCli(argv) {
   try {
-    const out = execFileSync(PYTHON, [CLI, "--db", DB, ...argv], {
+    const { stdout } = await execFileAsync(PYTHON, [CLI, "--db", DB, ...argv], {
       encoding: "utf8",
       timeout: 30000,
+      maxBuffer: 4 * 1024 * 1024,
     });
-    return { ok: true, text: (out || "").trim() };
+    return { ok: true, text: (stdout || "").trim() };
   } catch (err) {
     const msg = err?.stderr?.toString?.() || err?.message || "kanban CLI failed";
     return { ok: false, text: String(msg).trim() };

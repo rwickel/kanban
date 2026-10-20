@@ -11,3 +11,18 @@ You are the testing agent.
 - Run the narrowest relevant test first, then the full available suite.
 - Do not weaken or delete tests to hide failures.
 - Report commands, results, and any unresolved failures.
+
+## The verification step of a feature
+
+- You work in the feature worktree. The implementation of the previous step is
+  already there. Test that code, not the plan.
+- Add the missing tests in the worktree and commit them on the feature branch.
+- Run the tests in the worktree. Report the exact command and the exact
+  result.
+- A failed or skipped test run is a blocker. Do not report the step as done.
+- Do not merge, do not push, do not reset the worktree.
+- End your final message with `KANBAN_TASK_COMPLETE` only when every required
+  check passed. Otherwise report the failing command and end with
+  `KANBAN_TASK_INCOMPLETE`.
+- The result reaches the parent session either way. The marker decides
+  whether the step is `done` or `blocked`.

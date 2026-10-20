@@ -415,6 +415,52 @@ export async function messageToSession(opts: {
   });
 }
 
+// ---- worktree isolation ----
+export interface TaskWorktree {
+  taskId: string;
+  path: string | null;
+  branch: string | null;
+  state: string | null;
+  note: string | null;
+}
+
+/** Read the worktree of one task. */
+export async function getTaskWorktree(taskId: string): Promise<TaskWorktree> {
+  return api<TaskWorktree>(`/api/kanban/tasks/${encodeURIComponent(taskId)}/worktree`);
+}
+
+/** Create the worktree of a task. Returns null when the project has no git repo.
+ *  `reused` is true when the worktree already existed (same folder, same branch). */
+export async function createTaskWorktree(taskId: string): Promise<{ path: string; branch: string; base?: string | null; reused: boolean } | null> {
+  try {
+    const info = await api<{ ok: boolean; path: string; branch: string; base?: string | null; reused?: boolean }>(
+      `/api/kanban/tasks/${encodeURIComponent(taskId)}/worktree`,
+      { method: 'POST' },
+    );
+    if (info?.ok && info.path) {
+      return { path: info.path, branch: info.branch, base: info.base ?? null, reused: info.reused === true };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Merge the task branch into the project branch. Returns the server report. */
+export async function mergeTaskWorktree(taskId: string, target?: string, cleanup?: boolean): Promise<{
+  ok: boolean; merged?: boolean; conflict?: boolean; files?: string[]; error?: string | null;
+}> {
+  return api(`/api/kanban/tasks/${encodeURIComponent(taskId)}/worktree/merge`, {
+    method: 'POST',
+    body: JSON.stringify({ target, cleanup }),
+  });
+}
+
+/** Delete the worktree folder of a task. */
+export async function removeTaskWorktree(taskId: string): Promise<{ ok: boolean; removed: boolean; error?: string | null }> {
+  return api(`/api/kanban/tasks/${encodeURIComponent(taskId)}/worktree`, { method: 'DELETE' });
+}
+
 // ---- active project pointer (still local; per-browser UI state) ----
 export function getActiveProjectId(): string | null {
   try {

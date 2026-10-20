@@ -5,7 +5,7 @@ import basicSsl from "@vitejs/plugin-basic-ssl";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { readFileSync, existsSync, promises as fsp } from "node:fs";
 import { resolve as resolvePath, relative as relativePath, dirname as dirnamePath, sep as sepPath } from "node:path";
 import { loadEnvFile } from "./scripts/env.mjs";
@@ -73,8 +73,10 @@ async function attachmentRoute(req, res, url) {
       if (!ALLOWED_ATTACHMENT_TYPES.has(type)) { json(res, 415, { error: "This file type is not supported." }); return true; }
       await fsp.mkdir(ATTACHMENT_DIR, { recursive: true });
       const id = randomUUID();
-      await fsp.writeFile(join(ATTACHMENT_DIR, id), data, { flag: "wx" });
-      const attachment = { id, name, type, size: data.length, ownerType, ownerId };
+      const ext = /\.([a-z\d]{1,10})$/i.exec(name)?.[1]?.toLowerCase() || "";
+      const storedName = `${id}${ext ? `.${ext}` : ""}`;
+      await fsp.writeFile(join(ATTACHMENT_DIR, storedName), data, { flag: "wx" });
+      const attachment = { id, name, type, size: data.length, ownerType, ownerId, storedName };
       await fsp.writeFile(metadataPath(id), JSON.stringify(attachment), { flag: "wx" });
       attachment.url = `/api/kanban/attachments/${id}/content`;
       json(res, 201, attachment);
@@ -86,7 +88,7 @@ async function attachmentRoute(req, res, url) {
     try {
       const files = await fsp.readdir(ATTACHMENT_DIR).catch(() => []);
       const items = await Promise.all(files.filter((file) => file.endsWith(".json")).map(async (file) => JSON.parse(await fsp.readFile(join(ATTACHMENT_DIR, file), "utf8"))));
-      json(res, 200, items.filter((item) => item.ownerType === ownerType && item.ownerId === ownerId));
+      json(res, 200, items.filter((item) => item.ownerType === ownerType && item.ownerId === ownerId).map((item) => ({ ...item, uri: pathToFileURL(resolvePath(ATTACHMENT_DIR, item.storedName || item.id)).href })));
     } catch { json(res, 500, { error: "Could not list attachments." }); }
     return true;
   }
@@ -96,9 +98,9 @@ async function attachmentRoute(req, res, url) {
     try {
       const item = JSON.parse(await fsp.readFile(metadataPath(id), "utf8"));
       if (req.method === "DELETE" && parts.length === 2) {
-        await fsp.unlink(join(ATTACHMENT_DIR, id)); await fsp.unlink(metadataPath(id)); json(res, 200, { ok: true });
+        await fsp.unlink(join(ATTACHMENT_DIR, item.storedName || item.id)); await fsp.unlink(metadataPath(id)); json(res, 200, { ok: true });
       } else {
-        const data = await fsp.readFile(join(ATTACHMENT_DIR, id));
+        const data = await fsp.readFile(join(ATTACHMENT_DIR, item.storedName || item.id));
         res.statusCode = 200; res.setHeader("Content-Type", item.type); res.setHeader("Content-Length", data.length);
         res.setHeader("X-Content-Type-Options", "nosniff");
         res.setHeader("Content-Disposition", `${parts[2] === "content" && item.type.startsWith("image/") ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(item.name)}`); res.end(data);
@@ -351,6 +353,11 @@ async function reconcileRunning() {
         }
         const argv = ["task", "update", t.id, "--actor", "reconciler", "--status", next];
         if (resultText && !(t.result || t.result_text)) argv.push("--result", resultText);
+        // A task that already has this status and this result needs no new
+        // write. Without this guard the event log fills with the same update.
+        if (t.status === next && (t.result || t.result_text) && resultText && (t.result || t.result_text) === resultText) {
+          continue;
+        }
         if (next === "blocked") {
           // No fabricated network diagnosis: only the literal error the
           // session API reported. Scan the message list newest→oldest — the
@@ -622,6 +629,42 @@ function describeErrorCause(err) {
   return parts.length ? parts.join(" — cause: ") : "unknown error";
 }
 
+// Give a task its own git worktree so parallel tasks never share files,
+// git index or build output. Returns { path, branch, base } or null when the
+// project is not a git repo — the caller then uses the plain project folder.
+async function createTaskWorktree(taskId) {
+  try {
+    const info = await cli(["worktree", "create", taskId]);
+    if (info && info.ok && info.path) return { path: info.path, branch: info.branch, base: info.base };
+  } catch {
+    /* no git repo, git missing, or worktree refused — fall back to the project folder */
+  }
+  return null;
+}
+
+/** Prompt lines that tell the agent about its worktree and the commit rule. */
+function worktreePromptLines(worktree) {
+  if (!worktree?.path) return "";
+  if (worktree.feature) {
+    return (
+      `You work in a FEATURE worktree that is shared with the other steps of this feature: ${worktree.path}\n` +
+      `Feature branch: ${worktree.branch}\n` +
+      `Rules: change only files inside this worktree. Commit your work on the feature branch ` +
+      `(git add -A && git commit -m "..."). Do NOT merge, do NOT push, do NOT switch branches, ` +
+      `and do NOT reset, clean or delete the folder — the work of the earlier steps is in it. ` +
+      `Only one step works here at a time. The integrator merges the feature branch into main at the end.\n`
+    );
+  }
+  return (
+    `You work in an ISOLATED git worktree: ${worktree.path}\n` +
+    `Branch: ${worktree.branch} (base ${worktree.base || "the project branch"})\n` +
+    `Rules: change only files inside this worktree. Commit your work on this branch ` +
+    `(git add -A && git commit -m "..."). Do NOT merge, do NOT push, do NOT switch branches, ` +
+    `and do NOT edit the main project folder. The board merges your branch when the task is done. ` +
+    `State the branch name and the changed files in your final message.\n`
+  );
+}
+
 // Synchronous agent→agent delegation: create a task for a teammate, run it
 // immediately via the OpenCode server, and WAIT (poll SQLite) until it lands
 // in done/blocked — like a normal read/write tool call that returns a value.
@@ -630,7 +673,7 @@ async function delegateTask(opts) {
   const {
     projectId, title, description = "", priority = "medium",
     agentId, agentName, modelId, modelProviderID,
-    parentSessionId, result, resultContext,
+    parentSessionId, result, resultContext, featureId,
     timeoutSec = 600, pollMs = 3000, wait = false,
   } = opts || {};
   if (!projectId || !title) {
@@ -661,9 +704,17 @@ async function delegateTask(opts) {
     ...(parentSessionId ? ["--parent-session-id", parentSessionId] : []),
     ...(result ? ["--result", result] : []),
     ...(resultContext ? ["--result-context", resultContext] : []),
+    ...(featureId ? ["--feature", String(featureId).trim()] : []),
   ]);
   const tid = created.id;
   await cli(["task", "move", tid, "running", "--actor", "delegate"]);
+
+  // Isolation: a feature task works in the feature worktree (shared with the
+  // other steps). A plain task gets its own worktree.
+  const worktree = featureId
+    ? { path: created.worktreePath || null, branch: created.worktreeBranch || null, base: null, feature: true }
+    : await createTaskWorktree(tid);
+  const workDir = worktree?.path || project.path;
 
   const base = ((loadServerCreds().url || "http://127.0.0.1:4099") + "").replace(/\/+$/, "");
   const apiBase = base.endsWith("/api") ? base : `${base}/api`;
@@ -676,7 +727,7 @@ async function delegateTask(opts) {
     const sessBody = {};
     if (resolvedAgentId || resolvedAgentName) sessBody.agent = resolvedAgentId || resolvedAgentName;
     if (modelId && modelProviderID) sessBody.model = { providerID: modelProviderID, id: modelId };
-    if (project.path) sessBody.location = { directory: project.path };
+    if (workDir) sessBody.location = { directory: workDir };
     const sessRes = await fetch(`${apiBase}/session`, { method: "POST", headers: H, body: JSON.stringify(sessBody) });
     if (!sessRes.ok) {
       const t = await sessRes.text().catch(() => "");
@@ -693,7 +744,8 @@ async function delegateTask(opts) {
     // 4. Send the work prompt — board follows session outcome; last assistant message is captured as result automatically.
     const styleGuide = loadStyleGuide();
     const prompt =
-      `You are ${resolvedAgentName || resolvedAgentId || agentName || agentId || "a teammate"} executing a delegated subtask. Complete it end-to-end in ${project.path || project.name}.\n` +
+      `You are ${resolvedAgentName || resolvedAgentId || agentName || agentId || "a teammate"} executing a delegated subtask. Complete it end-to-end in ${workDir || project.path || project.name}.\n` +
+      worktreePromptLines(worktree) +
       `Task id: ${tid}\nProject id: ${projectId}\nTask: ${title}\nDescription: ${description || "(none)"}\nSession id: ${session.id} (pass as parentSessionId when you create/delegate follow-up tasks).\n\n` +
       `Before finishing, verify every acceptance criterion and required check. End with KANBAN_TASK_COMPLETE only when all are met; otherwise explain what remains and end with KANBAN_TASK_INCOMPLETE. A successful session alone does not prove completion. Do NOT call kanban_update_status or PATCH the task status yourself. ` +
       (styleGuide ? `\n${styleGuide}\n` : "") +
@@ -707,7 +759,7 @@ async function delegateTask(opts) {
     }
 
     if (!(wait === true || wait === "true")) {
-      return { task: await cli(["task", "show", tid]), sessionId: session.id, waited: false };
+      return { task: await cli(["task", "show", tid]), sessionId: session.id, waited: false, ...(worktree ? { worktree } : {}) };
     }
 
     // 5. Block until done/blocked (or timeout) — the "tool call return".
@@ -722,7 +774,7 @@ async function delegateTask(opts) {
         if (parentSessionId) {
           await cli(["task", "notify-mark", tid, "--actor", "delegate"]).catch(() => null);
         }
-        return { task: cur, sessionId: session.id, waited: true };
+        return { task: cur, sessionId: session.id, waited: true, ...(worktree ? { worktree } : {}) };
       }
       if (Date.now() >= deadline) {
         throw { status: 504, message: `delegate timed out after ${timeout}s — task ${tid} still ${cur.status}`, task: cur, sessionId: session.id };
@@ -775,10 +827,13 @@ async function startExistingTask(taskId, opts = {}) {
     "--agent-name", agentName, "--model-id", modelId, "--model-provider", modelProviderID,
     "--result", "", "--result-context", "", "--startup-error", ""]);
   await cli(["task", "move", taskId, "running", "--actor", "delegate"]);
+  // Isolation: the task works in its own git worktree.
+  const worktree = await createTaskWorktree(taskId);
+  const workDir = worktree?.path || projectPath;
   try {
     const created = await fetch(`${apiBase}/session`, {
       method: "POST", headers: H,
-      body: JSON.stringify({ agent: agentId, model: { id: modelId, providerID: modelProviderID }, ...(projectPath ? { location: { directory: projectPath } } : {}) }),
+      body: JSON.stringify({ agent: agentId, model: { id: modelId, providerID: modelProviderID }, ...(workDir ? { location: { directory: workDir } } : {}) }),
     });
     if (!created.ok) throw new Error(`session create failed (HTTP ${created.status}) — ${(await created.text()).slice(0, 300)}`);
     const payload = await created.json();
@@ -787,12 +842,12 @@ async function startExistingTask(taskId, opts = {}) {
     await cli(["task", "update", taskId, "--actor", "delegate", "--session-id", session.id,
       "--startup-phase", "ready"]);
     const styleGuide = loadStyleGuide();
-    const prompt = `You are ${agentName} executing an existing Kanban task. Complete it end-to-end in ${projectPath || project.name}.\nTask id: ${taskId}\nProject id: ${task.projectId}\nTask: ${task.title}\nDescription: ${description || "(none)"}\nSession id: ${session.id}\n\nReview every acceptance criterion and required check before reporting. End with KANBAN_TASK_COMPLETE only when all are satisfied and verified. Otherwise explain what remains and end with KANBAN_TASK_INCOMPLETE. Do not change the task status manually.${styleGuide ? `\n${styleGuide}\n` : ""}`;
+    const prompt = `You are ${agentName} executing an existing Kanban task. Complete it end-to-end in ${workDir || projectPath || project.name}.\n${worktreePromptLines(worktree)}Task id: ${taskId}\nProject id: ${task.projectId}\nTask: ${task.title}\nDescription: ${description || "(none)"}\nSession id: ${session.id}\n\nReview every acceptance criterion and required check before reporting. End with KANBAN_TASK_COMPLETE only when all are satisfied and verified. Otherwise explain what remains and end with KANBAN_TASK_INCOMPLETE. Do not change the task status manually.${styleGuide ? `\n${styleGuide}\n` : ""}`;
     const prompted = await fetch(`${apiBase}/session/${encodeURIComponent(session.id)}/prompt`, {
       method: "POST", headers: H, body: JSON.stringify({ text: prompt }),
     });
     if (!prompted.ok) throw new Error(`send prompt failed (HTTP ${prompted.status}) — ${(await prompted.text()).slice(0, 300)}`);
-    return { task: await cli(["task", "show", taskId]), sessionId: session.id };
+    return { task: await cli(["task", "show", taskId]), sessionId: session.id, ...(worktree ? { worktree } : {}) };
   } catch (error) {
     const message = describeErrorCause(error);
     await cli(["task", "update", taskId, "--actor", "delegate", "--status", "blocked",
@@ -941,6 +996,10 @@ function kanbanDocs(req) {
       { method: "POST", path: "/api/kanban/tasks", body: "projectId*, title*, description?, status?, priority?, id?, agentId?, agentName?, sessionId?, modelId?, modelProviderID?, startupPhase?, startupError?, parentSessionId?, result?, resultContext?, blockedByTaskIds?[]", returns: "Task" },
       { method: "PATCH", path: "/api/kanban/tasks/:id", body: "title?, description?, status?, priority?, agentId?, agentName?, sessionId?, modelId?, modelProviderID?, startupPhase?, startupError?, parentSessionId?, result?, resultContext?, blockedByTaskIds?[] (array replaces, [] clears)", returns: "Task" },
       { method: "GET", path: "/api/kanban/tasks/:id/dependencies", returns: "{id, status, blockedByTaskIds[], predecessors[{id,exists,status,title,done}], dependents[], ready}" },
+      { method: "GET", path: "/api/kanban/tasks/:id/worktree", returns: "{taskId, path, branch, state, note}" },
+      { method: "POST", path: "/api/kanban/tasks/:id/worktree", returns: "{ok, path, branch, base, reused} — own git worktree for this task" },
+      { method: "POST", path: "/api/kanban/tasks/:id/worktree/merge", body: "target?, cleanup?", returns: "{ok, merged, conflict, files[], error}" },
+      { method: "DELETE", path: "/api/kanban/tasks/:id/worktree", returns: "{ok, removed, path, branch, error}" },
       { method: "DELETE", path: "/api/kanban/tasks/:id", returns: "{ok:true,deleted}" },
       { method: "GET", path: "/api/kanban/projects", returns: "Project[]" },
       { method: "POST", path: "/api/kanban/projects", body: "name*, folder?|path?, gitUrl?, gitBranch?, noMkdir?, description?, id?, agentIds[]?", returns: "Project" },
@@ -1271,6 +1330,7 @@ function kanbanApi() {
               ["--result", "result"], ["--result-context", "resultContext"],
                ["--acceptance-criteria", "acceptanceCriteria"],
                 ["--kind", "kind"], ["--cycle-interval-sec", "cycleIntervalSec"], ["--due-date", "dueDate"],
+                ["--worktree-note", "worktreeNote"],
             ]) {
               if (key === "dueDate" && b[key] === null) argv.push(flag, "");
               else if (b[key] !== undefined && b[key] !== null) argv.push(flag, String(b[key]));
@@ -1281,9 +1341,69 @@ function kanbanApi() {
             }
             return json(res, 200, await cli(argv));
           }
+          // GET /api/kanban/features?projectId= → Feature[]
+          if (req.method === "GET" && parts[0] === "features" && parts.length === 1) {
+            const argv = ["feature", "list"];
+            const pid = q.get("projectId");
+            if (pid) argv.push("--project", String(pid));
+            return json(res, 200, await cli(argv));
+          }
+          // GET /api/kanban/features/:id → Feature with its tasks
+          if (req.method === "GET" && parts[0] === "features" && parts.length === 2) {
+            return json(res, 200, await cli(["feature", "show", parts[1]]));
+          }
+          // POST /api/kanban/features {projectId*, title*, description?} → Feature (worktree + branch)
+          if (req.method === "POST" && parts[0] === "features" && parts.length === 1) {
+            const b = await readBody(req);
+            if (!b.projectId) return json(res, 400, { ok: false, error: "projectId required" });
+            if (!b.title) return json(res, 400, { ok: false, error: "title required" });
+            const argv = ["feature", "create", "--project", String(b.projectId),
+              "--title", String(b.title), "--actor", "board"];
+            if (b.description) argv.push("--description", String(b.description));
+            if (b.base) argv.push("--base", String(b.base));
+            return json(res, 200, await cli(argv));
+          }
+          // POST /api/kanban/features/:id/merge → merge the feature branch into the project branch
+          if (req.method === "POST" && parts[0] === "features" && parts.length === 3 && parts[2] === "merge") {
+            const b = await readBody(req);
+            const argv = ["feature", "merge", parts[1]];
+            if (b?.target) argv.push("--target", String(b.target));
+            return json(res, 200, await cli(argv));
+          }
+          // DELETE /api/kanban/features/:id → {ok:true,deleted}
+          if (req.method === "DELETE" && parts[0] === "features" && parts.length === 2) {
+            return json(res, 200, await cli(["feature", "delete", parts[1], "--actor", "board"]));
+          }
           // GET /api/kanban/tasks/:id/dependencies → {id, blockedByTaskIds, predecessors, dependents, ready}
           if (req.method === "GET" && parts[0] === "tasks" && parts.length === 3 && parts[2] === "dependencies") {
             return json(res, 200, await cli(["task", "deps", parts[1]]));
+          }
+          // GET /api/kanban/tasks/:id/worktree → {path, branch, state, note}
+          if (req.method === "GET" && parts[0] === "tasks" && parts.length === 3 && parts[2] === "worktree") {
+            const task = await cli(["task", "show", parts[1]]);
+            return json(res, 200, {
+              taskId: task.id,
+              path: task.worktreePath ?? null,
+              branch: task.worktreeBranch ?? null,
+              state: task.worktreeState ?? null,
+              note: task.worktreeNote ?? null,
+            });
+          }
+          // POST /api/kanban/tasks/:id/worktree → create the worktree of a task
+          if (req.method === "POST" && parts[0] === "tasks" && parts.length === 3 && parts[2] === "worktree") {
+            return json(res, 200, await cli(["worktree", "create", parts[1]]));
+          }
+          // POST /api/kanban/tasks/:id/worktree/merge → merge the task branch into the project branch
+          if (req.method === "POST" && parts[0] === "tasks" && parts.length === 4 && parts[2] === "worktree" && parts[3] === "merge") {
+            const b = await readBody(req);
+            const argv = ["worktree", "merge", parts[1]];
+            if (b?.target) argv.push("--target", String(b.target));
+            if (b?.cleanup) argv.push("--cleanup");
+            return json(res, 200, await cli(argv));
+          }
+          // DELETE /api/kanban/tasks/:id/worktree → remove the worktree folder
+          if (req.method === "DELETE" && parts[0] === "tasks" && parts.length === 3 && parts[2] === "worktree") {
+            return json(res, 200, await cli(["worktree", "remove", parts[1], "--force"]));
           }
           // DELETE /api/kanban/tasks/:id → {ok:true}
           if (req.method === "DELETE" && parts[0] === "tasks" && parts.length === 2) {
@@ -1423,7 +1543,12 @@ function kanbanApi() {
                 if (typeof res.flushHeaders === "function") res.flushHeaders();
                 const reader = up.body.getReader();
                 const decoder = new TextDecoder();
-                req.on("close", () => { try { reader.cancel(); } catch {} });
+                // The request is complete before the SSE body starts. Its
+                // `close` event can fire while the client still reads the
+                // response, so watch the response for client disconnects.
+                res.on("close", () => {
+                  if (!res.writableEnded) { try { reader.cancel(); } catch {} }
+                });
                 for (;;) {
                   const { done, value } = await reader.read();
                   if (done) break;

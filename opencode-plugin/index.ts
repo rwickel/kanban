@@ -4,7 +4,12 @@
 // caller session. This plugin gets Tool.Context.sessionID, so kanban_delegate and
 // kanban_create_task can attach the calling session as parentSessionId on their own.
 //
-// Register:  plugins: ["file:///C:/Users/Robert/work/kanban-clone/opencode-plugin"]
+// Register: the plugin must be listed in the OpenCode config, otherwise no
+// session gets the kanban tools:
+//   ~/.config/opencode/opencode.jsonc
+//   { "plugins": ["file:///C:/Users/Robert/work/kanban/opencode-plugin"] }
+// A global entry loads the plugin in every folder (main checkout and every
+// task worktree), so delegated teammates can delegate further.
 //
 // Only the board state goes through server/kanban.py. Agent sessions go
 // through the running server's own ctx.session client, so no extra
@@ -113,7 +118,7 @@ export default {
             const argv = ["project", "update", input.projectId, "--actor", "agent"]
             if (requested.length === 0) argv.push("--clear-allowed-models")
             else for (const model of requested) argv.push("--allowed-model", model)
-            return cliResult(runCli(argv))
+            return cliResult(await runCli(argv))
           } catch (error) {
             return toolError(`failed to validate or update project models: ${error instanceof Error ? error.message : String(error)}`)
           }
@@ -156,7 +161,7 @@ export default {
           if (input.gitBranch) argv.push("--git-branch", input.gitBranch)
           if (input.id) argv.push("--id", input.id)
           for (const a of input.agentIds ?? []) if (a) argv.push("--agent-id", a)
-          return cliResult(runCli(argv))
+          return cliResult(await runCli(argv))
         },
       })
 
@@ -165,7 +170,7 @@ export default {
         description: "List all kanban boards (projects) from the shared store.",
         input: { type: "object", properties: {}, additionalProperties: false },
         options: { namespace: "kanban" },
-        execute: async () => cliResult(runCli(["project", "list", "--json"])),
+        execute: async () => cliResult(await runCli(["project", "list", "--json"])),
       })
 
       editor.add({
@@ -180,7 +185,7 @@ export default {
         options: { namespace: "kanban" },
         execute: async (input: any) => {
           if (!input.projectId?.trim()) toolError("projectId required")
-          const r = runCli(["project", "list", "--json"])
+          const r = await runCli(["project", "list", "--json"])
           if (!r.ok) return cliResult(r)
           const row = JSON.parse(r.text).find?.((p: any) => p.id === input.projectId)
           if (!row) toolError(`board not found: ${input.projectId}`)
@@ -225,7 +230,7 @@ export default {
             for (const a of input.agentIds) if (a) argv.push("--agent-id", a)
           }
           if (argv.length <= 4) toolError("nothing to update")
-          return cliResult(runCli(argv))
+          return cliResult(await runCli(argv))
         },
       })
 
@@ -241,7 +246,7 @@ export default {
         options: { namespace: "kanban" },
         execute: async (input: any) => {
           if (!input.projectId?.trim()) toolError("projectId required")
-          return cliResult(runCli(["project", "delete", input.projectId, "--actor", "agent"]))
+          return cliResult(await runCli(["project", "delete", input.projectId, "--actor", "agent"]))
         },
       })
 
@@ -281,7 +286,7 @@ export default {
           }
           const parent = callingSessionId(input.parentSessionId, context)
           if (parent) argv.push("--parent-session-id", parent)
-          return cliResult(runCli(argv))
+          return cliResult(await runCli(argv))
         },
       })
 
@@ -302,7 +307,7 @@ export default {
           const argv = ["task", "list"]
           if (input.projectId) argv.push("--project", input.projectId)
           if (input.status) argv.push("--status", input.status)
-          return cliResult(runCli(argv))
+          return cliResult(await runCli(argv))
         },
       })
 
@@ -316,8 +321,8 @@ export default {
         },
         options: { namespace: "kanban" },
         execute: async (input: any) => {
-          if (input.taskId) return cliResult(runCli(["task", "show", input.taskId]))
-          return cliResult(runCli(["events", "list", "--limit", "20"]))
+          if (input.taskId) return cliResult(await runCli(["task", "show", input.taskId]))
+          return cliResult(await runCli(["events", "list", "--limit", "20"]))
         },
       })
 
@@ -338,7 +343,7 @@ export default {
         },
         options: { namespace: "kanban" },
         execute: async (input: any) => {
-          const row = runCli(["task", "show", input.taskId])
+          const row = await runCli(["task", "show", input.taskId])
           if (!row.ok) return cliResult(row)
           const r = await kanbanFetch(`/api/kanban/tasks/${encodeURIComponent(input.taskId)}/start`, {
             method: "POST", headers: ocH(), body: JSON.stringify(input),
@@ -366,13 +371,13 @@ export default {
         },
         options: { namespace: "kanban" },
         execute: async (input: any) => {
-          const moved = runCli(["task", "move", input.taskId, input.status, "--actor", "agent"])
+          const moved = await runCli(["task", "move", input.taskId, input.status, "--actor", "agent"])
           if (!moved.ok) return cliResult(moved)
           if (input.result !== undefined || input.resultContext !== undefined) {
             const argv = ["task", "update", input.taskId, "--actor", "agent"]
             if (input.result !== undefined) argv.push("--result", input.result)
             if (input.resultContext !== undefined) argv.push("--result-context", input.resultContext)
-            const u = runCli(argv)
+            const u = await runCli(argv)
             if (u.ok) return cliResult(u)
           }
           return cliResult(moved)
@@ -403,7 +408,7 @@ export default {
           if (input.resultContext !== undefined) {
             argv.push("--result-context", input.resultContext)
           }
-          return cliResult(runCli(argv))
+          return cliResult(await runCli(argv))
         },
       })
 
@@ -442,7 +447,108 @@ export default {
             )
           }
           if (argv.length <= 3) toolError("nothing to update")
-          return cliResult(runCli(argv))
+          return cliResult(await runCli(argv))
+        },
+      })
+
+      // --- worktree isolation ---------------------------------------------
+
+      editor.add({
+        name: "kanban_worktree",
+        description:
+          "Manage the per-task git worktrees that isolate parallel tasks. action=create gives a task its own folder and branch; action=merge merges that branch into the project branch; action=remove deletes the worktree folder; action=list shows all worktrees of a board. A task that reaches 'done' is merged automatically — use merge to retry a failed or conflicting merge.",
+        input: {
+          type: "object",
+          properties: {
+            action: {
+              type: "string",
+              enum: ["create", "merge", "remove", "list"],
+              description: "What to do with the worktree",
+            },
+            taskId: str("Task uuid. Required for create, merge and remove."),
+            projectId: str("Board uuid. Used by list; defaults to the board of the task."),
+            target: str("Target branch for merge (default: the project branch)"),
+            cleanup: {
+              type: "boolean",
+              description: "Merge only: remove the worktree folder after a successful merge",
+            },
+          },
+          required: ["action"],
+          additionalProperties: false,
+        },
+        options: { namespace: "kanban" },
+        execute: async (input: any) => {
+          const action = String(input.action || "").trim().toLowerCase()
+          if (action === "list") {
+            const argv = ["worktree", "list"]
+            if (input.projectId) argv.push("--project", String(input.projectId).trim())
+            return cliResult(await runCli(argv))
+          }
+          if (!input.taskId?.trim()) toolError("taskId required")
+          const taskId = String(input.taskId).trim()
+          if (action === "create") return cliResult(await runCli(["worktree", "create", taskId]))
+          if (action === "merge") {
+            const argv = ["worktree", "merge", taskId]
+            if (input.target) argv.push("--target", String(input.target).trim())
+            if (input.cleanup) argv.push("--cleanup")
+            return cliResult(await runCli(argv))
+          }
+          if (action === "remove") {
+            const argv = ["worktree", "remove", taskId, "--force"]
+            return cliResult(await runCli(argv))
+          }
+          toolError("action must be create, merge, remove or list")
+        },
+      })
+
+      // --- features -------------------------------------------------------
+
+      editor.add({
+        name: "kanban_feature",
+        description:
+          "Manage the feature worktrees of this board. A feature groups the steps of one unit of work (concept, implementation, verification, review, merge). action=create gives the feature one worktree and one branch that all its steps share. action=show lists the feature with its tasks. action=list shows the features of a board. action=merge merges the feature branch into the project branch (main) — only the integrator does this. action=delete removes the feature worktree; its tasks stay on the board.",
+        input: {
+          type: "object",
+          properties: {
+            action: {
+              type: "string",
+              enum: ["create", "show", "list", "merge", "delete"],
+              description: "What to do with the feature",
+            },
+            featureId: str("Feature uuid. Required for show, merge and delete."),
+            projectId: str("Board uuid. Required for create; used by list."),
+            title: str("Feature title (create)"),
+            description: str("Feature description (create)"),
+            base: str("Base branch for the feature (create, default: the project branch)"),
+          },
+          required: ["action"],
+          additionalProperties: false,
+        },
+        options: { namespace: "kanban" },
+        execute: async (input: any) => {
+          const action = String(input.action || "").trim().toLowerCase()
+          if (action === "create") {
+            if (!input.projectId?.trim()) toolError("projectId required")
+            if (!input.title?.trim()) toolError("title required")
+            const argv = ["feature", "create", "--project", String(input.projectId).trim(),
+              "--title", String(input.title).trim(), "--actor", "agent"]
+            if (input.description) argv.push("--description", String(input.description))
+            if (input.base) argv.push("--base", String(input.base).trim())
+            return cliResult(await runCli(argv))
+          }
+          if (action === "list") {
+            const argv = ["feature", "list"]
+            if (input.projectId) argv.push("--project", String(input.projectId).trim())
+            return cliResult(await runCli(argv))
+          }
+          if (!input.featureId?.trim()) toolError("featureId required")
+          const featureId = String(input.featureId).trim()
+          if (action === "show") return cliResult(await runCli(["feature", "show", featureId]))
+          if (action === "merge") return cliResult(await runCli(["feature", "merge", featureId]))
+          if (action === "delete") {
+            return cliResult(await runCli(["feature", "delete", featureId, "--actor", "agent"]))
+          }
+          toolError("action must be create, show, list, merge or delete")
         },
       })
 
@@ -451,7 +557,7 @@ export default {
       editor.add({
         name: "kanban_delegate",
         description:
-          "Create a task for another agent on the team and start it immediately. Fire-and-forget by default — returns { task, sessionId, waited:false, parentSessionId } right away so the caller can fan out. Pass wait:true to block until done/blocked. This session is attached as parentSessionId automatically; an explicit parentSessionId wins. The subtask flips to done/blocked when the teammate is done. Pass blockedByTaskIds to make the subtask wait for other tasks: when a predecessor is not done yet the subtask is created in the backlog (started:false) instead of running.",
+          "Create a task for another agent on the team and start it immediately. Fire-and-forget by default — returns { task, sessionId, waited:false, parentSessionId } right away so the caller can fan out. Pass wait:true to block until done/blocked. This session is attached as parentSessionId automatically; an explicit parentSessionId wins. The subtask flips to done/blocked when the teammate is done. Pass blockedByTaskIds to make the subtask wait for other tasks: when a predecessor is not done yet the subtask is created in the backlog (started:false) instead of running. Pass featureId to run the subtask in the worktree of a feature, shared with the other steps of that feature. Every subtask without a feature gets its own git worktree, so parallel subtasks never share files. When you delegate from inside a delegated task, keep wait:false — the board queues the subtask result back into your session.",
         input: {
           type: "object",
           properties: {
@@ -464,6 +570,9 @@ export default {
             modelId: str("Model id for the teammate session"),
             modelProviderID: str("Model provider id for the teammate session"),
             parentSessionId: str("Override the parent session (default: this session)"),
+            featureId: str(
+              "Feature uuid. The task then works in the feature worktree and on the feature branch, shared with the other steps of that feature. Use it only for the steps of one feature, one step at a time.",
+            ),
             blockedByTaskIds: blockedByProp(
               "Depends-on: predecessor task ids (same project) that must be done before this subtask starts. The server rejects unknown ids, self-references, foreign-project ids and cycles.",
             ),

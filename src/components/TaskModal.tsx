@@ -5,6 +5,7 @@ import { fetchModels } from '../api/opencode';
 import { getTaskModelPref, saveTaskModelPref } from '../store/serverConfig';
 import { formatModelRef, isModelAllowed, resolveSessionModel } from '../store/modelResolution';
 import { normalizeBlockedBy, validateBlockedBy } from '../store/dependencies';
+import { mergeTaskWorktree, removeTaskWorktree } from '../store/kanban';
 import AttachmentList from './AttachmentList';
 
 interface TaskModalProps {
@@ -54,6 +55,10 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
   const [blockedBy, setBlockedBy] = useState<string[]>([]);
   const [depSearch, setDepSearch] = useState('');
   const [depError, setDepError] = useState<string | null>(null);
+  // Worktree (isolated git folder of this task) — read-only info + merge/remove.
+  const [wt, setWt] = useState<{ path?: string | null; branch?: string | null; state?: string | null; note?: string | null }>({});
+  const [wtBusy, setWtBusy] = useState(false);
+  const [wtMsg, setWtMsg] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -71,6 +76,13 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
       setKind(task.kind || 'oneshot');
       setCycleIntervalSec(String(task.cycleIntervalSec ?? 3600));
       setBlockedBy(normalizeBlockedBy(task.blockedByTaskIds));
+      setWt({
+        path: task.worktreePath ?? null,
+        branch: task.worktreeBranch ?? null,
+        state: task.worktreeState ?? null,
+        note: task.worktreeNote ?? null,
+      });
+      setWtMsg(null);
     } else {
       setTitle('');
       setDescription('');
@@ -83,6 +95,8 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
       setKind('oneshot');
       setCycleIntervalSec('3600');
       setBlockedBy([]);
+      setWt({});
+      setWtMsg(null);
     }
     // Same order as session creation: task pick → browser pref when the project
     // allows it → the project's first allowed model → nothing (server default).
@@ -121,6 +135,45 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
   };
   const depStatusCls: Record<TaskStatus, string> = {
     backlog: 'p-neutral', running: 'p-blue', done: 'p-green', blocked: 'p-red',
+  };
+
+  // Worktree actions: merge the task branch into the project branch, or drop
+  // the isolated folder. A task that reaches "done" is merged automatically.
+  const mergeWorktree = async () => {
+    if (!task) return;
+    setWtBusy(true);
+    setWtMsg(null);
+    try {
+      const r = await mergeTaskWorktree(task.id);
+      if (r.merged) {
+        setWt((v) => ({ ...v, state: 'merged' }));
+        setWtMsg('Merged into the project branch.');
+      } else if (r.conflict) {
+        setWt((v) => ({ ...v, state: 'conflict' }));
+        setWtMsg(`Merge conflict: ${(r.files ?? []).join(', ') || r.error || 'unknown files'}`);
+      } else {
+        setWtMsg(r.error || 'Merge failed.');
+      }
+    } catch (e) {
+      setWtMsg(String((e as Error)?.message ?? e));
+    } finally {
+      setWtBusy(false);
+    }
+  };
+
+  const removeWorktree = async () => {
+    if (!task) return;
+    setWtBusy(true);
+    setWtMsg(null);
+    try {
+      const r = await removeTaskWorktree(task.id);
+      setWt((v) => ({ ...v, state: r.removed ? 'removed' : v.state }));
+      setWtMsg(r.removed ? 'Worktree removed.' : r.error || 'Remove failed.');
+    } catch (e) {
+      setWtMsg(String((e as Error)?.message ?? e));
+    } finally {
+      setWtBusy(false);
+    }
   };
 
   if (!isOpen) return null;
@@ -265,6 +318,26 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
             )}
             {depError && <p className="text-[11px] text-red-400/90 mt-1">{depError}</p>}
           </div>
+          {task?.worktreeBranch && (
+            <div>
+              <label className="block text-[12px] font-medium t-soft mb-1">
+                Worktree <span className="muted font-normal">(isolated folder for this task)</span>
+              </label>
+              <div className="text-[11px] mono muted break-all rounded border border-[var(--border)] px-2 py-1.5">
+                <div>branch: {task.worktreeBranch}</div>
+                <div>state: {wt.state ?? task.worktreeState ?? 'none'}</div>
+                {wt.path && <div>path: {wt.path}</div>}
+                {(wt.note || task.worktreeNote) && <div className="text-amber-400/90">note: {wt.note || task.worktreeNote}</div>}
+              </div>
+              <div className="flex gap-2 mt-1.5">
+                <button type="button" onClick={mergeWorktree} disabled={wtBusy}
+                  className="pill p-blue disabled:opacity-50">Merge now</button>
+                <button type="button" onClick={removeWorktree} disabled={wtBusy}
+                  className="pill p-neutral disabled:opacity-50">Remove worktree</button>
+              </div>
+              {wtMsg && <p className="text-[11px] muted mt-1">{wtMsg}</p>}
+            </div>
+          )}
           {availableAgents.length > 0 ? (
             <div>
               <label className="block text-[12px] font-medium t-soft mb-1">Assign Agent</label>

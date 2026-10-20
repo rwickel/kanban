@@ -10,3 +10,7 @@ build/
 # Cyclical-task checkpoints are runtime state written by the agent, not source.
 .kanban/checkpoints/
 __pycache__/
+
+# Task worktrees live outside the repo by default. Ignore them when the
+# worktree root is set inside the repository.
+.kanban-worktrees/
