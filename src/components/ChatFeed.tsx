@@ -9,6 +9,7 @@ import { Bot, User, ChevronDown, Wrench, Check, Copy, AlertTriangle, Search, Pen
 import type { ChatStatus } from '../hooks/useSessionStream';
 import type { ChatMessage, QuestionItem } from './chatEvents';
 import { linkifyFilePaths, parsePreviewHref } from './filePaths';
+import { externalLink } from './markdownLink';
 
 function linkifyKanbanRefs(markdown: string): string {
   return markdown
@@ -78,13 +79,14 @@ export function ThinkingBlock({ msg, showAvatar, agentName, modelName, onFileCli
           <div className="mt-1 panel p-2.5 text-[11.5px] leading-relaxed t-soft break-words md-body">
             <Markdown
               remarkPlugins={[remarkGfm]}
+              urlTransform={(u) => u}
               components={{
-                a: ({ href, children, ...props }) => {
+                a: ({ href, children, node, ...props }) => {
                   const abs = parsePreviewHref(href);
                   if (abs) {
                     return <button type="button" title={abs} onClick={(e) => { e.preventDefault(); e.stopPropagation(); onFileClick(abs); }} className="underline mono text-[12px] break-all" style={{ color: 'var(--info)', cursor: 'pointer' }}>{children}</button>;
                   }
-                  return <a href={href} target="_blank" rel="noreferrer" {...props}>{children}</a>;
+                  return externalLink(href, children);
                 },
               }}
             >{linkifyFilePaths(msg.markdown)}</Markdown>
@@ -577,8 +579,9 @@ export function ChatBubble({ msg, agentName, modelName, showAvatar = true, onFil
             : { background: 'var(--surface)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 6, padding: '8px 10px 28px' }}>
           {editing ? <div className="w-full max-w-full"><textarea autoFocus value={draft} onChange={(e) => setDraft(e.target.value)} rows={Math.max(3, Math.min(8, draft.split('\n').length + 1))} className="w-full resize-y bg-transparent outline-none text-[13px] leading-relaxed" aria-label="Edit message" /><div className="flex justify-end items-center gap-2 mt-2"><button type="button" className="btn px-3 py-1.5 rounded-full" style={{ color: 'var(--accent-text)', background: 'color-mix(in srgb, var(--accent-text) 18%, var(--accent))', borderColor: 'color-mix(in srgb, var(--accent-text) 35%, var(--accent))' }} onClick={() => { setDraft(msg.markdown); setEditing(false); }}>Cancel</button><button type="button" className="btn px-3 py-1.5 rounded-full" style={{ color: 'var(--accent-text)', background: 'var(--accent)', borderColor: 'var(--accent)' }} disabled={!draft.trim()} onClick={() => { onEdit?.({ ...msg, markdown: draft.trim() }); setEditing(false); }}>Send</button></div></div> : <Markdown
             remarkPlugins={[remarkGfm]}
+            urlTransform={(u) => u}
             components={{
-              a: ({ href, children, ...props }) => {
+              a: ({ href, children, node, ...props }) => {
                 if (href?.startsWith('kanban-task:') || href?.startsWith('kanban-session:')) {
                   const kind = href.startsWith('kanban-task:') ? 'task' : 'session';
                   const prefix = kind === 'task' ? 'kanban-task:' : 'kanban-session:';
@@ -599,7 +602,7 @@ export function ChatBubble({ msg, agentName, modelName, showAvatar = true, onFil
                     </button>
                   );
                 }
-                return <a href={href} target="_blank" rel="noreferrer" {...props}>{children}</a>;
+                return externalLink(href, children);
               },
             }}
           >{linkifyKanbanRefs(linkifyFilePaths(msg.markdown))}</Markdown>}

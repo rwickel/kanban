@@ -1,1 +1,1 @@
-
+use simplefied rtechnical language (ASD-STE100) for your response

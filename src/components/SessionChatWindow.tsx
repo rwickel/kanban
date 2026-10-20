@@ -16,6 +16,7 @@ import { useChatSize, CHAT_EDGE_GAP } from '../hooks/useChatSize';
 import FilePreviewModal from './FilePreviewModal';
 import AttachmentList from './AttachmentList';
 import ChatExportModal from './ChatExportModal';
+import { loadAttachments } from '../attachments';
 
 interface SessionChatWindowProps {
   task: Task | null;
@@ -175,7 +176,7 @@ export default function SessionChatWindow({ task, onClose, standalone, onTaskCli
     setSending(true);
     setSendError(null);
     const text = input.trim();
-    const res = await sendPrompt(sessionId, text, task.agentId ?? task.agentName);
+    const res = await sendPrompt(sessionId, text, task.agentId ?? task.agentName, await loadAttachments(sessionId));
     setSending(false);
     if (res.ok) {
       setInput('');
@@ -198,7 +199,7 @@ export default function SessionChatWindow({ task, onClose, standalone, onTaskCli
     // Switch first: the fork contains only messages before messageId, so every
     // selected-and-later message disappears before the replacement is sent.
     setActiveSessionId(fork.sessionId);
-    const res = await sendPrompt(fork.sessionId, text.trim(), task.agentId ?? task.agentName);
+    const res = await sendPrompt(fork.sessionId, text.trim(), task.agentId ?? task.agentName, await loadAttachments(sessionId));
     setSending(false);
     if (!res.ok) setSendError(`Edit failed — ${res.error ?? 'could not send replacement'}`);
   };

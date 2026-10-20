@@ -59,6 +59,48 @@ test('kanban.py task dependencies', async (t) => {
   const B = runJson(['task', 'create', '--project', P, '--title', 'B']).id;
   const C = runJson(['task', 'create', '--project', P, '--title', 'C']).id;
 
+  await t.test('project create returns a row_to_task-compatible project row', () => {
+    const created = runJson(['project', 'create', '--name', 'Created', '--folder', 'created-proj', '--id', 'project-created']);
+    assert.equal(created.id, 'project-created');
+    assert.equal(created.name, 'Created');
+    assert.equal(created.folder, 'created-proj');
+    assert.equal(created.allowedModels instanceof Array, true);
+  });
+
+  await t.test('task move updates status and task row fields', () => {
+    const moved = runJson(['task', 'move', A, 'running', '--comment', 'start']);
+    assert.equal(moved.status, 'running');
+    assert.equal(moved.kind, 'oneshot');
+    assert.deepEqual(moved.blockedByTaskIds, []);
+    assert.equal(runJson(['task', 'show', A]).status, 'running');
+  });
+
+  await t.test('task update persists fields and resets startup state on running', () => {
+    runJson(['task', 'update', A, '--startup-phase', 'ready', '--startup-error', 'old']);
+    const updated = runJson(['task', 'update', A, '--status', 'running', '--title', 'Updated']);
+    assert.equal(updated.title, 'Updated');
+    assert.equal(updated.status, 'running');
+    assert.equal(updated.startupPhase, null);
+    assert.equal(updated.startupError, null);
+  });
+
+  await t.test('watch blocks stale oneshot tasks but keeps services running', () => {
+    const stale = runJson(['task', 'create', '--project', P, '--title', 'Stale', '--status', 'running', '--kind', 'oneshot']);
+    const service = runJson(['task', 'create', '--project', P, '--title', 'Service', '--status', 'running', '--kind', 'service']);
+    const result = runJson(['task', 'watch', '--default-timeout', '0']);
+    assert.ok(result.stalled.some((item) => item.id === stale.id));
+    assert.equal(runJson(['task', 'show', stale.id]).status, 'blocked');
+    assert.equal(runJson(['task', 'show', service.id]).status, 'running');
+  });
+
+  await t.test('notify-pending returns finished tasks that have not been delivered', () => {
+    const pending = runJson(['task', 'create', '--project', P, '--title', 'Pending', '--status', 'done', '--parent-session-id', 'parent-session']);
+    runJson(['task', 'create', '--project', P, '--title', 'No parent', '--status', 'done']);
+    const result = runJson(['task', 'notify-pending']);
+    assert.deepEqual(result.map((item) => item.id), [pending.id]);
+    assert.equal(pending.parentSessionId, 'parent-session');
+  });
+
   await t.test('existing tasks stay compatible: field defaults to []', () => {
     assert.deepEqual(runJson(['task', 'show', A]).blockedByTaskIds, []);
     assert.deepEqual(runJson(['task', 'show', B]).blockedByTaskIds, []);

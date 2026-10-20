@@ -31,7 +31,7 @@ export function autoContinueMinToMs(min: number): number {
 
 /** Minimal message shape needed to detect a real user turn. */
 export interface AutoContinueMessage {
-  kind: 'user' | 'assistant' | 'reasoning' | 'tool' | 'error';
+  kind: 'user' | 'assistant' | 'reasoning' | 'tool' | 'error' | 'event';
   markdown?: string;
 }
 

@@ -28,6 +28,8 @@ import {
 } from '../store/assistantSession';
 import { isModelAllowed } from '../store/modelResolution';
 import { createTask } from '../store/kanban';
+import AttachmentList from './AttachmentList';
+import { loadAttachments } from '../attachments';
 
 interface AssistantChatWindowProps {
   project: Project | null;
@@ -161,7 +163,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
   const activityToken = lastMsg ? `${lastMsg.id}:${lastMsg.kind}:${status}` : `empty:${status}`;
   const sendAutoContinue = async (text: string): Promise<boolean> => {
     if (!sessionId) return false;
-    const res = await sendPrompt(sessionId, text, selectedModel);
+    const res = await sendPrompt(sessionId, text, selectedModel, await loadAttachments(sessionId));
     if (!res.ok) {
       setSendError(`Auto-continue failed — ${res.error ?? 'unknown error'}`);
       return false;
@@ -222,6 +224,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
   // Save the pref only after the switch succeeds — otherwise a failed
   // switch leaves a stale pref and reload shows the wrong agent.
   const handleAgentChange = async (v: string) => {
+    if (!project) return;
     const prev = selectedAgentId;
     setSelectedAgentId(v);
     if (sessionId) {
@@ -236,6 +239,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
   };
 
   const handleModelChange = async (v: string) => {
+    if (!project) return;
     const prev = selectedModel;
     setSelectedModel(v);
     if (sessionId && v) {
@@ -278,6 +282,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
 
   const ensureSession = async (): Promise<string | null> => {
     if (sessionId) return sessionId;
+    if (!project) return null;
     setCreating(true);
     setCreateError(null);
     saveAssistantPrefs(project.id, selectedAgentId, selectedModel);
@@ -367,7 +372,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
       setSessionId(fork.sessionId);
       saveAssistantSessionId(project.id, fork.sessionId);
     }
-    const res = fork.ok && fork.sessionId ? await sendPrompt(fork.sessionId, text, selectedModel) : { ok: false, error: fork.error ?? 'Could not create edited conversation' };
+    const res = fork.ok && fork.sessionId ? await sendPrompt(fork.sessionId, text, selectedModel, await loadAttachments(sid)) : { ok: false, error: fork.error ?? 'Could not create edited conversation' };
     setSending(false);
     if (res.ok) {
       setInput('');
@@ -541,7 +546,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
              if (msg.kind === 'error') return <ChatErrorRow key={msg.id} msg={msg} detail={msg.id.endsWith('-outcome') ? sessionError : null} onReview={handleReview} />;
             if (msg.kind === 'reasoning') return <ThinkingBlock key={msg.id} msg={msg} showAvatar={startsTurn} agentName={agentName} modelName={modelHint} onFileClick={(p) => setPreviewPath(p)} />;
              if (msg.kind === 'event') return <div key={msg.id} className="text-center text-[11px] font-bold mono py-1" style={{ color: 'var(--muted)' }}>{msg.markdown}</div>;
-              return <ChatBubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : agentName} modelName={msg.kind === 'user' ? undefined : modelHint} showAvatar={msg.kind === 'user' ? true : startsTurn} onFileClick={(p) => setPreviewPath(p)} onTaskClick={onTaskClick} onReview={handleReview} onEdit={async (m) => { if (!sessionId || !project) return; const fork = await forkSession(sessionId, m.id); if (!fork.ok || !fork.sessionId) { setSendError(fork.error ?? 'Could not edit message'); return; } setSessionId(fork.sessionId); saveAssistantSessionId(project.id, fork.sessionId); const res = await sendPrompt(fork.sessionId, m.markdown, selectedModel); if (!res.ok) setSendError(res.error ?? 'Could not send edited message'); }} onClear={async (m) => { if (!sessionId || !project) return; const fork = await forkSession(sessionId, m.id); if (!fork.ok || !fork.sessionId) { setSendError(fork.error ?? 'Could not clear messages'); return; } setSessionId(fork.sessionId); saveAssistantSessionId(project.id, fork.sessionId); }} onFork={(m) => handleForkTask(m.id)} />;
+              return <ChatBubble key={msg.id} msg={msg} agentName={msg.kind === 'user' ? undefined : agentName} modelName={msg.kind === 'user' ? undefined : modelHint} showAvatar={msg.kind === 'user' ? true : startsTurn} onFileClick={(p) => setPreviewPath(p)} onTaskClick={onTaskClick} onReview={handleReview} onEdit={async (m) => { if (!sessionId || !project) return; const fork = await forkSession(sessionId, m.id); if (!fork.ok || !fork.sessionId) { setSendError(fork.error ?? 'Could not edit message'); return; } setSessionId(fork.sessionId); saveAssistantSessionId(project.id, fork.sessionId); const res = await sendPrompt(fork.sessionId, m.markdown, selectedModel, await loadAttachments(sessionId)); if (!res.ok) setSendError(res.error ?? 'Could not send edited message'); }} onClear={async (m) => { if (!sessionId || !project) return; const fork = await forkSession(sessionId, m.id); if (!fork.ok || !fork.sessionId) { setSendError(fork.error ?? 'Could not clear messages'); return; } setSessionId(fork.sessionId); saveAssistantSessionId(project.id, fork.sessionId); }} onFork={(m) => handleForkTask(m.id)} />;
           })}
           <div ref={bottomRef} />
           {busy && msgCount > 0 && (
@@ -571,6 +576,7 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
           </label>
         </div>
         <form onSubmit={busy ? (e) => { e.preventDefault(); handleStop(); } : handleSend} className="p-3 border-t hairline" style={{ borderTopWidth: 1, borderTopStyle: 'solid', background: 'var(--surface)' }}>
+          {sessionId && <AttachmentList ownerType="chat" ownerId={sessionId} disabled={busy} />}
           <div className="flex gap-1.5 items-end">
             <input type="text" value={input} onChange={(e) => setInput(e.target.value)} placeholder={speechTranscribing ? 'Transcribing locally…' : speechListening ? (speechPct != null && speechPct >= 0 ? `Loading voice model ${Math.min(100, Math.round(speechPct * 100))}%…` : 'Listening — speak now…') : busy ? 'Assistant running — Stop to interrupt…' : 'Ask the board assistant…  (↵ send)'} className="input" disabled={busy || creating} autoFocus />
             {speechSupported && (
@@ -603,4 +609,5 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
     </div>
   );
 }
+
 

@@ -4,6 +4,21 @@ export interface Attachment {
   type: string;
   size: number;
   url: string;
+  uri?: string;
+}
+
+export function attachmentExtension(name: string): string {
+  return /\.([a-z\d]{1,10})$/i.exec(name)?.[1]?.toLowerCase() || '';
+}
+
+export function attachmentsToOpenCodeFiles(attachments: Attachment[]) {
+  return attachments.filter((attachment) => attachment.uri).map((attachment) => ({ uri: attachment.uri!, name: attachment.name }));
+}
+
+export async function loadAttachments(ownerId: string): Promise<Attachment[]> {
+  const response = await fetch(`/api/kanban/attachments?ownerType=chat&ownerId=${encodeURIComponent(ownerId)}`);
+  if (!response.ok) throw new Error('Could not load attachments.');
+  return response.json() as Promise<Attachment[]>;
 }
 
 export const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;

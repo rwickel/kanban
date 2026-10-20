@@ -1,4 +1,6 @@
 import type { OpenCodeAgentInfo, OpenCodeModelInfo, OpenCodeSessionInfo } from '../types';
+import type { Attachment } from '../attachments.ts';
+import { attachmentsToOpenCodeFiles } from '../attachments.ts';
 
 // Browser never holds the OpenCode password. All OpenCode traffic goes
 // through Vite's /api/kanban/oc/* proxy, which injects Basic auth server-side
@@ -160,12 +162,15 @@ export async function sendPrompt(
   sessionId: string,
   text: string,
   model?: string
+  , attachments: Attachment[] = []
 ): Promise<{ ok: boolean; error?: string }> {
   // v2: POST /api/session/{id}/prompt { text, ... } → { data: Session.Inbox.User }
   // NOTE: session is already created with its agent — sending `agents` again
   // can 500 the server (unknown id, stale display name). Text-only is safest.
   try {
     const body: Record<string, unknown> = { text };
+    const files = attachmentsToOpenCodeFiles(attachments);
+    if (files.length) body.files = files;
     if (model) {
       const [providerID, ...rest] = model.split('/');
       const modelID = rest.join('/');

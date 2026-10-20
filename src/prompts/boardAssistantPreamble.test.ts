@@ -35,6 +35,7 @@ test('renders every known slot and leaves unknown slots visible', () => {
     sessionId: 'ses_1',
     teamLines: '- Coder (id: coder)',
     styleGuide: 'Be brief.',
+    serverUrl: 'http://localhost',
   });
   assert.match(out, /# Board assistant — Demo/);
   assert.match(out, /- Coder \(id: coder\)/);
@@ -52,6 +53,7 @@ test('empty string values keep their placeholder rather than blanking the line',
     sessionId: '',
     teamLines: '',
     styleGuide: '',
+    serverUrl: 'http://localhost',
   });
   assert.equal(out, 'Session id: {{sessionId}}');
 });
