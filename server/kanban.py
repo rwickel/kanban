@@ -1114,6 +1114,12 @@ def merge_feature(conn, feature_row, target=None):
         log_event(conn, None, "feature", "feature.merged",
                   {"id": feature_row["id"], "branch": branch, "target": result.get("target"),
                    "pushed": result.get("pushed"), "pushNote": result.get("pushNote")})
+        # The work is in the project branch. The completed steps of the
+        # feature move to the archive, so the board shows only the open work.
+        archived = archive_done_feature_tasks(conn, feature_row["id"])
+        if archived:
+            log_event(conn, None, "feature", "feature.archived",
+                      {"id": feature_row["id"], "tasks": archived})
     elif result.get("conflict"):
         conn.execute(
             "UPDATE features SET merge_note = ?, updated_at = ? WHERE id = ?",
@@ -1132,6 +1138,27 @@ def merge_feature(conn, feature_row, target=None):
     return result
 
 
+def archive_done_feature_tasks(conn, feature_id) -> list:
+    """Move the completed tasks of a feature to the archive.
+
+    A feature that is merged is finished work. Its steps leave the daily
+    view, but keep their result and their history. Only the tasks that are
+    `done` move. A step that still runs or that is blocked stays visible.
+    """
+    rows = conn.execute(
+        "SELECT id, title FROM tasks WHERE feature_id = ? AND status = 'done'",
+        (feature_id,),
+    ).fetchall()
+    ids = []
+    for r in rows:
+        conn.execute("UPDATE tasks SET status = 'archived', updated_at = ? WHERE id = ?",
+                     (now_iso(), r["id"]))
+        log_event(conn, r["id"], "feature", "task.archived",
+                  {"featureId": feature_id, "title": r["title"]})
+        ids.append(r["id"])
+    return ids
+
+
 def cmd_feature_merge(args):
     """Merge the feature branch into the project branch."""
     conn = get_conn(args.db)
@@ -1140,6 +1167,35 @@ def cmd_feature_merge(args):
         fail(f"Feature not found: {args.feature_id}")
     result = merge_feature(conn, row, target=args.target)
     print(json.dumps(result, indent=2))
+    conn.close()
+
+
+def cmd_feature_update(args):
+    """Update a feature: its status and its merge note."""
+    conn = get_conn(args.db)
+    row = conn.execute("SELECT * FROM features WHERE id = ?", (args.feature_id,)).fetchone()
+    if not row:
+        fail(f"Feature not found: {args.feature_id}")
+    sets, params = [], []
+    if args.status is not None:
+        status = (args.status or "").strip()
+        if status not in ("active", "done", "archived"):
+            fail(f"Invalid feature status: {status}")
+        sets.append("status = ?")
+        params.append(status)
+    if args.merge_note is not None:
+        sets.append("merge_note = ?")
+        params.append(args.merge_note[:500])
+    if sets:
+        sets.append("updated_at = ?")
+        params.append(now_iso())
+        conn.execute(f"UPDATE features SET {', '.join(sets)} WHERE id = ?",
+                     (*params, args.feature_id))
+        log_event(conn, None, args.actor, "feature.updated",
+                  {"id": args.feature_id, "status": args.status, "mergeNote": args.merge_note})
+    conn.commit()
+    out = conn.execute("SELECT * FROM features WHERE id = ?", (args.feature_id,)).fetchone()
+    print(json.dumps(row_to_feature(out, feature_task_ids(conn, args.feature_id)), indent=2))
     conn.close()
 
 
@@ -2313,6 +2369,12 @@ def main(argv=None):
     fm.add_argument("feature_id")
     fm.add_argument("--target", default=None, help="Target branch (default: the project branch)")
     fm.set_defaults(func=cmd_feature_merge)
+    fu = fsub.add_parser("update", help="Update a feature (status, merge note).")
+    fu.add_argument("feature_id")
+    fu.add_argument("--status", default=None, help="active | done | archived")
+    fu.add_argument("--merge-note", default=None)
+    fu.add_argument("--actor", default="cli")
+    fu.set_defaults(func=cmd_feature_update)
     fd = fsub.add_parser("delete", help="Delete a feature. Its tasks stay on the board.")
     fd.add_argument("feature_id")
     fd.add_argument("--actor", default="cli")

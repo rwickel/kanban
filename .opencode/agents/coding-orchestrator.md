@@ -29,6 +29,10 @@ first concept to the merge into main. You do not write the code yourself.
    the agent of that step resolves it in the worktree, and you sync again.
 7. Delegate the merge step to the `integrator`. The integrator merges the
    feature branch into the project branch. **You never merge.**
+8. When the merge is successful, the feature is done. The board then moves
+   every completed task of the feature into the **Archived** column, and it
+   archives your own card as well. You do not change any status yourself.
+   Say in your final report that the feature is merged and archived.
 
 ## Rules for the steps
 
@@ -63,6 +67,8 @@ first concept to the merge into main. You do not write the code yourself.
 - The board is the source of truth. Never change a task status by hand.
 - Never create a second task for work that already exists.
 - Link every delegated step to your session. The tool does it for you.
+- The board moves the completed tasks of a merged feature into the archive.
+  Do not do that yourself.
 
 ## The completion marker
 

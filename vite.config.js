@@ -305,10 +305,11 @@ async function reconcileRunning() {
   if (state.reconcileBusy) return;
   state.reconcileBusy = true;
   try {
-    const [running, blocked, all] = await Promise.all([
+    const [running, blocked, all, features] = await Promise.all([
       cli(["task", "list", "--status", "running"]).catch(() => []),
       cli(["task", "list", "--status", "blocked"]).catch(() => []),
       cli(["task", "list"]).catch(() => []),
+      cli(["feature", "list"]).catch(() => []),
     ]);
     // A reconciler error can mark a task blocked while its OpenCode session is
     // still active. Include blocked tasks so the session remains authoritative.
@@ -325,6 +326,12 @@ async function reconcileRunning() {
       if (!parent) continue;
       if (!childrenByParent.has(parent)) childrenByParent.set(parent, []);
       childrenByParent.get(parent).push(row);
+    }
+    // The state of every feature. A task that owns a merged feature is
+    // finished work: it moves to the archive like its steps.
+    const featureStatus = new Map();
+    for (const f of Array.isArray(features) ? features : []) {
+      featureStatus.set(String(f.id), String(f.status || ""));
     }
     const apiBase = ocApiBase();
     const H = ocAuthHeaders();
@@ -472,6 +479,20 @@ async function reconcileRunning() {
           if (childActive || childJustEnded) {
             next = "running";
           }
+        }
+        // A task of a merged feature is finished work. It moves to the
+        // archive like the other steps, so the board shows only the open
+        // work. The same holds for the owner of the feature: its steps are
+        // merged, so the feature is done.
+        if (next === "done") {
+          const own = String(t.featureId || t.feature_id || "").trim();
+          const childFeatures = (childrenByParent.get(String(sid)) || [])
+            .map((c) => String(c.featureId || c.feature_id || "").trim())
+            .filter(Boolean);
+          const ownMerged = !!own && featureStatus.get(own) === "done";
+          const childrenMerged = childFeatures.length > 0
+            && childFeatures.every((fid) => featureStatus.get(fid) === "done");
+          if (ownMerged || childrenMerged) next = "archived";
         }
         // Last assistant text (skip user/system) → result, unless already set.
         let resultText = "";
@@ -1510,6 +1531,14 @@ function kanbanApi() {
             const b = await readBody(req);
             const argv = ["feature", "merge", parts[1]];
             if (b?.target) argv.push("--target", String(b.target));
+            return json(res, 200, await cli(argv));
+          }
+          // PATCH /api/kanban/features/:id → update the feature (status, merge note)
+          if (req.method === "PATCH" && parts[0] === "features" && parts.length === 2) {
+            const b = await readBody(req);
+            const argv = ["feature", "update", parts[1], "--actor", "board"];
+            if (b?.status) argv.push("--status", String(b.status));
+            if (b?.mergeNote !== undefined) argv.push("--merge-note", String(b.mergeNote));
             return json(res, 200, await cli(argv));
           }
           // DELETE /api/kanban/features/:id → {ok:true,deleted}

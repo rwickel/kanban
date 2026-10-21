@@ -213,6 +213,27 @@ test('kanban.py feature worktree', async (t) => {
   // delegate starts the task itself, so it must leave a phase behind. Without
   // it the tab starts a second session for the same task: two features, two
   // steps, two merges.
+  await t.test('a merged feature moves its completed tasks to the archive', () => {
+    const F = runJson(['feature', 'create', '--project', P, '--title', 'Feature E']).id;
+    const list = runJson(['feature', 'list', '--project', P]);
+    const feature = list.find((x) => x.id === F);
+    const step = runJson(['task', 'create', '--project', P, '--title', 'Step E1', '--feature', F]).id;
+    const open = runJson(['task', 'create', '--project', P, '--title', 'Step E2', '--feature', F]).id;
+    // The step is finished, the other one still waits.
+    writeFileSync(join(feature.worktreePath, 'e.txt'), 'E\n');
+    git(feature.worktreePath, 'add', '.');
+    git(feature.worktreePath, 'commit', '-m', 'E');
+    runJson(['task', 'move', step, 'done']);
+    const merged = runJson(['feature', 'merge', F]);
+    assert.equal(merged.merged, true);
+    // The completed step is archived.
+    assert.equal(runJson(['task', 'show', step]).status, 'archived');
+    // The step that never ran stays visible.
+    assert.equal(runJson(['task', 'show', open]).status, 'backlog');
+    // The result of the step is kept.
+    assert.equal(runJson(['task', 'show', step]).title, 'Step E1');
+  });
+
   await t.test('a delegate keeps the startup phase when it starts the task', () => {
     const task = runJson(['task', 'create', '--project', P, '--title', 'Delegated step']);
     // A normal move resets the phase: the board starts the task.
