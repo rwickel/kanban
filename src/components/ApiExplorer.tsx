@@ -17,7 +17,7 @@ interface ProbeResult {
 }
 
 const FALLBACK_ROUTES: DocRoute[] = [
-  { method: 'GET', path: '/api/kanban/tasks', query: 'projectId?, status=backlog|running|done|blocked?', returns: 'Task[]' },
+  { method: 'GET', path: '/api/kanban/tasks', query: 'projectId?, status=backlog|running|done|blocked|archived?', returns: 'Task[]' },
   { method: 'GET', path: '/api/kanban/tasks/:id', returns: 'Task (404 when missing)' },
   { method: 'POST', path: '/api/kanban/tasks', body: 'projectId*, title*, description?, status?, priority?, id?, agentId?, agentName?, sessionId?, modelId?, modelProviderID?, startupPhase?, startupError?', returns: 'Task' },
   { method: 'PATCH', path: '/api/kanban/tasks/:id', body: 'title?, description?, status?, priority?, agentId?, agentName?, sessionId?, modelId?, modelProviderID?, startupPhase?, startupError?', returns: 'Task' },

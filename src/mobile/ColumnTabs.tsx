@@ -1,11 +1,12 @@
 import { TaskStatus } from '../types';
-import { Inbox, Loader, CheckCircle2, AlertOctagon } from 'lucide-react';
+import { Inbox, Loader, CheckCircle2, AlertOctagon, Archive } from 'lucide-react';
 
 const ITEMS: { status: TaskStatus; label: string; short: string; Icon: typeof Inbox }[] = [
   { status: 'backlog', label: 'Backlog', short: 'Back', Icon: Inbox },
   { status: 'running', label: 'Running', short: 'Run', Icon: Loader },
   { status: 'done', label: 'Done', short: 'Done', Icon: CheckCircle2 },
   { status: 'blocked', label: 'Blocked', short: 'Block', Icon: AlertOctagon },
+  { status: 'archived', label: 'Archived', short: 'Arch', Icon: Archive },
 ];
 
 export default function ColumnTabs({

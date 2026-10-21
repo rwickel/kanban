@@ -1,4 +1,4 @@
-export type TaskStatus = 'backlog' | 'running' | 'done' | 'blocked';
+export type TaskStatus = 'backlog' | 'running' | 'done' | 'blocked' | 'archived';
 export type TaskPriority = 'low' | 'medium' | 'high' | 'critical';
 
 export interface Task {

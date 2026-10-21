@@ -134,7 +134,7 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
     );
   };
   const depStatusCls: Record<TaskStatus, string> = {
-    backlog: 'p-neutral', running: 'p-blue', done: 'p-green', blocked: 'p-red',
+    backlog: 'p-neutral', running: 'p-blue', done: 'p-green', blocked: 'p-red', archived: 'p-neutral',
   };
 
   // Worktree actions: merge the task branch into the project branch, or drop

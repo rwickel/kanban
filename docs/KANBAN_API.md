@@ -83,7 +83,12 @@ Invoke-WebRequest "http://localhost:3001/api/kanban/tasks?projectId=6abb0e48-adf
   Select-Object -ExpandProperty Content
 ```
 
-`status` must be `backlog|running|done|blocked`, else `400 { ok:false, error:"invalid status" }`.
+`status` must be `backlog|running|done|blocked|archived`, else `400 { ok:false, error:"invalid status" }`.
+
+`archived` is the fifth board column. An archived task keeps its result and its
+history. The board does not start it, does not watch it, and does not deliver
+its result to a parent session any more. Move a task there to take it out of
+the daily view; the worktree and the branch stay until you remove them.
 Returns `Task[]`:
 
 ```json

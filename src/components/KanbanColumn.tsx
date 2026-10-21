@@ -1,7 +1,7 @@
 import { Task, TaskStatus } from '../types';
 import TaskCard from './TaskCard';
 import { useDroppable } from '@dnd-kit/core';
-import { Plus, Inbox, Loader, CheckCircle2, AlertOctagon, LucideIcon } from 'lucide-react';
+import { Plus, Inbox, Loader, CheckCircle2, AlertOctagon, Archive, LucideIcon } from 'lucide-react';
 
 interface KanbanColumnProps {
   status: TaskStatus;
@@ -22,6 +22,7 @@ const statusDot: Record<TaskStatus, string> = {
   running: 'var(--amber)',
   done: 'var(--emerald)',
   blocked: 'var(--danger)',
+  archived: 'var(--muted)',
 };
 
 export const columnIcons: Record<TaskStatus, LucideIcon> = {
@@ -29,6 +30,7 @@ export const columnIcons: Record<TaskStatus, LucideIcon> = {
   running: Loader,
   done: CheckCircle2,
   blocked: AlertOctagon,
+  archived: Archive,
 };
 
 const PRIO_ORDER: Record<Task['priority'], number> = { critical: 0, high: 1, medium: 2, low: 3 };

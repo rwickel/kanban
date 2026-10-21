@@ -41,6 +41,7 @@ export default function MobileApp() {
     running: tasks.running.length,
     done: tasks.done.length,
     blocked: tasks.blocked.length,
+    archived: tasks.archived.length,
   };
   const PRIO_ORDER: Record<Task['priority'], number> = { critical: 0, high: 1, medium: 2, low: 3 };
   const visible = [...tasks[activeStatus]].sort((a, b) => PRIO_ORDER[a.priority] - PRIO_ORDER[b.priority]);

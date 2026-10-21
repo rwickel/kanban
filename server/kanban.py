@@ -77,7 +77,7 @@ for _k in ("KANBAN_PROJECTS_ROOT", "KANBAN_WORKTREES_ROOT"):
         except Exception:
             pass
 
-VALID_STATUSES = ("backlog", "running", "done", "blocked")
+VALID_STATUSES = ("backlog", "running", "done", "blocked", "archived")
 VALID_PRIORITIES = ("low", "medium", "high", "critical")
 
 SCHEMA = """

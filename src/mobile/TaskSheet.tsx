@@ -1,11 +1,12 @@
 import { Task, TaskStatus, TaskPriority } from '../types';
-import { X, MessageSquare, Pencil, Trash2, Loader2, CheckCircle2, AlertOctagon, Inbox } from 'lucide-react';
+import { X, MessageSquare, Pencil, Trash2, Loader2, CheckCircle2, AlertOctagon, Archive, Inbox } from 'lucide-react';
 
 const STATUSES: { status: TaskStatus; label: string; Icon: typeof Inbox }[] = [
   { status: 'backlog', label: 'Backlog', Icon: Inbox },
   { status: 'running', label: 'Running', Icon: Loader2 },
   { status: 'done', label: 'Done', Icon: CheckCircle2 },
   { status: 'blocked', label: 'Blocked', Icon: AlertOctagon },
+  { status: 'archived', label: 'Archived', Icon: Archive },
 ];
 
 const prioCls: Record<TaskPriority, string> = {

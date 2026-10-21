@@ -70,6 +70,7 @@ const COLUMNS: { status: TaskStatus; title: string }[] = [
   { status: 'running', title: 'In Progress' },
   { status: 'done', title: 'Complete' },
   { status: 'blocked', title: 'Blocked' },
+  { status: 'archived', title: 'Archived' },
 ];
 
 // Customizable agent prompt files (prompts/final-message-style.md and
@@ -87,6 +88,7 @@ export default function App() {
     running: [],
     done: [],
     blocked: [],
+    archived: [],
   });
   const [agents, setAgents] = useState<Agent[]>([]);
   const [isConnected, setIsConnected] = useState(false);
@@ -188,9 +190,10 @@ export default function App() {
         running: guarded.filter((t) => t.status === 'running'),
         done: guarded.filter((t) => t.status === 'done'),
         blocked: guarded.filter((t) => t.status === 'blocked'),
+        archived: guarded.filter((t) => t.status === 'archived'),
       });
     } else {
-      setTasks({ backlog: [], running: [], done: [], blocked: [] });
+      setTasks({ backlog: [], running: [], done: [], blocked: [], archived: [] });
     }
   }, []);
 
@@ -954,6 +957,7 @@ export default function App() {
       running: all.filter((t) => t.status === 'running'),
       done: all.filter((t) => t.status === 'done'),
       blocked: all.filter((t) => t.status === 'blocked'),
+      archived: all.filter((t) => t.status === 'archived'),
     });
   };
 
@@ -1305,7 +1309,7 @@ export default function App() {
         onSave={handleSaveTask}
         task={editingTask}
         availableAgents={availableAgents}
-        tasks={[...tasks.backlog, ...tasks.running, ...tasks.done, ...tasks.blocked]
+        tasks={[...tasks.backlog, ...tasks.running, ...tasks.done, ...tasks.blocked, ...tasks.archived]
           .filter((t) => !activeProjectId || t.projectId === activeProjectId)}
         allowedModels={activeProject?.allowedModels}
       />

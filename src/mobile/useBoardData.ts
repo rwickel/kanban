@@ -39,7 +39,7 @@ export function useBoardData() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectIdState] = useState<string | null>(null);
   const [tasks, setTasks] = useState<Record<TaskStatus, Task[]>>({
-    backlog: [], running: [], done: [], blocked: [],
+    backlog: [], running: [], done: [], blocked: [], archived: [],
   });
   const [agents, setAgents] = useState<Agent[]>([]);
   const [isConnected, setIsConnected] = useState(false);
@@ -127,9 +127,10 @@ export function useBoardData() {
         running: guarded.filter((t) => t.status === 'running'),
         done: guarded.filter((t) => t.status === 'done'),
         blocked: guarded.filter((t) => t.status === 'blocked'),
+        archived: guarded.filter((t) => t.status === 'archived'),
       });
     } else {
-      setTasks({ backlog: [], running: [], done: [], blocked: [] });
+      setTasks({ backlog: [], running: [], done: [], blocked: [], archived: [] });
     }
   }, []);
 
@@ -441,6 +442,7 @@ export function useBoardData() {
       running: all.filter((t) => t.status === 'running'),
       done: all.filter((t) => t.status === 'done'),
       blocked: all.filter((t) => t.status === 'blocked'),
+      archived: all.filter((t) => t.status === 'archived'),
     });
   }, []);
 
