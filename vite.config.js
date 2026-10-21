@@ -344,10 +344,13 @@ async function reconcileRunning() {
         // An idle session is WAITING for the next message. That is normal for a
         // delegating agent: it ends its turn and the board delivers the result
         // of the sub-task later. Only a session that is mid-turn and silent is
-        // stuck.
+        // stuck. A task with running sub-tasks waits for them, so it is never
+        // stale either.
         const sessionIdle = ltype === "idle";
+        const children = childrenByParent.get(String(sid)) || [];
+        const childRunning = children.some((c) => c.status === "running");
         const stale = t.status === "running" && !succeeded && !failLike && !sessionFailed && !sessionIdle &&
-          lastActivity > 0 && Date.now() - lastActivity >= STALE_SESSION_MS;
+          !childRunning && lastActivity > 0 && Date.now() - lastActivity >= STALE_SESSION_MS;
         if (stale) {
           await interruptSession(apiBase, H, sid).catch(() => null);
           await cli([
@@ -382,7 +385,6 @@ async function reconcileRunning() {
         // Its sub-tasks carry the work. The task stays running and waits for
         // the board to deliver their results into its session.
         if (next === "blocked" && succeeded && !completionSignal.includes("KANBAN_TASK_INCOMPLETE")) {
-          const children = childrenByParent.get(String(sid)) || [];
           const waiting = children.filter((c) => c.status === "running" || c.status === "backlog");
           if (waiting.length > 0) {
             next = "running";

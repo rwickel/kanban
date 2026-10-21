@@ -218,6 +218,18 @@ test('kanban.py task worktree isolation', async (t) => {
     assert.match(git(REPO, 'status', '--porcelain').stdout, /coding-orchestrator\.md/);
   });
 
+  await t.test('the main checkout is never removed as a worktree', () => {
+    // A wrong path must never reach `git worktree remove`: that command can
+    // delete the files of the main repository.
+    const task = runJson(['task', 'create', '--project', P, '--title', 'No worktree']).id;
+    const removed = runJson(['worktree', 'remove', task, '--force']);
+    assert.equal(removed.ok, false);
+    assert.match(removed.error, /no worktree folder|not registered/);
+    // The repository still has its files.
+    assert.equal(existsSync(join(REPO, 'README.md')), true);
+    assert.equal(git(REPO, 'status', '--porcelain').stdout.includes(' D'), false);
+  });
+
   await t.test('a task in a project without git fails with a clear error', () => {
     mkdirSync(join(ROOT, 'plain'), { recursive: true });
     const plain = runJson(['project', 'create', '--name', 'Plain', '--folder', 'plain']);

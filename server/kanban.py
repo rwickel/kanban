@@ -619,9 +619,7 @@ def merge_worktree(task, project, target=None, cleanup=False):
                     "branch": branch, "target": target}
         if cleanup:
             path = (task["worktree_path"] if "worktree_path" in task.keys() else "") or ""
-            if path:
-                git_run(top, "worktree", "remove", "--force", path)
-                git_run(top, "worktree", "prune")
+            remove_worktree(top, path, force=True)
     return {"ok": True, "merged": True, "conflict": False, "files": [],
             "error": None, "branch": branch, "target": target}
 
@@ -661,17 +659,16 @@ def cmd_worktree_remove(args):
     branch = (task["worktree_branch"] if "worktree_branch" in task.keys() else "") or ""
     removed = False
     error = None
-    if top and path:
-        argv = ["worktree", "remove"]
-        if args.force:
-            argv.append("--force")
-        argv.append(path)
-        code, out, err = git_run(top, *argv)
-        if code != 0:
-            error = (err or out).strip()[:400]
-        else:
-            removed = True
-        git_run(top, "worktree", "prune")
+    # Safety: only a folder that git knows as a worktree of this repo may be
+    # removed. An empty or unknown path must never reach git: `worktree remove`
+    # with the wrong argument can delete the checkout of the main repository.
+    known = [p for p in registered_worktrees(top) if same_path(p, path)] if (top and path) else []
+    if top and path and known and not same_path(known[0], top):
+        removed, error = remove_worktree(top, path, force=args.force)
+    elif path and not known:
+        error = "The worktree folder is not registered in this repository. Nothing was removed."
+    elif not path:
+        error = "The task has no worktree folder. Nothing was removed."
     if args.delete_branch and top and branch:
         git_run(top, "branch", "-D", branch)
     set_worktree_fields(conn, args.task_id, state="removed", note=error)
@@ -710,6 +707,33 @@ def cmd_worktree_list(args):
     conn.close()
 
 
+def remove_worktree(top, path, force=False):
+    """Remove a worktree folder. Safety first.
+
+    Only a folder that git knows as a worktree of this repo may be removed, and
+    never the main checkout. `git worktree remove` with a wrong argument can
+    delete the files of the main repository.
+
+    Returns (removed, error).
+    """
+    if not top or not path:
+        return False, "no worktree folder"
+    known = [p for p in registered_worktrees(top) if same_path(p, path)]
+    if not known:
+        return False, "The worktree folder is not registered in this repository. Nothing was removed."
+    if same_path(known[0], top):
+        return False, "The main checkout cannot be removed as a worktree."
+    argv = ["worktree", "remove"]
+    if force:
+        argv.append("--force")
+    argv.append(path)
+    code, out, err = git_run(top, *argv)
+    git_run(top, "worktree", "prune")
+    if code != 0:
+        return False, (err or out).strip()[:400]
+    return True, None
+
+
 def cleanup_worktree(repo, path, branch):
     """Remove the worktree folder after a successful merge.
 
@@ -724,10 +748,9 @@ def cleanup_worktree(repo, path, branch):
         return False, "cannot read the worktree state"
     if out.strip():
         return False, "worktree kept: it still has uncommitted changes"
-    code, _, err = git_run(top, "worktree", "remove", path)
-    if code != 0:
-        return False, f"worktree kept: {(err or '').strip()[:200]}"
-    git_run(top, "worktree", "prune")
+    removed, error = remove_worktree(top, path, force=True)
+    if not removed:
+        return False, f"worktree kept: {error or 'the folder could not be removed'}"
     if branch:
         git_run(top, "branch", "-D", branch)
     return True, "worktree removed"
@@ -934,13 +957,8 @@ def cmd_feature_delete(args):
     if project and path:
         top = git_toplevel((project["path"] or "").strip())
         if top:
-            code, out, err = git_run(top, "worktree", "remove", "--force", path)
-            if code != 0:
-                error = (err or out).strip()[:400]
-            else:
-                removed = True
-            git_run(top, "worktree", "prune")
-            if branch and error is None:
+            removed, error = remove_worktree(top, path, force=True)
+            if removed and branch:
                 git_run(top, "branch", "-D", branch)
     conn.execute("DELETE FROM features WHERE id = ?", (args.feature_id,))
     log_event(conn, None, args.actor, "feature.deleted",
@@ -1796,8 +1814,7 @@ def cmd_task_delete(args):
             if project:
                 top = git_toplevel((project["path"] or "").strip())
                 if top:
-                    git_run(top, "worktree", "remove", "--force", wt_path)
-                    git_run(top, "worktree", "prune")
+                    remove_worktree(top, wt_path, force=True)
         except Exception:
             pass
     # Referential cleanup: other tasks must not keep pointing at a dead id.
