@@ -15,10 +15,20 @@
 - Agent: planner
 - Model: `minimax/minimax-m3.1-flash:free` (provider `openrouter`)
 - Plan file: `docs/TESTS_STREAM_HOOK_MOBILE_CONTROLLER_ASSISTANT_SESSION_CONCEPT.md`
-- Plan commit: `dca3a11` on the branch `kanban/feature-171f5ca9`
+- Plan commits: `dca3a11` (the plan) and `ecd2a10` (the branch base notes and
+  the notes for the integrator) on the branch `kanban/feature-171f5ca9`
 
 The board marked the first planner session as stale. The plan file was already
-committed at that moment. The board then started the same step again.
+committed at that moment. The board then started the same step again. The
+planner checked the plan, added the notes about the branch base and committed
+them.
+
+The board card of the concept step still shows `blocked`. The reason is the
+stale check of the board reconciler. It reads the first 30 messages of the
+session in the order "oldest first". After ten minutes of session life it
+always sees the start of the session. It then reports the step as stale. The
+planner session is alive and the plan is committed. The board card also holds
+the result text of this step.
 
 ## What the plan covers
 
@@ -53,3 +63,7 @@ The plan requires these checks at the end of the feature.
 
 This task ends after the concept step. The board starts the other steps.
 The integrator merges the branch `kanban/feature-171f5ca9` into `main`.
+
+The plan holds notes for the integrator. The merge will report a conflict in
+`src/mobile/useBoardData.ts`. The integrator keeps the part of the feature and
+the worktree isolation of the project branch.
