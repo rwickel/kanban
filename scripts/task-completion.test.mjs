@@ -32,3 +32,25 @@ test("the completion marker wins over a session that fails afterwards", () => {
     { status: "blocked", reason: "agent reported incomplete work" },
   )
 })
+
+test("the marker must be the last line of the message", () => {
+  // An agent that quotes the result of another task (which ends with the
+  // marker) must not close its own task with the quoted marker.
+  const quoted = [
+    "The implementation step is done. The coder reported:",
+    "",
+    "> All checks pass.",
+    "> KANBAN_TASK_COMPLETE",
+    "",
+    "The sync found a conflict. The coder resolves it.",
+  ].join("\n");
+  assert.deepEqual(
+    completionStatus({ succeeded: true, kind: "oneshot", finalAssistantText: quoted }),
+    { status: "blocked", reason: "completion was not verified" },
+  );
+  // The same marker on the last line closes the task.
+  assert.deepEqual(
+    completionStatus({ succeeded: true, kind: "oneshot", finalAssistantText: "All done.\nKANBAN_TASK_COMPLETE" }),
+    { status: "done", reason: "explicitly complete" },
+  )
+})
