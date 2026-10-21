@@ -430,20 +430,18 @@ export async function getTaskWorktree(taskId: string): Promise<TaskWorktree> {
 }
 
 /** Create the worktree of a task. Returns null when the project has no git repo.
- *  `reused` is true when the worktree already existed (same folder, same branch). */
+ *  `reused` is true when the worktree already existed (same folder, same branch).
+ *  A failed create throws an Error with the server text. The caller must show it:
+ *  a silent fallback hides a broken repo state from the user. */
 export async function createTaskWorktree(taskId: string): Promise<{ path: string; branch: string; base?: string | null; reused: boolean } | null> {
-  try {
-    const info = await api<{ ok: boolean; path: string; branch: string; base?: string | null; reused?: boolean }>(
-      `/api/kanban/tasks/${encodeURIComponent(taskId)}/worktree`,
-      { method: 'POST' },
-    );
-    if (info?.ok && info.path) {
-      return { path: info.path, branch: info.branch, base: info.base ?? null, reused: info.reused === true };
-    }
-    return null;
-  } catch {
-    return null;
+  const info = await api<{ ok: boolean; path: string; branch: string; base?: string | null; reused?: boolean }>(
+    `/api/kanban/tasks/${encodeURIComponent(taskId)}/worktree`,
+    { method: 'POST' },
+  );
+  if (info?.ok && info.path) {
+    return { path: info.path, branch: info.branch, base: info.base ?? null, reused: info.reused === true };
   }
+  return null;
 }
 
 /** Merge the task branch into the project branch. Returns the server report. */

@@ -212,9 +212,19 @@ export function useBoardData() {
     const activeProj = projects.find((p) => p.id === task.projectId);
     // Isolation: the task works in its own git worktree (see App.tsx).
     let worktree: { path: string; branch: string; base?: string | null; reused: boolean } | null = null;
+    let worktreeError = '';
     try {
       worktree = await createTaskWorktree(task.id);
-    } catch { /* no git repo or server down — use the project folder */ }
+    } catch (e) {
+      // No worktree: the task runs in the project folder. The card gets a note,
+      // so a broken repo state does not stay hidden.
+      worktreeError = `No git worktree: ${String((e as Error)?.message ?? e).slice(0, 300)}`;
+    }
+    if (worktreeError) {
+      task = { ...task, worktreeNote: worktreeError };
+      await updateTask(task.id, { worktreeNote: worktreeError } as Partial<Task>).catch(() => {});
+      upsertTaskInState(task);
+    }
     if (worktree) {
       task = { ...task, worktreePath: worktree.path, worktreeBranch: worktree.branch, worktreeState: 'active' };
       upsertTaskInState(task);

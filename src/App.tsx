@@ -488,7 +488,12 @@ export default function App() {
     let worktree: { path: string; branch: string; base?: string | null; reused: boolean } | null = null;
     try {
       worktree = await createTaskWorktree(task.id);
-    } catch { /* no git repo or server down — use the project folder */ }
+    } catch (e) {
+      // No worktree: the task runs in the project folder. The user must know why,
+      // else a broken repo state stays hidden until a file conflict shows up.
+      const why = String((e as Error)?.message ?? e).slice(0, 300);
+      alert(`No git worktree for this task:\n${why}\n\nThe task runs in the project folder.`);
+    }
     if (worktree) {
       task = { ...task, worktreePath: worktree.path, worktreeBranch: worktree.branch, worktreeState: 'active' };
       upsertTaskInState(task);

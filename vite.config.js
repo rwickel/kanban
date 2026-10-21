@@ -120,6 +120,23 @@ async function cli(args) {
   return JSON.parse((stdout || "null").trim() || "null");
 }
 
+// Map a CLI error text to an HTTP status code.
+// The browser needs the status code and the text. A bare 500 hides the cause.
+function cliErrorStatus(msg) {
+  const m = String(msg || "");
+  // Dependency validation errors are user input problems → 400.
+  if (/^(Invalid blocked-by|Self-dependency rejected|Dependency cycle rejected|Too many blocked-by)/.test(m.trim()))
+    return 400;
+  // Only map missing DB rows to 404. Git stderr often contains
+  // "Repository not found", which is a 500 (clone failed), not a
+  // missing route. Mapping it to 404 masks the real git error.
+  if (/(project|task|feature) not found/i.test(m)) return 404;
+  // Git and worktree problems are a conflict with the current repo state.
+  if (/git worktree add failed|worktree folder exists|not a git repository|project path does not exist|feature worktree is busy/i.test(m))
+    return 409;
+  return 500;
+}
+
 async function validateTaskModel(projectId, provider, model) {
   if (!provider && !model) return;
   if (!provider || !model) throw Object.assign(new Error("modelId and modelProviderID must be provided together"), { status: 400 });
@@ -1733,14 +1750,7 @@ function kanbanApi() {
           return json(res, 404, { ok: false, error: "unknown kanban route" });
         } catch (err) {
           const msg = String(err?.stderr || err?.message || err);
-          // Dependency validation errors are user input problems → 400, not 500.
-          if (/^(Invalid blocked-by|Self-dependency rejected|Dependency cycle rejected|Too many blocked-by)/.test(msg.trim()))
-            return json(res, 400, { ok: false, error: msg });
-          // Only map missing DB rows to 404 — git stderr often contains
-          // "Repository not found", which is a 500 (clone failed), not a
-          // missing route. Mapping it to 404 masks the real git error.
-          if (/(project|task) not found/i.test(msg)) return json(res, 404, { ok: false, error: msg });
-          return json(res, 500, { ok: false, error: msg });
+          return json(res, cliErrorStatus(msg), { ok: false, error: msg });
         }
       });
     },
