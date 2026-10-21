@@ -314,6 +314,20 @@ async function reconcileRunning() {
     }
     const apiBase = ocApiBase();
     const H = ocAuthHeaders();
+    // The worktree state must be true. A task whose worktree folder is gone
+    // (the merge removed it, or a human deleted it) is "removed", not "active".
+    for (const t of (Array.isArray(all) ? all : [])) {
+      const path = t.worktreePath || t.worktree_path;
+      const state = t.worktreeState || t.worktree_state;
+      if (!path || state === "removed") continue;
+      if (!existsSync(path)) {
+        await cli([
+          "task", "update", t.id, "--actor", "board", "--worktree-state", "removed",
+          "--worktree-note",
+          "The worktree folder is gone. The branch may still exist in the repository.",
+        ]).catch(() => null);
+      }
+    }
     for (const t of rows) {
       try {
         const sid = t.sessionId || t.session_id;

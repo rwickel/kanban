@@ -1720,6 +1720,7 @@ def cmd_task_update(args):
         ("notified_at", getattr(args, "notified_at", None)),
         ("due_date", getattr(args, "due_date", None)),
         ("worktree_note", getattr(args, "worktree_note", None)),
+        ("worktree_state", getattr(args, "worktree_state", None)),
     ]
     for col, val in mapping:
         if val is not None:
@@ -2231,6 +2232,7 @@ def main(argv=None):
     tu.add_argument("--due-date", default=None)
     tu.add_argument("--blocked-by", default=None, help="Comma-separated predecessor ids; '' clears the list (validated: exists, same project, no self/cycle)")
     tu.add_argument("--worktree-note", default=None, help="Note about the worktree (merge result, session loss, conflict)")
+    tu.add_argument("--worktree-state", default=None, help="Worktree state: active | merged | conflict | pending | removed")
     tu.add_argument("--actor", default="cli")
     tu.set_defaults(func=cmd_task_update)
 
