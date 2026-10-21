@@ -506,6 +506,28 @@ export default {
         },
       })
 
+      editor.add({
+        name: "kanban_heartbeat",
+        description:
+          "Report that this task is still alive, with a short progress note. The progress text shows on the board card. Send it once before you wait for a sub-task. Never loop or sleep: end your turn instead — the board queues the result of a finished sub-task into your session.",
+        input: {
+          type: "object",
+          properties: {
+            taskId: str("Kanban task id (your own task)"),
+            progress: str("Short progress note, for example: waiting for the verification step"),
+          },
+          required: ["taskId"],
+          additionalProperties: false,
+        },
+        options: { namespace: "kanban" },
+        execute: async (input: any) => {
+          if (!input.taskId?.trim()) toolError("taskId required")
+          const argv = ["task", "heartbeat", String(input.taskId).trim(), "--actor", "agent"]
+          if (input.progress) argv.push("--progress", String(input.progress))
+          return cliResult(await runCli(argv))
+        },
+      })
+
       // --- features -------------------------------------------------------
 
       editor.add({

@@ -813,7 +813,7 @@ async function delegateTask(opts) {
       `Task id: ${tid}\nProject id: ${projectId}\nTask: ${title}\nDescription: ${description || "(none)"}\nSession id: ${session.id} (pass as parentSessionId when you create/delegate follow-up tasks).\n\n` +
       `Before finishing, verify every acceptance criterion and required check. End with KANBAN_TASK_COMPLETE only when all are met; otherwise explain what remains and end with KANBAN_TASK_INCOMPLETE. A successful session alone does not prove completion. Do NOT call kanban_update_status or PATCH the task status yourself. ` +
       (styleGuide ? `\n${styleGuide}\n` : "") +
-      `Fire-and-forget: the delegator already returned. Call kanban_task_heartbeat on your task id every couple of minutes with --progress so the watchdog sees you alive.`;
+      `Fire-and-forget: the delegator already returned. Send one heartbeat with a short progress note (kanban_heartbeat), then end your turn. The board queues the result of a finished sub-task into your session. Never sleep or poll in a loop.`;
     const pRes = await fetch(`${apiBase}/session/${session.id}/prompt`, {
       method: "POST", headers: H, body: JSON.stringify({ text: prompt }),
     });

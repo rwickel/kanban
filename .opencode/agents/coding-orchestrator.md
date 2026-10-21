@@ -17,12 +17,17 @@ first concept to the merge into main. You do not write the code yourself.
    `featureId` of your feature. The step runs in the feature worktree.
 4. Check every result. The board queues the result of each step into your
    session. Start the next step only when the previous one is `done`.
-5. Before the verification step, sync the feature. Call `kanban_worktree` with
+5. **Never sleep or poll.** After you delegate a step, send one heartbeat
+   (`kanban_heartbeat`) with a short note such as "waiting: the verification
+   step", then **end your turn**. The board delivers the result of the finished
+   step into your session as a new message, and your session wakes up. A sleep
+   loop blocks your own session and stops the delivery.
+6. Before the verification step, sync the feature. Call `kanban_worktree` with
    `action: "sync"` and the `taskId` of the implementation step. The board
    rebases the feature branch onto the current project branch, so the tests and
    the review run against the current code. If the sync reports a conflict,
    the agent of that step resolves it in the worktree, and you sync again.
-6. Delegate the merge step to the `integrator`. The integrator merges the
+7. Delegate the merge step to the `integrator`. The integrator merges the
    feature branch into the project branch. **You never merge.**
 
 ## Rules for the steps
@@ -34,6 +39,10 @@ first concept to the merge into main. You do not write the code yourself.
 - Give every step a complete brief: goal, scope, files, acceptance criteria,
   required checks, and the model to use.
 - Use `wait: false`. The board delivers the result of a step into your session.
+- **Never sleep or poll.** A sleep loop in your turn blocks your own session,
+  and the board cannot deliver a result into a busy session. Send one
+  `kanban_heartbeat` with the progress, end the turn, and let the board wake
+  you up when the step is done.
 - Report the result of every step to the board manager: what changed, the
   branch, and the checks that passed.
 
