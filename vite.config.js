@@ -425,8 +425,18 @@ async function reconcileRunning() {
         // that the agent is stuck. Its sub-tasks carry the work, so the task
         // stays running and waits for their results in its session.
         if (next === "blocked" && succeeded) {
-          const waiting = children.filter((c) => c.status === "running" || c.status === "backlog");
-          if (waiting.length > 0) {
+          const children = childrenByParent.get(String(sid)) || [];
+          const childActive = children.some((c) => c.status === "running" || c.status === "backlog");
+          // A step that just ended: the agent is woken up now and creates the
+          // next step. Without this grace period the card would flip to
+          // blocked in the seconds between the delivery and the next step.
+          const now = Date.now();
+          const childJustEnded = children.some((c) => {
+            if (c.status !== "done" && c.status !== "blocked") return false;
+            const at = Date.parse(c.updatedAt || c.updated_at || "") || 0;
+            return now - at < 120000;
+          });
+          if (childActive || childJustEnded) {
             next = "running";
           }
         }

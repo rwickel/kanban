@@ -138,21 +138,43 @@ The board watches every running task and reads its OpenCode session.
 | Session state | The board does |
 |---|---|
 | the turn ended with `KANBAN_TASK_COMPLETE` | the task is `done` |
-| the turn ended without the marker | the task is `blocked` — **unless** the task has sub-tasks that still run |
+| the turn ended with `KANBAN_TASK_INCOMPLETE` | the task is `blocked` — **unless** it has sub-tasks that still run |
+| the turn ended without the marker | the task is `blocked` — **unless** it has sub-tasks that still run |
 | the turn ended without the marker, and sub-tasks are running | the task stays `running` and waits for their results |
 | the session failed | the task is `blocked` with the error of the session |
+| the session was interrupted or aborted | the task is `blocked`. It is **not** re-armed |
 | the session is idle and waits for the next message | **nothing**. An idle session is waiting, not stuck. |
 | the session works and is silent for 10 minutes | the task is `blocked` (stale) and the session is interrupted |
 | the task is `blocked` and its session still works | the task goes back to `running` |
 
-Two rules matter for the orchestration:
+Three rules matter for the orchestration:
 
 - **A delegating agent ends its turn before the delegated work is done.** The
   board keeps such a task `running` as long as its sub-tasks run. The
   orchestrator wakes up when the board queues their results into its session.
+  It must not write `KANBAN_TASK_INCOMPLETE` while it waits: the marker means
+  the work is really not done.
+- **A delegating agent must not sleep or poll.** A sleep loop blocks its own
+  session, and the board cannot deliver a result into a busy session. It sends
+  one `kanban_heartbeat` with the progress and ends the turn.
 - **A task that stays `running` keeps its startup handshake.** The board does
   not start it a second time. Only a real status change (for example
   `backlog → running`) resets the handshake and starts the task.
+
+## The delivery: exactly once
+
+The board delivers the result of a finished task into the parent session
+(every 15 seconds). The rules that keep it to one delivery:
+
+- **One delivery loop.** The reconciler state lives on `globalThis`. A config
+  reload replaces the loop instead of adding a second one. With two loops the
+  same result was delivered again and again.
+- **Mark before the post.** The task is stamped as delivered before the
+  message is posted, so two passes can never post it twice. If the post fails,
+  the stamp is cleared (`task notify-unmark`) and the next pass tries again.
+- **A stopped session is not re-armed.** An interrupted session is final. If
+  the task were re-armed, it would flip between `blocked` and `running`, and
+  every flip would deliver the result again.
 
 ## Data model
 
@@ -437,9 +459,10 @@ A new worktree has the **committed** files only. It has no `.env`, no
 
 | Tool | Actions |
 |---|---|
-| `kanban_worktree` | `create`, `merge`, `remove`, `list` — the worktree of a task |
-| `kanban_feature` | `create`, `show`, `list`, `merge`, `delete` — the worktree of a feature |
+| `kanban_worktree` | `create`, `sync`, `merge`, `remove`, `list` - the worktree of a task |
+| `kanban_feature` | `create`, `show`, `list`, `merge`, `delete` - the worktree of a feature |
 | `kanban_delegate` | takes `featureId`, so a step runs in the feature worktree |
+| `kanban_heartbeat` | the progress of a running task ("waiting: the verification step") |
 
 **HTTP**
 
@@ -488,7 +511,7 @@ the review step is the check.
 | `server/kanban-feature.test.mjs` | 11 tests for the feature worktree |
 | `opencode-plugin/core.js` | the board CLI runs **asynchronously** (a plugin must not block the server) |
 | `opencode-plugin/delegate.js` | the delegate creates the worktree and starts the session in it; a feature step uses the feature worktree; the prompt states the worktree rules |
-| `opencode-plugin/index.ts` | the tools `kanban_worktree` and `kanban_feature`; `kanban_delegate` takes `featureId` |
+| `opencode-plugin/index.ts` | the tools `kanban_worktree`, `kanban_feature` and `kanban_heartbeat`; `kanban_delegate` takes `featureId` |
 | `scripts/linkback.mjs` | the link-back message carries the worktree block |
 | `vite.config.js` | the HTTP delegate and the task start use the worktree; the routes for tasks and features |
 | `src/App.tsx`, `src/mobile/useBoardData.ts` | a task start creates the worktree and moves an old session into it; a failed move is reported |
