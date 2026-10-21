@@ -160,6 +160,13 @@ Three rules matter for the orchestration:
 - **A task that stays `running` keeps its startup handshake.** The board does
   not start it a second time. Only a real status change (for example
   `backlog → running`) resets the handshake and starts the task.
+- **The activity of a session is the newest of three clocks.** The last
+  message, the update time of the session, and the heartbeat of the task. The
+  last message alone is not enough: a delegating agent writes its last
+  message and waits. The board delivers the result of the sub-task and the
+  agent starts to work — but with a slow model the first new message takes
+  minutes. With the old clock the board called that "stale" and interrupted
+  a working session in the middle of its turn.
 
 ## The delivery: exactly once
 
@@ -417,6 +424,36 @@ kanban_worktree { action: "sync", taskId }
 
 The orchestrator calls it after the implementation step and before the
 verification step, so the tests run against the current code.
+
+## The board does the git work
+
+The board owns the git flow of a feature (option A). It never opens a pull
+request; it merges into the local project branch and pushes it.
+
+**Before the worktree is cut** — the base branch is brought up to date:
+
+```
+git -C <repo> pull --ff-only origin main
+```
+
+A worktree that starts from an old base makes every later merge a conflict.
+The pull is best effort: a failed pull (no remote, dirty tree, no network)
+does not stop the work. The note says what happened.
+
+**After the merge** — the project branch goes to the remote:
+
+```
+git -C <repo> push origin main
+```
+
+A failed push does **not** undo the merge. The work is merged locally; the
+merge note says that the push must be repeated:
+
+> *"Merged kanban/feature-fc93ad7a into main (not pushed: no remote)"*
+
+The result of a merge carries the two fields `pushed` (true/false) and
+`pushNote` (the reason). A repo without a remote is normal: the merge works
+and the note says "no remote".
 
 ## The agent team belongs to the board
 
