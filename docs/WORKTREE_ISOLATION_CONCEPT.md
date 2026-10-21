@@ -363,6 +363,32 @@ kanban_worktree { action: "sync", taskId }
 The orchestrator calls it after the implementation step and before the
 verification step, so the tests run against the current code.
 
+## The agent team belongs to the board
+
+The team (board manager, coding orchestrator, planner, coder, testing,
+reviewer, integrator) lives in **one** place: the board's own
+`.opencode/agents/` folder.
+
+```
+C:\work\kanban\.opencode\agents\        ← the source of truth
+        │  kanban.py team install
+        ▼
+C:\Users\rober\.config\opencode\agents\ ← global OpenCode agents
+        │
+        ├── every session in every folder sees the current team
+        └── every worktree gets a copy (invisible to git)
+```
+
+- `python server/kanban.py team install` installs the team as **global**
+  OpenCode agents. The dev script runs it at every start.
+- A **project repo does not need a copy**. The team is board configuration, not
+  project code. A project may still hold its own agents; they win over the
+  global ones for the same id.
+- A worktree still gets a copy of the files, so the team is visible there and
+  the worktree is self-contained. The files are invisible to git (skip-worktree
+  plus a per-worktree exclude file), so they never enter a commit.
+- The source folder can be changed with `KANBAN_AGENT_TEAM_DIR`.
+
 ## Merge details
 
 - The merge is a plain `git merge --no-edit <branch>` in the main checkout.

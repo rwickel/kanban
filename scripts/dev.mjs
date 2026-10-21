@@ -1,10 +1,27 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import net from 'node:net';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { loadEnvFile } from './env.mjs';
 import { BRIDGE_PORT, startBridge } from './http-bridge.mjs';
 
+const HERE = dirname(fileURLToPath(import.meta.url));
+
 loadEnvFile();
+
+// The board owns the agent team. Installed as global OpenCode agents, every
+// session in every folder (project folders and worktrees) uses the current
+// definitions. A project repo does not need its own copy.
+try {
+  const python = process.env.KANBAN_PYTHON || 'python';
+  const res = spawnSync(python, [join(HERE, '..', 'server', 'kanban.py'), 'team', 'install'],
+    { encoding: 'utf8', timeout: 20000 });
+  if (res.status === 0) {
+    const out = JSON.parse(res.stdout || '{}');
+    if (out.installed?.length) console.log(`[kanban] agent team installed: ${out.installed.join(', ')}`);
+  }
+} catch { /* the board works without the global install */ }
 
 function portInUse(port) {
   return new Promise((resolve) => {

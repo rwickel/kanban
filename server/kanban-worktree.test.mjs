@@ -195,29 +195,20 @@ test('kanban.py task worktree isolation', async (t) => {
     assert.equal(existsSync(fresh.path), true);
   });
 
-  await t.test('the worktree has the current agent team, and the files stay out of the commits', () => {
-    // A committed agent file and a new one, in the project of the board.
-    const agents = join(REPO, '.opencode', 'agents');
-    mkdirSync(agents, { recursive: true });
-    writeFileSync(join(agents, 'planner.md'), '---\ndescription: old\nmode: primary\n---\n\nold\n');
-    writeFileSync(join(agents, 'coding-orchestrator.md'), '---\ndescription: new\nmode: primary\n---\n\nnew\n');
-    git(REPO, 'add', '.opencode/agents/planner.md');
-    git(REPO, 'commit', '-m', 'add planner agent');
-
+  await t.test('the worktree has the board agent team, and the files stay out of the commits', () => {
+    // The board owns the team. The project repo has no agents of its own.
     const task = runJson(['task', 'create', '--project', P, '--title', 'With agents']).id;
     const created = runJson(['worktree', 'create', task]);
-    // Both agent files are in the worktree.
-    assert.equal(existsSync(join(created.path, '.opencode', 'agents', 'planner.md')), true);
+    // The team of the board is in the worktree, although the project has none.
     assert.equal(existsSync(join(created.path, '.opencode', 'agents', 'coding-orchestrator.md')), true);
-    // Git does not see them: the team is not task work.
+    assert.equal(existsSync(join(created.path, '.opencode', 'agents', 'coder.md')), true);
+    // Git does not see the agent files: the team is not task work.
     assert.equal(git(created.path, 'status', '--porcelain').stdout, '');
     // The agent stages everything: the agent files stay out of the commit.
     writeFileSync(join(created.path, 'work.txt'), 'work\n');
     git(created.path, 'add', '-A');
     const staged = git(created.path, 'diff', '--cached', '--name-only').stdout;
     assert.equal(staged, 'work.txt');
-    // The main checkout still shows the new agent file, so it stays committable.
-    assert.match(git(REPO, 'status', '--porcelain').stdout, /coding-orchestrator\.md/);
   });
 
   await t.test('the merge refuses a worktree with uncommitted work', () => {

@@ -40,3 +40,14 @@ that folder, so two parallel tasks never share files, git index or build output.
 
 See `docs/KANBAN_API.md` for the worktree routes and the CLI commands.
 See `docs/WORKTREE_ISOLATION_CONCEPT.md` for the diagrams and the use cases.
+
+## The agent team belongs to the board
+
+The team lives in one place: `.opencode/agents/` of this repository. The dev
+script installs it as **global** OpenCode agents at every start, so every
+session in every folder uses the current definitions. A project repo does not
+need its own copy.
+
+```
+python server/kanban.py team install     # install the team globally
+```

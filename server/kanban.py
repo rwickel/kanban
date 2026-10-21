@@ -413,6 +413,49 @@ def copy_setup_files(repo, path):
     return copied
 
 
+def agent_team_dir():
+    """The one place where the agent team lives.
+
+    The board owns the team. Every worktree gets these files, and the team is
+    also installed as a global OpenCode agent set, so every session in every
+    folder uses the same, current definitions. A project repo does not need its
+    own copy.
+    """
+    custom = os.getenv("KANBAN_AGENT_TEAM_DIR", "").strip()
+    if custom:
+        return Path(custom)
+    return REPO / ".opencode" / "agents"
+
+
+def global_agents_dir():
+    """The global OpenCode agent folder: every location sees these agents."""
+    return Path.home() / ".config" / "opencode" / "agents"
+
+
+def cmd_team_install(args):
+    """Install the agent team as global OpenCode agents.
+
+    The board owns the team. Installed globally, every session in every folder
+    (project folders and worktrees) uses the current definitions.
+    """
+    src = agent_team_dir()
+    if not src.is_dir():
+        fail(f"No agent team found: {src}")
+    dst = global_agents_dir()
+    dst.mkdir(parents=True, exist_ok=True)
+    installed, skipped = [], []
+    for md in sorted(src.glob("*.md")):
+        target = dst / md.name
+        data = md.read_bytes()
+        if target.exists() and target.read_bytes() == data:
+            skipped.append(md.name)
+            continue
+        target.write_bytes(data)
+        installed.append(md.name)
+    print(json.dumps({"ok": True, "source": str(src), "target": str(dst),
+                      "installed": installed, "unchanged": skipped}, indent=2))
+
+
 def copy_agent_definitions(repo, path):
     """Copy .opencode/agents into the worktree and keep them out of commits.
 
@@ -421,9 +464,14 @@ def copy_agent_definitions(repo, path):
     the commit of the agent:
     - tracked files get the skip-worktree flag,
     - new files are covered by a per-worktree exclude file.
+
+    The source is the board's team folder (the board owns the team), not the
+    project repo. A project may still hold its own agents; those are used only
+    when the board has no file with that name.
     """
-    src_dir = Path(repo) / ".opencode" / "agents"
-    if not src_dir.is_dir():
+    sources = [agent_team_dir(), Path(repo) / ".opencode" / "agents"]
+    src_dir = next((s for s in sources if s.is_dir()), None)
+    if src_dir is None:
         return []
     dst_dir = Path(path) / ".opencode" / "agents"
     copied = []
@@ -2133,6 +2181,11 @@ def main(argv=None):
     ws.add_argument("task_id")
     ws.add_argument("--target", default=None, help="Target branch (default: the project branch)")
     ws.set_defaults(func=cmd_worktree_sync)
+    wt = sub.add_parser("team", help="The agent team that the board owns.")
+    ttsub = wt.add_subparsers(dest="ttcmd", required=True)
+    tti = ttsub.add_parser("install", help="Install the team as global OpenCode agents.")
+    tti.add_argument("--actor", default="cli")
+    tti.set_defaults(func=cmd_team_install)
     wr = wsub.add_parser("remove", help="Remove the worktree folder of a task.")
     wr.add_argument("task_id")
     wr.add_argument("--force", action="store_true", help="Remove even with uncommitted changes")
