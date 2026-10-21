@@ -89,7 +89,24 @@ test('updateProject patches and returns the cached row when offline', async () =
 test('createTask queues a transport failure and marks the cached task pending', async () => withBrowserStubs(async () => {
   const { createTask } = await import('./kanban.ts');
   globalThis.fetch = async () => { throw new TypeError('offline'); };
-  await assert.rejects(createTask('p1', 'Queued', '', 'medium', undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'client-1'), /queued/i);
+  await assert.rejects(createTask('p1', 'Queued', '', 'medium', { clientId: 'client-1' }), /queued/i);
   assert.equal(listOps().length, 1);
   assert.equal(listOps()[0]?.kind, 'create');
+}, [project]));
+
+test('a queued create keeps the result of the task', async () => withBrowserStubs(async () => {
+  const { createTask } = await import('./kanban.ts');
+  globalThis.fetch = async () => { throw new TypeError('offline'); };
+  await assert.rejects(
+    createTask('p1', 'With result', '', 'medium', {
+      clientId: 'client-2', result: 'the result', resultContext: 'the context',
+    }),
+    /queued/i,
+  );
+  const op = listOps()[0];
+  assert.equal(op?.kind, 'create');
+  if (op?.kind === 'create') {
+    assert.equal(op.result, 'the result');
+    assert.equal(op.resultContext, 'the context');
+  }
 }, [project]));

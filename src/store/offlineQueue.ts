@@ -14,6 +14,9 @@ export type QueuedOp =
       priority: TaskPriority;
       agentId?: string; agentName?: string; sessionId?: string;
       modelId?: string; modelProviderID?: string;
+      // The result of a new task. Without these the replay lost the result:
+      // the card showed nothing after the board came back.
+      result?: string; resultContext?: string;
       taskKind?: 'oneshot' | 'cyclic' | 'service'; cycleIntervalSec?: number; dueDate?: string;
     }
   | { qid: string; kind: 'update'; at: number; id: string; updates: Record<string, unknown> };

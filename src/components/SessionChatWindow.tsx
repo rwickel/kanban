@@ -90,7 +90,7 @@ export default function SessionChatWindow({ task, onClose, standalone, onTaskCli
         if (existing.some((t) => (t.status === 'backlog' || t.status === 'running') && t.title === title)) return;
         await createTask(task.projectId, title,
           `Chat stream for task "${task.title}" (${task.id}, session ${sessionId}) returned stream error (proxy 502?). Check OpenCode server on :4099, password in Server settings, and Vite /api/kanban/oc proxy.`,
-          'high', task.agentId, task.agentName);
+          'high', { agentId: task.agentId, agentName: task.agentName });
       } catch { /* best-effort */ }
     }).catch(() => {});
   }, [task?.id, status]);
@@ -219,7 +219,10 @@ export default function SessionChatWindow({ task, onClose, standalone, onTaskCli
     setSending(true);
     const fork = await forkSession(sessionId, messageId);
     if (!fork.ok || !fork.sessionId) { setSending(false); setSendError(`Fork failed — ${fork.error ?? 'could not fork session'}`); return; }
-    const child = await createTask(task.projectId, `Fork: ${task.title}`, `Forked from ${task.id} before message ${messageId}.`, task.priority, task.agentId, task.agentName, fork.sessionId, task.modelId, task.modelProviderID);
+    const child = await createTask(task.projectId, `Fork: ${task.title}`, `Forked from ${task.id} before message ${messageId}.`, task.priority, {
+      agentId: task.agentId, agentName: task.agentName,
+      sessionId: fork.sessionId, modelId: task.modelId, modelProviderID: task.modelProviderID,
+    });
     setSending(false);
     if (!child) setSendError('Fork failed — could not create task');
   };

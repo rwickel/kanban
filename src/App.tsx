@@ -463,7 +463,9 @@ export default function App() {
           t.title === title
         );
         if (dup) return;
-        const fix = await createTask(task.projectId, title, description, 'high', task.agentId, task.agentName);
+        const fix = await createTask(task.projectId, title, description, 'high', {
+          agentId: task.agentId, agentName: task.agentName,
+        });
         upsertTaskInState(fix);
       } catch (e) {
         console.error('ensureFixTask failed', e);
@@ -739,6 +741,8 @@ export default function App() {
           title: data.title,
           description: data.description,
           acceptanceCriteria: data.acceptanceCriteria,
+          result: data.result,
+          resultContext: data.resultContext,
           priority: data.priority,
           agentId: data.agentId,
           agentName: data.agentName,
@@ -747,8 +751,6 @@ export default function App() {
          kind: data.kind,
           cycleIntervalSec: data.cycleIntervalSec,
           dueDate: data.dueDate || null,
-          result: data.result,
-          resultContext: data.resultContext,
           blockedByTaskIds: data.blockedByTaskIds ?? [],
         } as unknown as Partial<Task>);
       } catch (e) {
@@ -773,6 +775,8 @@ export default function App() {
         title: data.title,
          description: data.description,
          acceptanceCriteria: data.acceptanceCriteria,
+         result: data.result,
+         resultContext: data.resultContext,
          dueDate: data.dueDate || null,
         status: 'backlog',
         priority: data.priority,
@@ -795,19 +799,20 @@ export default function App() {
           data.title,
           data.description,
           data.priority,
-          data.agentId,
-          data.agentName,
-          undefined,
-          data.modelId,
-           data.modelProviderID,
-           undefined,
-           undefined,
-             queuedId,
-             data.acceptanceCriteria,
-             data.blockedByTaskIds,
-             data.kind,
-              data.cycleIntervalSec,
-              data.dueDate
+          {
+            agentId: data.agentId,
+            agentName: data.agentName,
+            modelId: data.modelId,
+            modelProviderID: data.modelProviderID,
+            result: data.result,
+            resultContext: data.resultContext,
+            clientId: queuedId,
+            acceptanceCriteria: data.acceptanceCriteria,
+            blockedByTaskIds: data.blockedByTaskIds,
+            kind: data.kind,
+            cycleIntervalSec: data.cycleIntervalSec,
+            dueDate: data.dueDate,
+          },
         );
         // Online path: server echoed its row (same queuedId) — drop the temp
         // card and show the confirmed row.

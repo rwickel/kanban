@@ -223,23 +223,42 @@ function sanitizeUpdates(updates: Partial<Task>): Record<string, unknown> {
   return rest;
 }
 
+/**
+ * The optional fields of a new task.
+ *
+ * They live in an object, not in a list of positional arguments. With a list
+ * of sixteen arguments the caller cannot see which value is which, and a
+ * field was dropped: the create path passed `undefined` for the result and
+ * the result context, and the card showed no result.
+ */
+export interface CreateTaskOptions {
+  agentId?: string;
+  agentName?: string;
+  sessionId?: string;
+  modelId?: string;
+  modelProviderID?: string;
+  result?: string;
+  resultContext?: string;
+  clientId?: string;
+  acceptanceCriteria?: string;
+  blockedByTaskIds?: string[];
+  kind?: Task['kind'];
+  cycleIntervalSec?: number;
+  dueDate?: string;
+}
+
 export async function createTask(
   projectId: string,
   title: string,
   description: string,
   priority: TaskPriority,
-  agentId?: string,
-  agentName?: string,
-  sessionId?: string,
-  modelId?: string,
-  modelProviderID?: string,
-  result?: string,
-  resultContext?: string,
-  clientId?: string,
-  acceptanceCriteria?: string,
-  blockedByTaskIds?: string[]
-   ,kind?: Task['kind'], cycleIntervalSec?: number, dueDate?: string
+  options: CreateTaskOptions = {},
 ): Promise<Task> {
+  const {
+    agentId, agentName, sessionId, modelId, modelProviderID,
+    result, resultContext, clientId, acceptanceCriteria,
+    blockedByTaskIds, kind, cycleIntervalSec, dueDate,
+  } = options;
   // Client-generated id: offline replays reuse it, so a retried POST
   // either creates the row or fails "already exists" (safe to skip).
   const id = clientId ?? uuidv4();
@@ -260,12 +279,14 @@ export async function createTask(
       kind: 'create', clientId: id, projectId, title, description, priority,
       acceptanceCriteria, blockedByTaskIds: blockedBy,
       agentId, agentName, sessionId, modelId, modelProviderID,
+      result, resultContext,
        taskKind: kind, cycleIntervalSec, dueDate,
     });
     const now = new Date().toISOString();
     mergeTaskCache({
       id, projectId, title, description, status: 'backlog', priority,
       agentId, agentName, sessionId, modelId, modelProviderID,
+      result, resultContext,
       acceptanceCriteria, blockedByTaskIds: blockedBy, pendingSync: true, createdAt: now, updatedAt: now,
     });
     throw new QueuedOfflineError('Offline — task queued, syncs on reconnect.', id);
@@ -312,6 +333,9 @@ export async function replayOfflineQueue(): Promise<{ synced: number; remaining:
               kind: op.taskKind, cycleIntervalSec: op.cycleIntervalSec, dueDate: op.dueDate,
              acceptanceCriteria: op.acceptanceCriteria,
              blockedByTaskIds: op.blockedByTaskIds ?? [],
+            // The result of the task. The replay must send it, or the card is
+            // empty after the board comes back.
+            result: op.result, resultContext: op.resultContext,
           });
         } else {
           await patchTaskRaw(op.id, op.updates);

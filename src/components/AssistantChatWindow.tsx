@@ -398,7 +398,13 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
     setSending(true);
     const fork = await forkSession(sessionId, messageId);
     if (!fork.ok || !fork.sessionId) { setSending(false); setSendError(fork.error ?? 'Could not fork session'); return; }
-    const child = await createTask(project.id, 'Forked chat task', `Forked from assistant session ${sessionId} before message ${messageId}.`, 'medium', selectedAgentId || undefined, selectedAgent?.name, fork.sessionId, selectedModel.split('/').slice(1).join('/') || undefined, selectedModel.split('/')[0] || undefined);
+    const child = await createTask(project.id, 'Forked chat task', `Forked from assistant session ${sessionId} before message ${messageId}.`, 'medium', {
+      agentId: selectedAgentId || undefined,
+      agentName: selectedAgent?.name,
+      sessionId: fork.sessionId,
+      modelId: selectedModel.split('/').slice(1).join('/') || undefined,
+      modelProviderID: selectedModel.split('/')[0] || undefined,
+    });
     setSending(false);
     if (!child) setSendError('Could not create forked task');
   };

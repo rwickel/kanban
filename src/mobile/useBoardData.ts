@@ -393,7 +393,13 @@ export function useBoardData() {
       // row and the auto-start guard treats the queued card as normal.
       const queuedId = `q-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       try {
-        const created = await createTask(activeProjectId, data.title, data.description, data.priority, data.agentId, data.agentName, undefined, data.modelId, data.modelProviderID, undefined, undefined, queuedId, data.acceptanceCriteria, undefined, undefined, undefined, data.dueDate);
+        const created = await createTask(activeProjectId, data.title, data.description, data.priority, {
+          agentId: data.agentId, agentName: data.agentName,
+          modelId: data.modelId, modelProviderID: data.modelProviderID,
+          result: data.result, resultContext: data.resultContext,
+          clientId: queuedId, acceptanceCriteria: data.acceptanceCriteria,
+          dueDate: data.dueDate,
+        });
         // Online: server echoed its row (same queuedId) — drop the temp card.
         setTasks((prev) => ({ ...prev, backlog: prev.backlog.filter((t) => t.id !== tempId) }));
         delete optimisticRef.current[tempId];
