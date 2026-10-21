@@ -1,7 +1,7 @@
 import { Task, TaskPriority } from '../types';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { MessageSquare, Pencil, Trash2, Loader2, AlertTriangle, Copy, Check, Play, RotateCcw } from 'lucide-react';
+import { MessageSquare, Pencil, Trash2, Loader2, AlertTriangle, Copy, Check, Play, RotateCcw, GitBranch } from 'lucide-react';
 import { useDraggable } from '@dnd-kit/core';
 import { useState } from 'react';
 import { formatDueDate, isOverdue } from '../dueDate';
@@ -140,6 +140,20 @@ export default function TaskCard({ task, onEdit, onDelete, onOpenChat, onMove, o
           <button onClick={(e) => { e.stopPropagation(); copyParent(); }} onPointerDown={(e) => e.stopPropagation()} className="p-0.5 rounded hoverable shrink-0" title={copiedParent ? 'Copied!' : `Copy parent session ${task.parentSessionId}`} aria-label="Copy parent session id">
             {copiedParent ? <Check className="w-3 h-3" style={{ color: 'var(--emerald)' }} /> : <Copy className="w-3 h-3 muted" />}
           </button>
+        </p>
+      )}
+
+      {/* worktree: where the work of this task happens */}
+      {task.worktreeBranch && (
+        <p
+          className="text-[11px] muted mt-1 mono flex items-center gap-1 min-w-0"
+          title={`Worktree branch: ${task.worktreeBranch}\nFolder: ${task.worktreePath || '(unknown)'}\nState: ${task.worktreeState || 'active'}${task.worktreeNote ? `\nNote: ${task.worktreeNote}` : ''}`}
+        >
+          <GitBranch className="w-3 h-3 shrink-0" />
+          <span className="truncate">{task.worktreeBranch}</span>
+          {task.worktreeState && task.worktreeState !== 'active' && (
+            <span className="shrink-0 pill px-1 py-0 text-[10px] uppercase">{task.worktreeState}</span>
+          )}
         </p>
       )}
 

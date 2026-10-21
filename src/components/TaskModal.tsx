@@ -5,7 +5,7 @@ import { fetchModels } from '../api/opencode';
 import { getTaskModelPref, saveTaskModelPref } from '../store/serverConfig';
 import { formatModelRef, isModelAllowed, resolveSessionModel } from '../store/modelResolution';
 import { normalizeBlockedBy, validateBlockedBy } from '../store/dependencies';
-import { mergeTaskWorktree, removeTaskWorktree } from '../store/kanban';
+import { mergeTaskWorktree, removeTaskWorktree, syncTaskWorktree } from '../store/kanban';
 import AttachmentList from './AttachmentList';
 
 interface TaskModalProps {
@@ -154,6 +154,21 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
       } else {
         setWtMsg(r.error || 'Merge failed.');
       }
+    } catch (e) {
+      setWtMsg(String((e as Error)?.message ?? e));
+    } finally {
+      setWtBusy(false);
+    }
+  };
+
+  const syncWorktree = async () => {
+    if (!task) return;
+    setWtBusy(true);
+    setWtMsg(null);
+    try {
+      const res = await syncTaskWorktree(task.id);
+      setWt((v) => ({ ...v, note: res?.note ?? v.note }));
+      setWtMsg(res?.synced ? 'The branch is now on the current project branch.' : (res?.note ?? 'The branch already contains the project branch.'));
     } catch (e) {
       setWtMsg(String((e as Error)?.message ?? e));
     } finally {
@@ -318,20 +333,23 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
             )}
             {depError && <p className="text-[11px] text-red-400/90 mt-1">{depError}</p>}
           </div>
-          {task?.worktreeBranch && (
+          {(task?.worktreeBranch || task?.worktreePath) && (
             <div>
               <label className="block text-[12px] font-medium t-soft mb-1">
-                Worktree <span className="muted font-normal">(isolated folder for this task)</span>
+                Worktree <span className="muted font-normal">(the folder where this task works)</span>
               </label>
               <div className="text-[11px] mono muted break-all rounded border border-[var(--border)] px-2 py-1.5">
-                <div>branch: {task.worktreeBranch}</div>
+                <div>branch: {task.worktreeBranch || '(none)'}</div>
                 <div>state: {wt.state ?? task.worktreeState ?? 'none'}</div>
-                {wt.path && <div>path: {wt.path}</div>}
+                <div>path: {wt.path || task.worktreePath || '(none)'}</div>
+                {task.featureId && <div>feature: {String(task.featureId).slice(0, 8)}</div>}
                 {(wt.note || task.worktreeNote) && <div className="text-amber-400/90">note: {wt.note || task.worktreeNote}</div>}
               </div>
               <div className="flex gap-2 mt-1.5">
                 <button type="button" onClick={mergeWorktree} disabled={wtBusy}
                   className="pill p-blue disabled:opacity-50">Merge now</button>
+                <button type="button" onClick={syncWorktree} disabled={wtBusy}
+                  className="pill p-neutral disabled:opacity-50">Sync with main</button>
                 <button type="button" onClick={removeWorktree} disabled={wtBusy}
                   className="pill p-neutral disabled:opacity-50">Remove worktree</button>
               </div>

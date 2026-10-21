@@ -454,6 +454,16 @@ export async function mergeTaskWorktree(taskId: string, target?: string, cleanup
   });
 }
 
+/** Rebase the branch of a task onto the current project branch. */
+export async function syncTaskWorktree(taskId: string, target?: string): Promise<{
+  ok: boolean; synced?: boolean; note?: string; branch?: string; target?: string;
+}> {
+  return api(`/api/kanban/tasks/${encodeURIComponent(taskId)}/worktree/sync`, {
+    method: 'POST',
+    body: JSON.stringify({ target }),
+  });
+}
+
 /** Delete the worktree folder of a task. */
 export async function removeTaskWorktree(taskId: string): Promise<{ ok: boolean; removed: boolean; error?: string | null }> {
   return api(`/api/kanban/tasks/${encodeURIComponent(taskId)}/worktree`, { method: 'DELETE' });

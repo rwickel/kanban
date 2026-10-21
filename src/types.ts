@@ -44,6 +44,8 @@ export interface Task {
   worktreeBranch?: string | null;
   /** Worktree lifecycle: active | merged | conflict | pending | removed. */
   worktreeState?: string | null;
+  /** Feature uuid: the task is a step of this feature and works in its worktree. */
+  featureId?: string | null;
   /** Last merge message (conflict details, error text). */
   worktreeNote?: string | null;
   projectId: string;
