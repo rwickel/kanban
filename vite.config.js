@@ -385,7 +385,27 @@ async function reconcileRunning() {
         // finish the work. It must not be re-armed, or the task flips between
         // blocked and running and the board delivers the same result again.
         const sessionStopped = ["interrupted", "aborted", "cancelled", "canceled"].includes(outcome);
-        const lastActivity = messageTimestamp(last) || messageTimestamp(session) || updatedAt;
+        // The activity of a session is the NEWEST of three clocks:
+        //  - the last message it wrote
+        //  - the session's own update time (the board writes a result into the
+        //    session, and that wakes the agent up)
+        //  - the heartbeat of the task (the agent's own sign of life)
+        // The last message alone is not enough. A delegating agent writes its
+        // last message, then waits. The board delivers the result of the
+        // sub-task and the agent starts to work — but the first new message
+        // takes minutes with a slow model. The old clock then looked stale
+        // and the board interrupted a working session.
+        const sessionUpdated = (() => {
+          const t = session?.time || session?.info?.time || null;
+          const parsed = Date.parse(String(t?.updated || t?.updatedAt || t?.updated_at || ""));
+          return Number.isFinite(parsed) ? parsed : 0;
+        })();
+        const heartbeatAt = Date.parse(t.heartbeatAt || t.heartbeat_at || "") || 0;
+        const lastActivity = Math.max(
+          messageTimestamp(last) || 0,
+          sessionUpdated,
+          heartbeatAt,
+        ) || updatedAt;
         // An idle session is WAITING for the next message. That is normal for a
         // delegating agent: it ends its turn and the board delivers the result
         // of the sub-task later. Only a session that is mid-turn and silent is

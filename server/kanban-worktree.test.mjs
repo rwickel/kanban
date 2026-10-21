@@ -253,6 +253,39 @@ test('kanban.py task worktree isolation', async (t) => {
     assert.equal(git(REPO, 'show', 'HEAD:b.txt').stdout, 'B');
   });
 
+  await t.test('the merge pushes the project branch to the remote', () => {
+    // The board does the git work (option A): the merge is pushed.
+    const REMOTE = join(work, 'remote.git');
+    git(work, 'init', '--bare', REMOTE);
+    git(REPO, 'remote', 'add', 'origin', REMOTE);
+    git(REPO, 'push', '-u', 'origin', 'main');
+    const task = runJson(['task', 'create', '--project', P, '--title', 'Pushed']).id;
+    const created = runJson(['worktree', 'create', task]);
+    writeFileSync(join(created.path, 'pushed.txt'), 'pushed\n');
+    git(created.path, 'add', '.');
+    git(created.path, 'commit', '-m', 'pushed');
+    const merged = runJson(['worktree', 'merge', task]);
+    assert.equal(merged.merged, true);
+    assert.equal(merged.pushed, true);
+    assert.match(merged.pushNote, /pushed/);
+    // The remote has the file.
+    assert.equal(git(REMOTE, 'show', 'main:pushed.txt').stdout, 'pushed');
+  });
+
+  await t.test('a merge without a remote says so', () => {
+    git(REPO, 'remote', 'remove', 'origin');
+    const task = runJson(['task', 'create', '--project', P, '--title', 'No remote']).id;
+    const created = runJson(['worktree', 'create', task]);
+    writeFileSync(join(created.path, 'local.txt'), 'local\n');
+    git(created.path, 'add', '.');
+    git(created.path, 'commit', '-m', 'local');
+    const merged = runJson(['worktree', 'merge', task]);
+    // The merge works. Only the push is missing.
+    assert.equal(merged.merged, true);
+    assert.equal(merged.pushed, false);
+    assert.match(merged.pushNote, /no remote/);
+  });
+
   await t.test('the main checkout is never removed as a worktree', () => {
     // A wrong path must never reach `git worktree remove`: that command can
     // delete the files of the main repository.

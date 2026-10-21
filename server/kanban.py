@@ -322,6 +322,44 @@ def git_toplevel(repo) -> str:
     return out if code == 0 else ""
 
 
+def git_remote_name(repo, preferred="origin") -> str:
+    """The remote of the repository. Empty when there is none."""
+    code, out, _ = git_run(repo, "remote")
+    if code != 0:
+        return ""
+    names = [line.strip() for line in out.splitlines() if line.strip()]
+    if preferred in names:
+        return preferred
+    return names[0] if names else ""
+
+
+def pull_base_branch(repo, branch) -> str:
+    """Bring the base branch up to date before a worktree is cut.
+
+    Best effort: the worktree is cut from the local branch. A failed pull
+    (no remote, dirty tree, no network) must not stop the work, so the note
+    tells the user what happened.
+    """
+    remote = git_remote_name(repo)
+    if not remote:
+        return "no remote"
+    code, out, err = git_run(repo, "pull", "--ff-only", remote, branch, timeout=180)
+    if code != 0:
+        return f"pull failed: {(err or out).strip()[:200]}"
+    return "up to date"
+
+
+def push_branch(repo, branch) -> tuple:
+    """Push a branch to the remote. Returns (pushed, note)."""
+    remote = git_remote_name(repo)
+    if not remote:
+        return False, "no remote"
+    code, out, err = git_run(repo, "push", remote, branch, timeout=300)
+    if code != 0:
+        return False, f"push failed: {(err or out).strip()[:300]}"
+    return True, f"pushed {branch} to {remote}"
+
+
 def worktree_branch_for(task_id: str) -> str:
     """Branch name of a task worktree: kanban/task-<short id>."""
     safe = "".join(ch for ch in str(task_id) if ch.isalnum() or ch in "-_")[:8] or "task"
@@ -546,9 +584,15 @@ def cmd_worktree_create(args):
 
     # Base branch: the pinned branch, else HEAD when the pinned one is unknown.
     base = (args.base or "").strip() or (project["git_branch"] or "main")
+    pull_note = "not needed"
     code, _, _ = git_run(top, "rev-parse", "--verify", base)
     if code != 0:
         base = "HEAD"
+    else:
+        # The base must be current. A worktree that is cut from an old base
+        # makes every later merge a conflict. The pull is best effort: a
+        # failed pull must not stop the work.
+        pull_note = pull_base_branch(top, base)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     # Per-worktree config (used for the exclude file of the agent team).
@@ -574,10 +618,12 @@ def cmd_worktree_create(args):
 
     set_worktree_fields(conn, task["id"], path=str(path), branch=branch, state="active", note=_CLEAR)
     log_event(conn, task["id"], "worktree", "worktree.created",
-              {"path": str(path), "branch": branch, "base": base, "copied": copied})
+              {"path": str(path), "branch": branch, "base": base, "copied": copied,
+               "pull": pull_note})
     conn.commit()
     print(json.dumps({"ok": True, "path": str(path), "branch": branch,
-                      "base": base, "reused": False, "copied": copied}, indent=2))
+                      "base": base, "reused": False, "copied": copied,
+                      "pull": pull_note}, indent=2))
     conn.close()
 
 
@@ -727,8 +773,13 @@ def merge_worktree(task, project, target=None, cleanup=False):
                     "branch": branch, "target": target}
         if cleanup:
             remove_worktree(top, path, force=True)
+    # The board does the git work (option A): after the local merge the branch
+    # goes to the remote. A failed push does not undo the merge. The work is
+    # merged locally; the note says that the push must be repeated.
+    pushed, push_note = push_branch(top, target)
     return {"ok": True, "merged": True, "conflict": False, "files": [],
-            "error": None, "branch": branch, "target": target, "rebased": rebased}
+            "error": None, "branch": branch, "target": target, "rebased": rebased,
+            "pushed": pushed, "pushNote": push_note}
 
 
 def cmd_worktree_merge(args):
@@ -737,10 +788,15 @@ def cmd_worktree_merge(args):
     task, project = project_row_for_task(conn, args.task_id)
     result = merge_worktree(task, project, target=args.target, cleanup=args.cleanup)
     if result.get("merged"):
-        set_worktree_fields(conn, args.task_id, state="merged",
-                            note=f"Merged {result.get('branch')} into {result.get('target')}")
+        note = f"Merged {result.get('branch')} into {result.get('target')}"
+        if result.get("pushed"):
+            note += f" and {result.get('pushNote')}"
+        elif result.get("pushNote"):
+            note += f" (not pushed: {result.get('pushNote')})"
+        set_worktree_fields(conn, args.task_id, state="merged", note=note)
         log_event(conn, args.task_id, "worktree", "worktree.merged",
-                  {"branch": result.get("branch"), "target": result.get("target")})
+                  {"branch": result.get("branch"), "target": result.get("target"),
+                   "pushed": result.get("pushed"), "pushNote": result.get("pushNote")})
     elif result.get("conflict"):
         set_worktree_fields(conn, args.task_id, state="conflict",
                             note=(result.get("error") or "merge conflict")[:500])
@@ -956,9 +1012,15 @@ def cmd_feature_create(args):
     branch = feature_branch_for(fid)
     path = feature_path_for(project, fid)
     base = (args.base or "").strip() or (project["git_branch"] or "main")
+    pull_note = "not needed"
     code, _, _ = git_run(top, "rev-parse", "--verify", base)
     if code != 0:
         base = "HEAD"
+    else:
+        # The base must be current. A feature that starts from an old base
+        # makes every later merge a conflict. Best effort: a failed pull does
+        # not stop the work.
+        pull_note = pull_base_branch(top, base)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     # Per-worktree config (used for the exclude file of the agent team).
@@ -987,10 +1049,10 @@ def cmd_feature_create(args):
     )
     log_event(conn, None, args.actor, "feature.created",
               {"id": fid, "projectId": args.project, "title": args.title, "branch": branch,
-               "copied": copied})
+               "copied": copied, "pull": pull_note})
     conn.commit()
     row = conn.execute("SELECT * FROM features WHERE id = ?", (fid,)).fetchone()
-    print(json.dumps({**row_to_feature(row), "copied": copied}, indent=2))
+    print(json.dumps({**row_to_feature(row), "copied": copied, "pull": pull_note}, indent=2))
     conn.close()
 
 
@@ -1040,12 +1102,18 @@ def merge_feature(conn, feature_row, target=None):
     }
     result = merge_worktree(task_like, project, target=target)
     if result.get("merged"):
+        note = f"Merged {branch} into {result.get('target')}"
+        if result.get("pushed"):
+            note += f" and {result.get('pushNote')}"
+        elif result.get("pushNote"):
+            note += f" (not pushed: {result.get('pushNote')})"
         conn.execute(
             "UPDATE features SET status = 'done', merge_note = ?, updated_at = ? WHERE id = ?",
-            (f"Merged {branch} into {result.get('target')}", now_iso(), feature_row["id"]),
+            (note, now_iso(), feature_row["id"]),
         )
         log_event(conn, None, "feature", "feature.merged",
-                  {"id": feature_row["id"], "branch": branch, "target": result.get("target")})
+                  {"id": feature_row["id"], "branch": branch, "target": result.get("target"),
+                   "pushed": result.get("pushed"), "pushNote": result.get("pushNote")})
     elif result.get("conflict"):
         conn.execute(
             "UPDATE features SET merge_note = ?, updated_at = ? WHERE id = ?",
