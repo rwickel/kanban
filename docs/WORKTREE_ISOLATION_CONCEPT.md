@@ -455,6 +455,24 @@ The result of a merge carries the two fields `pushed` (true/false) and
 `pushNote` (the reason). A repo without a remote is normal: the merge works
 and the note says "no remote".
 
+## A merged feature goes to the archive
+
+A feature that is merged is finished work. The board moves it out of the
+daily view:
+
+| What | When it moves to the archive |
+|---|---|
+| every **done** step of the feature | the merge succeeds |
+| the **merge step** itself | it ends after the merge |
+| the **owner** of the feature (the orchestrator) | it ends after the merge |
+
+The rule lives in the board, not in the agent. The orchestrator never changes
+a status; it only reports that the feature is merged.
+
+A task in the archive keeps its result, its history and its worktree state.
+The board does not start it, does not watch it and does not deliver its
+result again.
+
 ## The agent team belongs to the board
 
 The team (board manager, coding orchestrator, planner, coder, testing,
@@ -522,6 +540,13 @@ A new worktree has the **committed** files only. It has no `.env`, no
   brief of the verification task.
 - The uncommitted changes of the main checkout are **not** in the worktree.
   Commit them first, or copy them into the worktree by hand.
+
+**Never delete a worktree folder with `rmdir /s /q`.** A worktree can hold a
+`node_modules` **junction** to the main checkout. On Windows `rmdir /s`
+walks through a junction and deletes the files of the target: the
+`node_modules` of the main project is gone. The board removes a leftover
+folder with `safe_rmtree`, which takes a junction as a link and never enters
+it.
 
 ## Surface
 

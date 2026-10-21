@@ -253,6 +253,34 @@ test('kanban.py task worktree isolation', async (t) => {
     assert.equal(git(REPO, 'show', 'HEAD:b.txt').stdout, 'B');
   });
 
+  await t.test('a leftover worktree folder is removed without following a junction', () => {
+    // A worktree can hold a node_modules junction to the main checkout. The
+    // board removes a leftover folder before it cuts a new worktree, and it
+    // must not walk through that junction: the files of the main project
+    // would be deleted. (The Windows command `rmdir /s /q` does exactly
+    // that. Never use it on a worktree folder.)
+    const OUTSIDE = join(work, 'outside');
+    mkdirSync(OUTSIDE, { recursive: true });
+    writeFileSync(join(OUTSIDE, 'keep.txt'), 'keep\n');
+    const task = runJson(['task', 'create', '--project', P, '--title', 'Junction']).id;
+    // The leftover folder of the task: it is not registered as a worktree,
+    // but it has the .git marker of one. The board removes such a folder
+    // before it cuts a new worktree.
+    const leftover = join(WT_ROOT, 'proj', task);
+    mkdirSync(leftover, { recursive: true });
+    writeFileSync(join(leftover, '.git'), 'gitdir: fake\n');
+    const link = join(leftover, 'link');
+    const made = spawnSync('cmd', ['/c', 'mklink', '/J', link, OUTSIDE], { encoding: 'utf8' }).status === 0;
+    if (!made) { t.skip('this system cannot make a folder junction'); return; }
+    const created = runJson(['worktree', 'create', task]);
+    assert.equal(created.ok, true);
+    // The folder outside is untouched.
+    assert.equal(existsSync(join(OUTSIDE, 'keep.txt')), true,
+      'the delete must not follow the junction');
+    // The leftover folder is gone.
+    assert.equal(existsSync(join(leftover, 'link')), false);
+  });
+
   await t.test('the merge pushes the project branch to the remote', () => {
     // The board does the git work (option A): the merge is pushed.
     const REMOTE = join(work, 'remote.git');

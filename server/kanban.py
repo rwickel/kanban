@@ -602,8 +602,7 @@ def cmd_worktree_create(args):
     # folder stops the run, so no data is ever deleted.
     if path.exists():
         if (path / ".git").exists():
-            import shutil
-            shutil.rmtree(path, ignore_errors=True)
+            safe_rmtree(path)
         else:
             fail(f"Worktree folder exists and is not a git worktree: {path}")
     # A leftover branch from a failed run must not block the new worktree.
@@ -904,6 +903,61 @@ def cmd_worktree_list(args):
     conn.close()
 
 
+def safe_rmtree(path):
+    """Remove a folder without following links out of it.
+
+    On Windows a folder junction looks like a normal folder. `shutil.rmtree`
+    walks into it and deletes the files of the TARGET — in one test the
+    node_modules of the main project was deleted with the worktree folder.
+    A junction or a symlink is therefore removed as a link, and the walk
+    never enters it.
+    """
+    import shutil
+    import stat
+
+    def onerror(func, p, exc):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except Exception:
+            pass
+
+    def is_link(entry):
+        try:
+            if entry.is_symlink():
+                return True
+        except OSError:
+            pass
+        # Python 3.12 knows a junction.
+        isjunction = getattr(os.path, "isjunction", None)
+        if isjunction:
+            try:
+                if isjunction(entry.path):
+                    return True
+            except OSError:
+                pass
+        return False
+
+    for root, dirs, _files in os.walk(str(path), topdown=True, followlinks=False):
+        for name in list(dirs):
+            full = os.path.join(root, name)
+            try:
+                entry = next((e for e in os.scandir(root) if e.name == name), None)
+            except OSError:
+                entry = None
+            if entry is not None and is_link(entry):
+                # Remove the link itself. Never the target.
+                dirs.remove(name)
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        os.rmdir(full)
+                    else:
+                        os.unlink(full)
+                except OSError:
+                    pass
+    shutil.rmtree(str(path), onerror=onerror)
+
+
 def remove_worktree(top, path, force=False):
     """Remove a worktree folder. Safety first.
 
@@ -1027,8 +1081,7 @@ def cmd_feature_create(args):
     git_run(top, "config", "extensions.worktreeConfig", "true")
     if path.exists():
         if (path / ".git").exists():
-            import shutil
-            shutil.rmtree(path, ignore_errors=True)
+            safe_rmtree(path)
         else:
             fail(f"Worktree folder exists and is not a git worktree: {path}")
     code, _, _ = git_run(top, "rev-parse", "--verify", branch)
