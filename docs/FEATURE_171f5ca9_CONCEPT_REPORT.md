@@ -11,24 +11,32 @@
 
 ## The concept step
 
-- Task id: `1799ce8b-bec5-43cc-aa80-ec5c6e781adb`
+- Task id: `1799ce8b-bec5-43cc-aa80-ec5c6e781adb` (first session, status
+  flips between `blocked` and `running`)
+- Task id: `75e0457f-67ee-42fe-a37a-66a9d5a68e9c` (second session, status
+  `done`)
 - Agent: planner
 - Model: `minimax/minimax-m3.1-flash:free` (provider `openrouter`)
 - Plan file: `docs/TESTS_STREAM_HOOK_MOBILE_CONTROLLER_ASSISTANT_SESSION_CONCEPT.md`
-- Plan commits: `dca3a11` (the plan) and `ecd2a10` (the branch base notes and
-  the notes for the integrator) on the branch `kanban/feature-171f5ca9`
+- Plan commits: `dca3a11` (the plan), `ecd2a10` (the branch base notes and
+  the notes for the integrator) and `fbd35f1` (the worktree facts) on the
+  branch `kanban/feature-171f5ca9`
 
-The board marked the first planner session as stale. The plan file was already
-committed at that moment. The board then started the same step again. The
-planner checked the plan, added the notes about the branch base and committed
-them.
+The first planner session was marked stale by the board. The plan file was
+already committed at that moment. The board started the same step again with a
+new session. The new session checked the plan against the code in the
+worktree, fixed the facts about the worktree, and committed the result.
 
-The board card of the concept step still shows `blocked`. The reason is the
-stale check of the board reconciler. It reads the first 30 messages of the
-session in the order "oldest first". After ten minutes of session life it
-always sees the start of the session. It then reports the step as stale. The
-planner session is alive and the plan is committed. The board card also holds
-the result text of this step.
+The concept card `75e0457f-67ee-42fe-a37a-66a9d5a68e9c` now shows `done`.
+It holds the full result of the step.
+
+The first card `1799ce8b-bec5-43cc-aa80-ec5c6e781adb` still flips between
+`blocked` and `running`. The reason is the stale check of the board
+reconciler. It reads the first 30 messages of the session in the order
+"oldest first". After ten minutes of session life it always sees the start of
+the session. It then reports the step as stale. The work of that step is
+complete. The card holds the same result text. The board manager can close
+it.
 
 ## What the plan covers
 
