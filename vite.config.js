@@ -197,7 +197,6 @@ function sleep(ms) {
 // idle/completed/succeeded/done/success → done (capture last assistant text as result).
 // idle/failed/error → blocked. interrupted/aborted stays running. Runs every 15s,
 // skips tasks touched in the last 20s to avoid racing an agent's own writes.
-let reconcileTimer = null;
 let reconcileBusy = false;
 // A delegated session that remains running without producing a message is
 // presumed stuck. Keep this configurable for slower providers, but fail safe
@@ -245,9 +244,23 @@ function sessionErrorText(value) {
   }
   return "";
 }
+// The reconciler must be ONE loop. A config reload (vite re-imports this
+// file) creates a new module instance. Without a shared state the old timer
+// keeps running, every reload adds another delivery loop, and the same
+// result is delivered into the parent session again and again.
+function reconcilerState() {
+  if (!globalThis.__kanbanReconciler) {
+    globalThis.__kanbanReconciler = { timer: null, busy: false, reconcileBusy: false };
+  }
+  return globalThis.__kanbanReconciler;
+}
 function startReconciler() {
-  if (reconcileTimer) return;
-  reconcileTimer = setInterval(() => {
+  const state = reconcilerState();
+  if (state.timer) {
+    clearInterval(state.timer);
+    state.timer = null;
+  }
+  state.timer = setInterval(() => {
     reconcileRunning().catch(() => {});
     deliverResultsToParents().catch(() => {});
     scheduleCyclicTasks().catch(() => {});
@@ -288,8 +301,9 @@ async function scheduleCyclicTasks() {
   }
 }
 async function reconcileRunning() {
-  if (reconcileBusy) return;
-  reconcileBusy = true;
+  const state = reconcilerState();
+  if (state.reconcileBusy) return;
+  state.reconcileBusy = true;
   try {
     const [running, blocked, all] = await Promise.all([
       cli(["task", "list", "--status", "running"]).catch(() => []),
@@ -354,6 +368,10 @@ async function reconcileRunning() {
         const succeeded = ltype === "idle" && ["completed", "done", "succeeded", "success"].includes(outcome);
         const failLike = ltype === "idle" && ["failed", "error"].includes(outcome);
         const sessionFailed = ["failed", "error"].includes(outcome);
+        // An interrupted or aborted session is finished: the agent did not
+        // finish the work. It must not be re-armed, or the task flips between
+        // blocked and running and the board delivers the same result again.
+        const sessionStopped = ["interrupted", "aborted", "cancelled", "canceled"].includes(outcome);
         const lastActivity = messageTimestamp(last) || messageTimestamp(session) || updatedAt;
         // An idle session is WAITING for the next message. That is normal for a
         // delegating agent: it ends its turn and the board delivers the result
@@ -374,7 +392,7 @@ async function reconcileRunning() {
           ]).catch(() => null);
           continue;
         }
-        if (!succeeded && !failLike && !sessionFailed) {
+        if (!succeeded && !failLike && !sessionFailed && !sessionStopped) {
           // The session works and is not stuck. A blocked task with a live
           // session goes back to running. Never re-arm an idle session: it is
           // waiting, and re-arming would start the task a second time.
@@ -395,12 +413,18 @@ async function reconcileRunning() {
             }
           }
         }
-        const completion = completionStatus({ succeeded, failed: failLike || sessionFailed, kind: t.kind, finalAssistantText: completionSignal });
+        const completion = completionStatus({
+          succeeded,
+          failed: failLike || sessionFailed || sessionStopped,
+          kind: t.kind,
+          finalAssistantText: completionSignal,
+        });
         let next = completion?.status || "blocked";
         // A delegating agent ends its turn before the delegated work is done.
-        // Its sub-tasks carry the work. The task stays running and waits for
-        // the board to deliver their results into its session.
-        if (next === "blocked" && succeeded && !completionSignal.includes("KANBAN_TASK_INCOMPLETE")) {
+        // It may even say "not complete" — it means the FEATURE is not done, not
+        // that the agent is stuck. Its sub-tasks carry the work, so the task
+        // stays running and waits for their results in its session.
+        if (next === "blocked" && succeeded) {
           const waiting = children.filter((c) => c.status === "running" || c.status === "backlog");
           if (waiting.length > 0) {
             next = "running";
@@ -445,7 +469,7 @@ async function reconcileRunning() {
       } catch { /* per-task errors never stop the loop */ }
     }
   } finally {
-    reconcileBusy = false;
+    reconcilerState().reconcileBusy = false;
   }
 }
 
@@ -467,12 +491,13 @@ async function reconcileRunning() {
 //
 // Every finished run costs its parent one model pass — that's the documented
 // price of "results link back to this chat".
-let deliverBusy = false;
 
 async function deliverResultsToParents() {
   // Pure rules live in scripts/linkback.mjs (unit tested) — here is only I/O.
-  if (!linkbackEnabled(process.env.KANBAN_RESULT_LINKBACK) || deliverBusy) return;
-  deliverBusy = true;
+  if (!linkbackEnabled(process.env.KANBAN_RESULT_LINKBACK)) return;
+  const state = reconcilerState();
+  if (state.busy) return;
+  state.busy = true;
   try {
     const pending = await cli(["task", "notify-pending", "--limit", "50"]).catch(() => []);
     const rows = Array.isArray(pending) ? pending : [];
@@ -489,24 +514,27 @@ async function deliverResultsToParents() {
     for (const { parent, text, ids } of plan.values()) {
       if (ids.length === 0) continue;
       try {
+        // Mark before the post. Two passes must never deliver the same result
+        // twice: the second pass finds the task already stamped and skips it.
+        await cli(["task", "notify-mark", ...ids, "--actor", "notifier"]).catch(() => null);
         const pRes = await fetch(`${apiBase}/session/${encodeURIComponent(parent)}/prompt`, {
           method: "POST",
           headers: H,
           body: JSON.stringify({ text, delivery: "queue" }),
         });
         if (!pRes.ok) {
-          // 404 = parent session pruned: stamp so we stop retrying a dead id.
-          // Anything else (502, socket reset): leave NULL, retry next pass.
-          if (pRes.status === 404) {
-            await cli(["task", "notify-mark", ...ids, "--actor", "notifier"]).catch(() => null);
+          // 404 = the parent session is gone: the result stays undelivered.
+          // Anything else (502, socket reset): un-mark, so the next pass
+          // tries again.
+          if (pRes.status !== 404) {
+            await cli(["task", "notify-unmark", ...ids, "--actor", "notifier"]).catch(() => null);
           }
           continue;
         }
-        await cli(["task", "notify-mark", ...ids, "--actor", "notifier"]).catch(() => null);
-      } catch { /* network down — stays NULL, retries next pass */ }
+      } catch { /* network down — the next pass tries again */ }
     }
   } finally {
-    deliverBusy = false;
+    reconcilerState().busy = false;
   }
 }
 

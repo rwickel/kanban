@@ -2062,6 +2062,26 @@ def cmd_task_notify_pending(args):
     conn.close()
 
 
+def cmd_task_notify_unmark(args):
+    """Clear notified_at so the result is delivered again.
+
+    The delivery marks a task before it posts the message, so two passes can
+    never deliver the same result twice. If the post fails, the mark is
+    cleared and the next pass tries again.
+    """
+    conn = get_conn(args.db)
+    cleared = []
+    for tid in args.task_ids:
+        row = conn.execute("SELECT id FROM tasks WHERE id = ?", (tid,)).fetchone()
+        if not row:
+            fail(f"Task not found: {tid}")
+        conn.execute("UPDATE tasks SET notified_at = NULL, updated_at = ? WHERE id = ?", (now_iso(), tid))
+        cleared.append(tid)
+    conn.commit()
+    print(json.dumps({"ok": True, "unmarked": cleared}, indent=2))
+    conn.close()
+
+
 def cmd_task_notify_mark(args):
     """Stamp notified_at so the ledger stops retrying these tasks (idempotent).
 
@@ -2324,6 +2344,10 @@ def main(argv=None):
     tm2.add_argument("task_ids", nargs="+", help="One or more task ids to stamp.")
     tm2.add_argument("--actor", default="notifier")
     tm2.set_defaults(func=cmd_task_notify_mark)
+    tm3 = tsub.add_parser("notify-unmark", help="Clear notified_at so the result is delivered again.")
+    tm3.add_argument("task_ids", nargs="+", help="One or more task ids to clear.")
+    tm3.add_argument("--actor", default="notifier")
+    tm3.set_defaults(func=cmd_task_notify_unmark)
 
     ep = sub.add_parser("events", help="Event log.")
     esub = ep.add_subparsers(dest="ecmd", required=True)

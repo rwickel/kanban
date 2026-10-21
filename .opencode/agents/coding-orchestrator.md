@@ -43,6 +43,10 @@ first concept to the merge into main. You do not write the code yourself.
   and the board cannot deliver a result into a busy session. Send one
   `kanban_heartbeat` with the progress, end the turn, and let the board wake
   you up when the step is done.
+- **Do not use `KANBAN_TASK_INCOMPLETE` while you wait.** That marker means the
+  work is really not done. While a sub-task runs, the feature is simply not
+  finished: end the turn with a short progress note. Use the marker only when
+  you give up or the work is blocked for good.
 - Report the result of every step to the board manager: what changed, the
   branch, and the checks that passed.
 
