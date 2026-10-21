@@ -437,7 +437,10 @@ async function reconcileRunning() {
           // session goes back to running. Never re-arm an idle session: it is
           // waiting, and re-arming would start the task a second time.
           if (t.status === "blocked" && !sessionIdle) {
-            await cli(["task", "update", t.id, "--actor", "reconciler", "--status", "running"])
+            // The session is alive, so the handshake stays. A reset would let
+            // the board tab start the task a second time.
+            await cli(["task", "update", t.id, "--actor", "reconciler", "--status", "running",
+              "--keep-startup-phase"])
               .catch(() => null);
           }
           continue;
@@ -1156,7 +1159,7 @@ function kanbanDocs(req) {
       { method: "GET", path: "/api/kanban/tasks", query: "projectId?, status=backlog|running|done|blocked?", returns: "Task[]" },
       { method: "GET", path: "/api/kanban/tasks/:id", returns: "Task (404 when missing)" },
       { method: "POST", path: "/api/kanban/tasks/:id/start", body: "agentId?, agentName?, modelId?, modelProviderID? (missing values use the task's saved configuration); starts/retries this existing task without creating a duplicate", returns: "{task,sessionId}" },
-      { method: "POST", path: "/api/kanban/tasks", body: "projectId*, title*, description?, status?, priority?, id?, agentId?, agentName?, sessionId?, modelId?, modelProviderID?, startupPhase?, startupError?, parentSessionId?, result?, resultContext?, blockedByTaskIds?[]", returns: "Task" },
+      { method: "POST", path: "/api/kanban/tasks", body: "projectId*, title*, description?, status?, priority?, id?, agentId?, agentName?, sessionId?, modelId?, modelProviderID?, startupPhase?, startupError?, parentSessionId?, featureId?, result?, resultContext?, blockedByTaskIds?[]", returns: "Task" },
       { method: "PATCH", path: "/api/kanban/tasks/:id", body: "title?, description?, status?, priority?, agentId?, agentName?, sessionId?, modelId?, modelProviderID?, startupPhase?, startupError?, parentSessionId?, result?, resultContext?, blockedByTaskIds?[] (array replaces, [] clears)", returns: "Task" },
       { method: "GET", path: "/api/kanban/tasks/:id/dependencies", returns: "{id, status, blockedByTaskIds[], predecessors[{id,exists,status,title,done}], dependents[], ready}" },
       { method: "GET", path: "/api/kanban/tasks/:id/worktree", returns: "{taskId, path, branch, state, note}" },
@@ -1463,6 +1466,7 @@ function kanbanApi() {
             if (b.startupPhase) argv.push("--startup-phase", b.startupPhase);
             if (b.startupError !== undefined) argv.push("--startup-error", b.startupError || "");
             if (b.parentSessionId !== undefined && b.parentSessionId !== null) argv.push("--parent-session-id", String(b.parentSessionId));
+            if (b.featureId !== undefined && b.featureId !== null) argv.push("--feature", String(b.featureId));
             if (b.result !== undefined && b.result !== null) argv.push("--result", String(b.result));
             if (b.resultContext !== undefined && b.resultContext !== null) argv.push("--result-context", String(b.resultContext));
              if (b.acceptanceCriteria !== undefined && b.acceptanceCriteria !== null) argv.push("--acceptance-criteria", String(b.acceptanceCriteria));

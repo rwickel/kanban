@@ -124,7 +124,12 @@ Missing id → `404 { ok:false, error:"Task not found: <id>" }`.
 
 Body (JSON): `projectId` + `title` required; optional
 `description`, `status`, `priority`, `id`, `agentId`, `agentName`,
-`sessionId`, `modelId`, `modelProviderID`, `startupPhase`, `startupError`.
+`sessionId`, `modelId`, `modelProviderID`, `startupPhase`, `startupError`,
+`parentSessionId`, `featureId`, `result`, `resultContext`,
+`blockedByTaskIds`.
+
+`featureId` puts the task into a feature: it works in the feature worktree
+and on the feature branch, and only one step of a feature may run at a time.
 
 ```powershell
 $body = @{
@@ -146,7 +151,9 @@ Missing `projectId`/`title` → `400 { ok:false, error:"projectId and title requ
 
 Partial update — any of `title`, `description`, `status`, `priority`,
 `agentId`, `agentName`, `sessionId`, `modelId`, `modelProviderID`,
-`startupPhase`, `startupError`. This is how the board pins a session
+`startupPhase`, `startupError`, `parentSessionId`, `result`, `resultContext`,
+`acceptanceCriteria`, `kind`, `cycleIntervalSec`, `dueDate`, `worktreeNote`,
+`blockedByTaskIds`. This is how the board pins a session
 and how an agent-equivalent HTTP call flips state:
 
 ```powershell
@@ -156,6 +163,17 @@ Invoke-WebRequest http://localhost:3001/api/kanban/tasks/5e344f3b-6909-4fb4-9bcf
   Select-Object -ExpandProperty Content
 # → updated Task JSON
 ```
+
+**The rules of a status change**
+
+- A change to `running` resets the startup handshake, so the board starts
+  the task. A task that already runs keeps its handshake.
+- A second step of the same feature is refused:
+  `409 { ok:false, error:"Feature worktree is busy: ..." }`. **A refused
+  change changes nothing** — the row keeps its old status.
+- A change to `done` merges the worktree of the task into the project
+  branch (a task of a feature does not merge on its own: the integrator
+  merges the feature).
 
 > Note: the first PATCH attempt after an idle dev server can exceed a
 > short (5 s) client timeout — the Python CLI cold-start is slow.

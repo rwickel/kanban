@@ -180,10 +180,34 @@ test('kanban.py feature worktree', async (t) => {
     assert.notEqual(r.code, 0);
     assert.match(r.stderr, /Feature worktree is busy/);
     assert.equal(runJson(['task', 'show', b]).status, 'backlog');
+    // The same rule holds for the update path (the drag and drop of the UI).
+    const u = run(['task', 'update', b, '--status', 'running']);
+    assert.notEqual(u.code, 0);
+    assert.match(u.stderr, /Feature worktree is busy/);
+    // A refused change must not change anything. The task was still written
+    // as 'running' before the rule was checked, and two steps wrote into one
+    // feature worktree.
+    assert.equal(runJson(['task', 'show', b]).status, 'backlog');
     // After the first step ends, the next one may start.
     runJson(['task', 'move', a, 'done']);
     const ok = runJson(['task', 'move', b, 'running']);
     assert.equal(ok.status, 'running');
+  });
+
+  await t.test('a live session is not armed again', () => {
+    const task = runJson(['task', 'create', '--project', P, '--title', 'Live session']);
+    runJson(['task', 'update', task.id, '--session-id', 'ses_live', '--startup-phase', 'ready']);
+    runJson(['task', 'move', task.id, 'running']);
+    // A status change resets the handshake: the board starts the task.
+    assert.equal(runJson(['task', 'show', task.id]).startupPhase, null);
+    runJson(['task', 'update', task.id, '--session-id', 'ses_live', '--startup-phase', 'ready']);
+    runJson(['task', 'move', task.id, 'blocked']);
+    // The reconciler un-blocks a task whose session is alive. The handshake
+    // must stay, or the board tab starts the task a second time.
+    runJson(['task', 'update', task.id, '--status', 'running', '--keep-startup-phase']);
+    const row = runJson(['task', 'show', task.id]);
+    assert.equal(row.status, 'running');
+    assert.equal(row.startupPhase, 'ready');
   });
 
   await t.test('a nested step keeps the delegation chain', () => {

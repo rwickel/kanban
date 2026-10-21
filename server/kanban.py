@@ -1963,22 +1963,50 @@ def cmd_task_update(args):
         sets.append("priority = ?")
         params.append(require_priority(args.priority))
         changes["priority"] = args.priority
+    old_status = row["status"]
+    keep_phase = bool(getattr(args, "keep_startup_phase", False))
     if args.status is not None:
+        new_status = require_status(args.status)
+        # The rules are checked BEFORE the write. A refused change must not
+        # change anything: the row was already 'running' while the command
+        # reported the error, and two steps wrote into one feature worktree.
+        if new_status == "running":
+            # One writer per feature worktree (same rule as cmd_task_move).
+            sibling = feature_running_sibling(
+                conn, args.task_id, (row["feature_id"] if "feature_id" in row.keys() else "") or ""
+            )
+            if sibling:
+                fail(f"Feature worktree is busy: task {sibling['id']} ({sibling['title']}) is running. "
+                     f"Run one step of a feature at a time.")
         sets.append("status = ?")
-        params.append(require_status(args.status))
-        changes["status"] = args.status
-        old_status = row["status"]
+        params.append(new_status)
+        changes["status"] = new_status
         # Same arming as cmd_task_move: status flips via update (drag =
         # PATCH, plugin = task update) must reset the runner handshake too.
         # Only when the status really changes: a task that is already running
         # keeps its handshake, so the board does not start it a second time.
-        if args.status == "running" and args.startup_phase is None and old_status != "running":
-            sets.append("startup_phase = ?")
-            params.append(None)
-            changes["startup_phase"] = None
-            sets.append("startup_error = ?")
-            params.append(None)
-            changes["startup_error"] = None
+        if new_status == "running" and old_status != "running":
+            phase = args.startup_phase
+            # A caller that starts the task itself (the delegate) leaves a
+            # mark. The board tab starts every running task without a phase,
+            # so without the mark it would open a second session.
+            if phase is None and (args.actor or "") == "delegate":
+                phase = "sending-prompt"
+            if phase is None and not keep_phase:
+                sets.append("startup_phase = ?")
+                params.append(None)
+                changes["startup_phase"] = None
+                sets.append("startup_error = ?")
+                params.append(None)
+                changes["startup_error"] = None
+            elif phase is not None:
+                sets.append("startup_phase = ?")
+                params.append(phase)
+                changes["startup_phase"] = phase
+        if new_status == "running":
+            # The activity clock of the task starts now.
+            sets.append("heartbeat_at = ?")
+            params.append(now_iso())
     if getattr(args, "expected_sec", None) is not None:
         try:
             sets.append("expected_sec = ?")
@@ -2010,13 +2038,6 @@ def cmd_task_update(args):
     log_event(conn, args.task_id, args.actor, "task.edited", changes)
     conn.commit()
     if args.status == "running":
-        # One writer per feature worktree (same rule as cmd_task_move).
-        sibling = feature_running_sibling(
-            conn, args.task_id, (row["feature_id"] if "feature_id" in row.keys() else "") or ""
-        )
-        if sibling:
-            fail(f"Feature worktree is busy: task {sibling['id']} ({sibling['title']}) is running. "
-                 f"Run one step of a feature at a time.")
         # A removed worktree invalidates the old session — start fresh.
         reset_stale_worktree(conn, args.task_id)
     # A finished task merges its worktree back into the project branch.
@@ -2486,6 +2507,9 @@ def main(argv=None):
     tu.add_argument("--model-id", default=None)
     tu.add_argument("--model-provider", default=None)
     tu.add_argument("--startup-phase", default=None)
+    tu.add_argument("--keep-startup-phase", action="store_true", default=False,
+                    help="Keep the startup phase on a status change. Use it when the "
+                         "session is already alive and must not be started again.")
     tu.add_argument("--startup-error", default=None)
     tu.add_argument("--kind", default=None, choices=("oneshot", "cyclic", "service"))
     tu.add_argument("--expected-sec", type=int, default=None)
