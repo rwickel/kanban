@@ -371,7 +371,9 @@ async function reconcileRunning() {
           continue;
         }
         let completionSignal = "";
-        if (succeeded) {
+        // Always read the last assistant text, also for a failed session: the
+        // completion marker is the agent's own statement that the work is done.
+        {
           for (let i = messages.length - 1; i >= 0; i--) {
             if (msgRoleOf(messages[i]) === "assistant") {
               completionSignal = msgTextOf(messages[i]);
