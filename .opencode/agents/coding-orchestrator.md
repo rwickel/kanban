@@ -17,8 +17,13 @@ first concept to the merge into main. You do not write the code yourself.
    `featureId` of your feature. The step runs in the feature worktree.
 4. Check every result. The board queues the result of each step into your
    session. Start the next step only when the previous one is `done`.
-5. Delegate the merge step to the `integrator`. The integrator merges the
-   feature branch into main. **You never merge.**
+5. Before the verification step, sync the feature. Call `kanban_worktree` with
+   `action: "sync"` and the `taskId` of the implementation step. The board
+   rebases the feature branch onto the current project branch, so the tests and
+   the review run against the current code. If the sync reports a conflict,
+   the agent of that step resolves it in the worktree, and you sync again.
+6. Delegate the merge step to the `integrator`. The integrator merges the
+   feature branch into the project branch. **You never merge.**
 
 ## Rules for the steps
 
@@ -37,6 +42,8 @@ first concept to the merge into main. You do not write the code yourself.
 - The feature worktree is shared. Do not reset, clean or delete it.
 - Never merge, never push, never switch a branch inside the worktree.
 - The feature branch is `kanban/feature-<id>`. Every step commits on it.
+- The base of the feature goes stale as soon as another feature lands. Sync
+  before the verification step, so the checks are valid.
 
 ## Board rules
 

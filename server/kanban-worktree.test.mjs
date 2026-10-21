@@ -138,10 +138,12 @@ test('kanban.py task worktree isolation', async (t) => {
     writeFileSync(join(wt.path, 'src', 'b.txt'), 'uncommitted\n');
     const done = runJson(['task', 'move', T3, 'done']);
     assert.equal(done.status, 'done');
-    assert.equal(done.worktreeState, 'merged');
-    assert.match(done.worktreeNote, /uncommitted/i);
+    // The commit gate: the merge is refused while the work is not committed.
+    assert.notEqual(done.worktreeState, 'merged');
+    assert.match(done.worktreeNote, /not committed/i);
     // The folder stays, so no work is lost.
     assert.equal(existsSync(wt.path), true);
+    assert.equal(existsSync(join(wt.path, 'src', 'b.txt')), true);
   });
 
   await t.test('a conflicting task is reported, not merged', () => {
@@ -216,6 +218,48 @@ test('kanban.py task worktree isolation', async (t) => {
     assert.equal(staged, 'work.txt');
     // The main checkout still shows the new agent file, so it stays committable.
     assert.match(git(REPO, 'status', '--porcelain').stdout, /coding-orchestrator\.md/);
+  });
+
+  await t.test('the merge refuses a worktree with uncommitted work', () => {
+    const task = runJson(['task', 'create', '--project', P, '--title', 'Not committed']).id;
+    const created = runJson(['worktree', 'create', task]);
+    writeFileSync(join(created.path, 'dirty.txt'), 'not committed\n');
+    const merged = runJson(['worktree', 'merge', task]);
+    assert.equal(merged.ok, false);
+    assert.equal(merged.merged, false);
+    assert.match(merged.error, /not committed/);
+    // The work is still in the worktree, and main is untouched.
+    assert.equal(existsSync(join(created.path, 'dirty.txt')), true);
+    assert.equal(git(REPO, 'show', 'HEAD:dirty.txt').code !== 0, true);
+  });
+
+  await t.test('a branch behind the project branch is rebased before the merge', () => {
+    // Feature A lands. Feature B was cut from the old base and is now behind.
+    const a = runJson(['task', 'create', '--project', P, '--title', 'A']).id;
+    const wa = runJson(['worktree', 'create', a]);
+    writeFileSync(join(wa.path, 'a.txt'), 'A\n');
+    git(wa.path, 'add', '.');
+    git(wa.path, 'commit', '-m', 'A');
+    const b = runJson(['task', 'create', '--project', P, '--title', 'B']).id;
+    const wb = runJson(['worktree', 'create', b]);
+    writeFileSync(join(wb.path, 'b.txt'), 'B\n');
+    git(wb.path, 'add', '.');
+    git(wb.path, 'commit', '-m', 'B');
+    // A is merged first, so B is behind.
+    runJson(['task', 'move', a, 'done']);
+    assert.equal(git(REPO, 'show', 'HEAD:a.txt').stdout, 'A');
+    // B does not have A yet.
+    assert.equal(existsSync(join(wb.path, 'a.txt')), false);
+    // The sync moves B onto the current main.
+    const synced = runJson(['worktree', 'sync', b]);
+    assert.equal(synced.ok, true);
+    assert.equal(synced.synced, true);
+    assert.equal(existsSync(join(wb.path, 'a.txt')), true);
+    // Now B merges cleanly and main has both.
+    const merged = runJson(['worktree', 'merge', b]);
+    assert.equal(merged.merged, true);
+    assert.equal(git(REPO, 'show', 'HEAD:a.txt').stdout, 'A');
+    assert.equal(git(REPO, 'show', 'HEAD:b.txt').stdout, 'B');
   });
 
   await t.test('the main checkout is never removed as a worktree', () => {

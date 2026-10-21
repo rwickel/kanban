@@ -456,16 +456,16 @@ export default {
       editor.add({
         name: "kanban_worktree",
         description:
-          "Manage the per-task git worktrees that isolate parallel tasks. action=create gives a task its own folder and branch; action=merge merges that branch into the project branch; action=remove deletes the worktree folder; action=list shows all worktrees of a board. A task that reaches 'done' is merged automatically — use merge to retry a failed or conflicting merge.",
+          "Manage the per-task git worktrees that isolate parallel tasks. action=create gives a task its own folder and branch; action=sync rebases the branch of a task onto the current project branch (call it before the verification step, so the checks run against the current code); action=merge merges that branch into the project branch; action=remove deletes the worktree folder; action=list shows all worktrees of a board. A task that reaches 'done' is merged automatically - use merge to retry a failed or conflicting merge.",
         input: {
           type: "object",
           properties: {
             action: {
               type: "string",
-              enum: ["create", "merge", "remove", "list"],
+              enum: ["create", "sync", "merge", "remove", "list"],
               description: "What to do with the worktree",
             },
-            taskId: str("Task uuid. Required for create, merge and remove."),
+            taskId: str("Task uuid. Required for create, sync, merge and remove."),
             projectId: str("Board uuid. Used by list; defaults to the board of the task."),
             target: str("Target branch for merge (default: the project branch)"),
             cleanup: {
@@ -487,6 +487,11 @@ export default {
           if (!input.taskId?.trim()) toolError("taskId required")
           const taskId = String(input.taskId).trim()
           if (action === "create") return cliResult(await runCli(["worktree", "create", taskId]))
+          if (action === "sync") {
+            const argv = ["worktree", "sync", taskId]
+            if (input.target) argv.push("--target", String(input.target).trim())
+            return cliResult(await runCli(argv))
+          }
           if (action === "merge") {
             const argv = ["worktree", "merge", taskId]
             if (input.target) argv.push("--target", String(input.target).trim())

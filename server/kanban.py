@@ -573,6 +573,38 @@ class _MergeLock:
         return False
 
 
+def is_ancestor(repo, ancestor, descendant) -> bool:
+    """True when `ancestor` is contained in `descendant`.
+
+    This is the "has main moved?" check: if main is an ancestor of the feature
+    branch, the feature contains the current main and the merge is safe. If not,
+    main moved after the last sync and the feature must be rebased first.
+    """
+    code, _, _ = git_run(repo, "merge-base", "--is-ancestor", ancestor, descendant)
+    return code == 0
+
+
+def rebase_feature(repo, worktree_path, branch, target):
+    """Move the feature branch onto the current target branch.
+
+    Returns (ok, note). A conflict aborts the rebase and leaves the branch as
+    it was, so the agent can resolve it in the worktree and retry.
+    """
+    if not worktree_path or not Path(worktree_path).exists():
+        return False, "the worktree folder is gone"
+    code, out, err = git_run(worktree_path, "rebase", target)
+    if code != 0:
+        git_run(worktree_path, "rebase", "--abort")
+        files = []
+        code2, out2, _ = git_run(worktree_path, "diff", "--name-only", "--diff-filter=U")
+        files = [f for f in out2.splitlines() if f.strip()]
+        note = (err or out).strip()[:400]
+        if files:
+            note = f"{note} Conflicting files: {', '.join(files[:10])}"
+        return False, note
+    return True, f"rebased {branch} onto {target}"
+
+
 def merge_worktree(task, project, target=None, cleanup=False):
     """Merge the task branch into the target branch of the main repo.
 
@@ -599,6 +631,34 @@ def merge_worktree(task, project, target=None, cleanup=False):
                          f"Check out '{target}' first, then merge again."}
 
     with _MergeLock(top):
+        # 1. The commit gate: only committed work is merged. Uncommitted work
+        #    would stay in the worktree and the card would say "done" while
+        #    the result is incomplete.
+        path = (task["worktree_path"] if "worktree_path" in task.keys() else "") or ""
+        if path and Path(path).exists():
+            code, dirty, _ = git_run(path, "status", "--porcelain")
+            dirty_files = [f for f in dirty.splitlines() if f.strip()]
+            if dirty_files:
+                return {"ok": False, "merged": False, "conflict": False,
+                        "files": dirty_files,
+                        "error": ("the work is not committed yet: "
+                                  f"{len(dirty_files)} file(s) changed in the worktree. "
+                                  "The agent must commit before the merge."),
+                        "branch": branch, "target": target}
+
+        # 2. The base guard: has the target branch moved since the last sync?
+        #    If yes, the feature is rebased onto it first. The merge then lands
+        #    a branch that contains the current main.
+        rebased = None
+        if not is_ancestor(top, target, branch):
+            ok, note = rebase_feature(top, path, branch, target)
+            if not ok:
+                return {"ok": False, "merged": False, "conflict": True,
+                        "files": [],
+                        "error": (f"the branch is behind {target} and the rebase failed: {note}"),
+                        "branch": branch, "target": target, "needsRebase": True}
+            rebased = note
+
         # The main checkout may hold uncommitted work. Git refuses the merge
         # when the merge would touch those files. Report the dirty state, so
         # the reason is clear on the board.
@@ -618,10 +678,9 @@ def merge_worktree(task, project, target=None, cleanup=False):
                     "error": reason,
                     "branch": branch, "target": target}
         if cleanup:
-            path = (task["worktree_path"] if "worktree_path" in task.keys() else "") or ""
             remove_worktree(top, path, force=True)
     return {"ok": True, "merged": True, "conflict": False, "files": [],
-            "error": None, "branch": branch, "target": target}
+            "error": None, "branch": branch, "target": target, "rebased": rebased}
 
 
 def cmd_worktree_merge(args):
@@ -646,6 +705,40 @@ def cmd_worktree_merge(args):
                   {"error": result.get("error")})
     conn.commit()
     print(json.dumps(result, indent=2))
+    conn.close()
+
+
+def cmd_worktree_sync(args):
+    """Move the worktree branch onto the current project branch (rebase).
+
+    The base of a worktree goes stale as soon as another task or feature is
+    merged. The orchestrator calls this before the verification step, so the
+    checks run against the current code.
+    """
+    conn = get_conn(args.db)
+    task, project = project_row_for_task(conn, args.task_id)
+    repo = (project["path"] or "").strip()
+    top = git_toplevel(repo)
+    branch = (task["worktree_branch"] if "worktree_branch" in task.keys() else "") or ""
+    path = (task["worktree_path"] if "worktree_path" in task.keys() else "") or ""
+    target = (args.target or "").strip() or (project["git_branch"] or "main")
+    if not top:
+        fail(f"Project is not a git repository: {repo}")
+    if not branch:
+        fail("The task has no worktree branch")
+    if is_ancestor(top, target, branch):
+        print(json.dumps({"ok": True, "synced": False, "branch": branch, "target": target,
+                          "note": "The branch already contains the target branch."}, indent=2))
+        conn.close()
+        return
+    ok, note = rebase_feature(top, path, branch, target)
+    if ok:
+        set_worktree_fields(conn, args.task_id, state="active", note=note)
+        log_event(conn, args.task_id, "worktree", "worktree.synced",
+                  {"branch": branch, "target": target})
+    conn.commit()
+    print(json.dumps({"ok": ok, "synced": ok, "branch": branch, "target": target,
+                      "note": note}, indent=2))
     conn.close()
 
 
@@ -2035,6 +2128,10 @@ def main(argv=None):
     wm.add_argument("--target", default=None, help="Target branch (default: the project branch)")
     wm.add_argument("--cleanup", action="store_true", help="Remove the worktree after a successful merge")
     wm.set_defaults(func=cmd_worktree_merge)
+    ws = wsub.add_parser("sync", help="Rebase the worktree branch onto the current project branch.")
+    ws.add_argument("task_id")
+    ws.add_argument("--target", default=None, help="Target branch (default: the project branch)")
+    ws.set_defaults(func=cmd_worktree_sync)
     wr = wsub.add_parser("remove", help="Remove the worktree folder of a task.")
     wr.add_argument("task_id")
     wr.add_argument("--force", action="store_true", help="Remove even with uncommitted changes")

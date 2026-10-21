@@ -1443,6 +1443,13 @@ function kanbanApi() {
           if (req.method === "POST" && parts[0] === "tasks" && parts.length === 3 && parts[2] === "worktree") {
             return json(res, 200, await cli(["worktree", "create", parts[1]]));
           }
+          // POST /api/kanban/tasks/:id/worktree/sync → rebase the branch onto the project branch
+          if (req.method === "POST" && parts[0] === "tasks" && parts.length === 4 && parts[2] === "worktree" && parts[3] === "sync") {
+            const b = await readBody(req);
+            const argv = ["worktree", "sync", parts[1]];
+            if (b?.target) argv.push("--target", String(b.target));
+            return json(res, 200, await cli(argv));
+          }
           // POST /api/kanban/tasks/:id/worktree/merge → merge the task branch into the project branch
           if (req.method === "POST" && parts[0] === "tasks" && parts.length === 4 && parts[2] === "worktree" && parts[3] === "merge") {
             const b = await readBody(req);

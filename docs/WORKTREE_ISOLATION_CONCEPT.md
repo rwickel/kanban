@@ -316,6 +316,53 @@ agent can still write to any folder with an absolute path. The board cannot
 stop that. Give the agent no reason to leave its folder, and check the diff
 in the review step.
 
+## The merge guard
+
+Before the board merges a branch into the project branch, it checks two things.
+
+**1. The commit gate — the work must be committed.**
+
+```
+git -C <worktree> status --porcelain
+```
+
+If the worktree has uncommitted changes, the merge is **refused**:
+
+> *"the work is not committed yet: 3 file(s) changed in the worktree. The agent
+> must commit before the merge."*
+
+The task keeps its worktree and its work. The card shows the reason. Without
+this gate the card would say `done` while part of the result was still in the
+folder.
+
+**2. The base guard — has the project branch moved?**
+
+```
+git merge-base --is-ancestor main <feature branch>
+```
+
+- **exit 0** — the feature branch contains the current `main`. Nothing moved
+  since the last sync. The merge lands.
+- **exit 1** — `main` moved after the last sync. The board **rebases** the
+  feature branch onto `main` first, then merges. A rebase that conflicts is
+  aborted and reported: the agent resolves it in the worktree and the board
+  retries.
+
+So a branch that reaches the project branch always contains the current
+`main`. The checks (verification, review) that ran before the sync are then
+valid for the result that lands.
+
+**The sync, on demand**
+
+```
+python server/kanban.py worktree sync <taskId>
+POST /api/kanban/tasks/:id/worktree/sync
+kanban_worktree { action: "sync", taskId }
+```
+
+The orchestrator calls it after the implementation step and before the
+verification step, so the tests run against the current code.
+
 ## Merge details
 
 - The merge is a plain `git merge --no-edit <branch>` in the main checkout.
