@@ -68,6 +68,28 @@ The plan therefore contains **Task 1**, which fixes these 8 errors with three
 small edits, so that `npm run typecheck` reports no error at the end of the
 feature. The fixes are the same ones the main checkout already has.
 
+### The branch base is behind the project branch
+
+| Fact | Value |
+| --- | --- |
+| Branch base of this feature | `4d11f85` ("Fix assistant chat drag direction and vertical range") |
+| Project branch `main` | `9733a6d` ("feat(worktree): per-task worktree isolation and feature orchestration") |
+| Commits on main after the base | `a8185fe` (chat file preview, safe markdown links) and `9733a6d` (worktree isolation) |
+
+Two facts follow from this and the plan must respect both:
+
+1. `a8185fe` already contains the three fixes of Task 1. The feature branch
+   still needs them, because its base is `4d11f85`. The implementation step
+   must write the same lines as `a8185fe`. Then the merge of the feature
+   branch into main does not conflict on these three files, because both
+   sides change the same lines to the same text.
+2. `9733a6d` adds worktree isolation to `src/mobile/useBoardData.ts`. It
+   creates a worktree for a task, moves an old session into it, and adds the
+   fields `worktreePath`, `worktreeBranch`, `worktreeState` and
+   `worktreeNote` to the task. The feature branch does not have this code.
+   The merge therefore touches the same function on both sides. The notes
+   for the integrator are at the end of this document.
+
 ### The Node import rule
 
 Node runs the test files as ES modules. A runtime import without the file
@@ -408,6 +430,8 @@ Total new cases: 19 + 22 + 14 = **55**. The test run must report at least
 - [ ] `tsconfig.json` is not changed.
 - [ ] The 8 type errors of the branch base are gone. `npm run typecheck`
       reports no error.
+- [ ] The three fixes of Task 1 are the same lines as commit `a8185fe`, so
+      the merge into `main` does not conflict on these three files.
 - [ ] `npm test` reports 0 failures and at least 198 tests.
 - [ ] The new test files use `import assert from 'node:assert/strict';` and
       `import test from 'node:test';`, and they import their module with the
@@ -436,6 +460,7 @@ Total new cases: 19 + 22 + 14 = **55**. The test run must report at least
 | The type check stays broken. | Task 1 fixes the 8 base errors before the new work starts. The check at the end of the feature must report no error at all. |
 | The test run cannot start because `node_modules` is missing. | The implementation step links the `node_modules` of the main checkout into the worktree, or runs `npm install`. The folder is in `.gitignore`, so it never enters the commit. |
 | The merge with the main checkout conflicts. | The changes stay small and touch the same lines as the uncommitted work of the main checkout only in `src/hooks/autoContinue.ts`, `src/components/AssistantChatWindow.tsx` and `src/prompts/boardAssistantPreamble.test.ts`. The same change on both sides merges without a conflict. |
+| The branch base is behind the project branch. | The branch base is `4d11f85`. The project branch `main` is at `9733a6d` and has two more commits. The plan lists the effect of both commits. The integrator notes at the end of this document say what to do when the merge conflicts in `src/mobile/useBoardData.ts`. |
 
 ## Required checks
 
@@ -462,10 +487,29 @@ Each task owns its own files. No file is changed by two tasks.
 
 | Task | Files | Work |
 | --- | --- | --- |
-| 1 | `src/hooks/autoContinue.ts`, `src/components/AssistantChatWindow.tsx`, `src/prompts/boardAssistantPreamble.test.ts` | Fix the 8 type errors of the branch base. `npm run typecheck` must report no error at the end of this task. |
+| 1 | `src/hooks/autoContinue.ts`, `src/components/AssistantChatWindow.tsx`, `src/prompts/boardAssistantPreamble.test.ts` | Fix the 8 type errors of the branch base. The three edits must be the same lines as commit `a8185fe`, so the merge into main stays clean. `npm run typecheck` must report no error at the end of this task. |
 | 2 | `src/hooks/sessionStreamRuntime.ts` (new), `src/hooks/useSessionStream.ts`, `src/hooks/sessionStreamRuntime.test.ts` (new) | Move the feed logic into the new module, make the hook a thin binding, and write the 19 cases A1 to A19. |
 | 3 | `src/mobile/boardController.ts` (new), `src/mobile/useBoardData.ts`, `src/mobile/boardController.test.ts` (new) | Move the board state logic and the task start into the new module, wire the hook to it, and write the 22 cases B1 to B22. |
 | 4 | `src/store/assistantSession.ts`, `src/store/assistantSession.test.ts` (new) | Add the `.ts` extension to the five runtime imports of the store and write the 14 cases C1 to C14. |
 | 5 | none | Run the four checks, fix the failures inside the task that owns the file, and commit the feature branch. |
 
 The order is 1, 2, 3, 4, 5. Task 5 does not write code of its own.
+
+## Notes for the integrator
+
+The merge of the feature branch into `main` will report a conflict in
+`src/mobile/useBoardData.ts`. Both sides changed the same function. The
+integrator must keep both parts:
+
+1. The part of this feature: the hook calls the functions of the new module
+   `src/mobile/boardController.ts` instead of holding the board state logic
+   and the task start body itself.
+2. The part of `main`: the worktree isolation of commit `9733a6d`. It creates
+   a worktree for the task, moves an old session into it, and sets the fields
+   `worktreePath`, `worktreeBranch`, `worktreeState` and `worktreeNote`. These
+   steps belong inside the extracted `runTaskStart` of
+   `src/mobile/boardController.ts`, because that function holds the task start
+   body after the move.
+
+The other files of this feature merge without a conflict. The three files of
+Task 1 carry the same change on both sides.
