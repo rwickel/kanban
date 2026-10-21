@@ -1892,8 +1892,18 @@ def cmd_task_move(args):
         # A task that is already running keeps its handshake. The arming reset
         # only happens on a real change, so the board does not start it twice.
         if old != "running":
+            # A caller that starts the task itself (the delegate) passes its
+            # own phase. The board then sees "running + phase" and does not
+            # start the task a second time.
+            phase = args.startup_phase if getattr(args, "startup_phase", None) is not None else None
+            # A delegate that does not pass a phase still starts the task
+            # itself. The board tab starts every running task without a
+            # phase, so the delegate leaves a mark: without it the tab opens
+            # a second session for the same task (two features, two merges).
+            if phase is None and (args.actor or "") == "delegate":
+                phase = "sending-prompt"
             conn.execute("UPDATE tasks SET status = ?, heartbeat_at = ?, startup_phase = ?, startup_error = ?, updated_at = ? WHERE id = ?",
-                         (status, now_iso(), None, None, now_iso(), args.task_id))
+                         (status, now_iso(), phase, None, now_iso(), args.task_id))
         else:
             conn.execute("UPDATE tasks SET status = ?, heartbeat_at = ?, updated_at = ? WHERE id = ?",
                          (status, now_iso(), now_iso(), args.task_id))
@@ -2314,6 +2324,10 @@ def main(argv=None):
     tm.add_argument("status")
     tm.add_argument("--comment", default=None)
     tm.add_argument("--actor", default="cli")
+    tm.add_argument("--startup-phase", default=None,
+                    help="Keep this startup phase. Use it when the caller starts the "
+                         "task itself (a delegate), so the board does not start it a "
+                         "second time while the session is still being set up.")
     tm.set_defaults(func=cmd_task_move)
 
     tb = tsub.add_parser("deps", help="Show dependency relations (blocked-by, dependents, readiness).")

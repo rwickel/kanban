@@ -176,6 +176,39 @@ The board delivers the result of a finished task into the parent session
   the task were re-armed, it would flip between `blocked` and `running`, and
   every flip would deliver the result again.
 
+## A task is started only once
+
+The board tab starts every task that is `running` and has no startup phase.
+A delegate starts the task itself, so the two must not fight over it.
+
+The rule: **a task that is `running` always has a startup phase.**
+
+| Who starts the task | The phase |
+|---|---|
+| the board tab (a card that was dragged to `running`) | none — the tab starts it |
+| a delegate (`task move ... running --actor delegate`) | `sending-prompt`, then `ready` |
+
+Without this, the race is short but real: the delegate moves the task to
+`running` and writes the session id one second later. The tab polls in
+between, sees a running task with no phase, and opens a **second** session
+for the same task. Two orchestrators then make two features, two concept
+steps and two merges of the same work.
+
+The delegate marks the task before the move, not after:
+
+```
+task create                      → backlog, no session
+task update --session-id X \
+              --startup-phase sending-prompt
+task move running --startup-phase sending-prompt   → running + phase
+send the prompt
+task update --startup-phase ready
+```
+
+The safety net: a task that stays in `sending-prompt` for two minutes
+without a session is `blocked` with the note "The delegate did not finish
+the setup of this task."
+
 ## Data model
 
 ```

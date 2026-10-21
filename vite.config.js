@@ -345,7 +345,20 @@ async function reconcileRunning() {
     for (const t of rows) {
       try {
         const sid = t.sessionId || t.session_id;
-        if (!sid) continue;
+        // A delegate that died while it set the task up leaves the phase
+        // "sending-prompt" and no session. Nobody would ever start it.
+        if (!sid) {
+          const phase = t.startupPhase || t.startup_phase;
+          const updatedAt = Date.parse(t.updatedAt || t.updated_at || "") || 0;
+          if (phase === "sending-prompt" && Date.now() - updatedAt > 120000) {
+            await cli([
+              "task", "update", t.id, "--actor", "reconciler", "--status", "blocked",
+              "--startup-phase", "error",
+              "--startup-error", "The delegate did not finish the setup of this task.",
+            ]).catch(() => null);
+          }
+          continue;
+        }
         if ((t.startupPhase || t.startup_phase) !== "ready") continue;
         const updatedAt = Date.parse(t.updatedAt || t.updated_at || "") || 0;
         if (Date.now() - updatedAt < 20000) continue;
@@ -795,7 +808,8 @@ async function delegateTask(opts) {
   let resolvedAgentId = agentId || null;
   let resolvedAgentName = agentName || null;
 
-  // 2. Create the subtask (backlog), then flip to running.
+  // 2. Create the subtask (backlog). It stays in the backlog until the session
+  // exists, so the board never sees a running task without a session.
   const created = await cli([
     "task", "create", "--project", projectId, "--title", title, "--actor", "delegate",
     "--description", description, "--priority", priority,
@@ -809,7 +823,6 @@ async function delegateTask(opts) {
     ...(featureId ? ["--feature", String(featureId).trim()] : []),
   ]);
   const tid = created.id;
-  await cli(["task", "move", tid, "running", "--actor", "delegate"]);
 
   // Isolation: a feature task works in the feature worktree (shared with the
   // other steps). A plain task gets its own worktree.
@@ -838,10 +851,15 @@ async function delegateTask(opts) {
     const sessJson = await sessRes.json();
     const session = sessJson?.data ?? sessJson;
     if (!session?.id) throw new Error("session create returned no id");
+    // The phase "sending-prompt" is the mark of a task that the delegate
+    // starts itself. The board tab starts every running task without a
+    // phase, so without this mark it would start the task a second time
+    // (two sessions, two features, two merges).
     await cli(["task", "update", tid, "--actor", "delegate", "--session-id", session.id,
       ...(resolvedAgentId ? ["--agent-id", resolvedAgentId] : []),
       ...(resolvedAgentName ? ["--agent-name", resolvedAgentName] : []),
-      "--startup-phase", "ready"]);
+      "--startup-phase", "sending-prompt"]);
+    await cli(["task", "move", tid, "running", "--actor", "delegate", "--startup-phase", "sending-prompt"]);
 
     // 4. Send the work prompt — board follows session outcome; last assistant message is captured as result automatically.
     const styleGuide = loadStyleGuide();
@@ -859,6 +877,8 @@ async function delegateTask(opts) {
       const t = await pRes.text().catch(() => "");
       throw new Error(`send prompt failed (HTTP ${pRes.status}) — ${t.slice(0, 300)}`);
     }
+    // The prompt is in. The board may now follow the session.
+    await cli(["task", "update", tid, "--actor", "delegate", "--startup-phase", "ready"]);
 
     if (!(wait === true || wait === "true")) {
       return { task: await cli(["task", "show", tid]), sessionId: session.id, waited: false, ...(worktree ? { worktree } : {}) };

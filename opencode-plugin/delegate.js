@@ -200,9 +200,6 @@ export async function delegateTool(args, context, ctx) {
     }
   }
 
-  const moved = await runCli(["task", "move", tid, "running", "--actor", "delegate"])
-  if (!moved.ok) toolError(moved.text)
-
   // The project path drives the session location, and it validates the agent team.
   let projectPath = ""
   try {
@@ -243,13 +240,19 @@ export async function delegateTool(args, context, ctx) {
     })
     if (!session?.id) throw new Error("session create returned no id")
 
+    // The phase "sending-prompt" marks a task that the delegate starts
+    // itself. The board tab starts every running task without a phase, so
+    // without this mark it would start the task a second time (two sessions,
+    // two features, two merges).
     await runCli([
       "task", "update", tid, "--actor", "delegate",
       "--session-id", session.id,
       ...(args.agentId ? ["--agent-id", args.agentId] : []),
       ...(args.agentName ? ["--agent-name", args.agentName] : []),
-      "--startup-phase", "ready",
+      "--startup-phase", "sending-prompt",
     ])
+    const moved = await runCli(["task", "move", tid, "running", "--actor", "delegate", "--startup-phase", "sending-prompt"])
+    if (!moved.ok) toolError(moved.text)
 
     const prompt = buildDelegatePrompt({
       agentLabel,
@@ -264,6 +267,8 @@ export async function delegateTool(args, context, ctx) {
     })
 
     await ctx.session.prompt({ sessionID: session.id, text: prompt })
+    // The prompt is in. The board may now follow the session.
+    await runCli(["task", "update", tid, "--actor", "delegate", "--startup-phase", "ready"])
 
     if (!shouldWait) {
       const cur = await runCli(["task", "show", tid])

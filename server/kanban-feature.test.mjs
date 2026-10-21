@@ -208,4 +208,33 @@ test('kanban.py feature worktree', async (t) => {
     runJson(['task', 'move', parent, 'done']);
     assert.equal(runJson(['task', 'deps', child]).ready, true);
   });
+
+  // The board tab starts every running task that has no startup phase. A
+  // delegate starts the task itself, so it must leave a phase behind. Without
+  // it the tab starts a second session for the same task: two features, two
+  // steps, two merges.
+  await t.test('a delegate keeps the startup phase when it starts the task', () => {
+    const task = runJson(['task', 'create', '--project', P, '--title', 'Delegated step']);
+    // A normal move resets the phase: the board starts the task.
+    runJson(['task', 'move', task.id, 'running']);
+    assert.equal(runJson(['task', 'show', task.id]).startupPhase, null);
+    // The delegate passes its own phase: the board leaves the task alone.
+    runJson(['task', 'move', task.id, 'backlog']);
+    runJson(['task', 'move', task.id, 'running', '--startup-phase', 'sending-prompt']);
+    assert.equal(runJson(['task', 'show', task.id]).startupPhase, 'sending-prompt');
+    // The phase is set before the task runs, never after.
+    const order = runJson(['task', 'show', task.id]);
+    assert.equal(order.status, 'running');
+    assert.equal(order.startupPhase, 'sending-prompt');
+  });
+
+  await t.test('a delegate that starts the task leaves a mark without a phase', () => {
+    const task = runJson(['task', 'create', '--project', P, '--title', 'Delegated by the agent']);
+    // The delegate actor starts the task. The board must not start it again.
+    runJson(['task', 'move', task.id, 'running', '--actor', 'delegate']);
+    assert.equal(runJson(['task', 'show', task.id]).startupPhase, 'sending-prompt');
+    // The delegate writes the session and the phase "ready" afterwards.
+    runJson(['task', 'update', task.id, '--actor', 'delegate', '--session-id', 'ses_x', '--startup-phase', 'ready']);
+    assert.equal(runJson(['task', 'show', task.id]).startupPhase, 'ready');
+  });
 });
