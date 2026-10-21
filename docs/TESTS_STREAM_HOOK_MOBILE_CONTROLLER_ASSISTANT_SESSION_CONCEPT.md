@@ -25,6 +25,8 @@ modules that the test process can import and call directly.
 
 - The test code itself. It is written in the later implementation step.
 - Any change of product behaviour. The extraction is a move of existing code.
+  The one exception is the outcome reset of the stream runtime. It is listed
+  under the new module and in the acceptance criteria.
 - The desktop file `src/App.tsx`. It must not change.
 - Any new test dependency. `package.json` keeps its current dependencies.
 - The server, the scripts and the other front-end modules. They are not
@@ -32,7 +34,7 @@ modules that the test process can import and call directly.
 - Sharing code between the desktop and the mobile controller. The mobile
   controller is a copy of the desktop logic on purpose.
 
-## Facts that constrain the plan (all verified in this worktree)
+## Facts that constrain the plan (all verified in this worktree on 2026-10-21)
 
 | Fact | Value |
 | --- | --- |
@@ -45,7 +47,7 @@ modules that the test process can import and call directly.
 | DOM in the test process | none. No `window`, no `document`, no `localStorage` |
 | React in the test process | `react` can be imported, but no renderer exists. Hooks cannot be called |
 | `tsconfig.json` | `allowImportingTsExtensions: true` and `noEmit: true` are already set, so `import x from './x.ts'` is valid TypeScript and valid for Vite |
-| `node_modules` | missing in this worktree. The main checkout `C:\Users\rober\work\kanban\node_modules` has it |
+| `node_modules` | present in this worktree. It is a junction to `C:\Users\rober\work\kanban\node_modules`. `npm test` and `npm run build` run here without any setup |
 
 ### The 8 type errors that exist at the branch base
 
@@ -273,6 +275,9 @@ Rules for the move:
   the session, writes the instruction entry once per session, sends the
   prompt and reports the phase. The `updateTask` calls and the `onTask`
   callback replace the `setTasks` calls of the old code.
+- The `project` argument of `runTaskStart` is the project of the task. The
+  hook finds it by `task.projectId`, exactly as the current code does. A task
+  without a project gets `null`.
 - The hook `src/mobile/useBoardData.ts` keeps its returned object exactly and
   calls the new functions. The desktop copy in `src/App.tsx` is not touched.
 
@@ -411,6 +416,8 @@ Total new cases: 19 + 22 + 14 = **55**. The test run must report at least
 - [ ] `src/hooks/useSessionStream.ts` uses the runtime, keeps the same
       exported names (`useSessionStream`, `ChatStatus`) and returns the same
       object `{ messages, status, session, sessionError, usage, outcome, retry }`.
+- [ ] The stream runtime resets the outcome to `null` when it starts. This is
+      the only behaviour change of the move.
 - [ ] `src/hooks/sessionStreamRuntime.test.ts` holds the 19 cases A1 to A19
       with the exact names of the table above.
 - [ ] `src/mobile/boardController.ts` exists, has no React import, and exports
@@ -458,7 +465,7 @@ Total new cases: 19 + 22 + 14 = **55**. The test run must report at least
 | The background write of the preamble runs after the test ends. | The test waits for the background work before it restores the fake `fetch`, and it counts the calls per URL instead of the total count of calls. |
 | The state of one test leaks into the next test. | `node --test` runs every test file in its own process. Inside one file the test uses a different project id per case and empties the storage between the cases. |
 | The type check stays broken. | Task 1 fixes the 8 base errors before the new work starts. The check at the end of the feature must report no error at all. |
-| The test run cannot start because `node_modules` is missing. | The implementation step links the `node_modules` of the main checkout into the worktree, or runs `npm install`. The folder is in `.gitignore`, so it never enters the commit. |
+| The test run cannot start because `node_modules` is missing. | The worktree has `node_modules` as a junction to the main checkout. The checks run without setup. If the junction is gone, the implementation step makes it again or runs `npm install`. The folder is in `.gitignore`, so it never enters the commit. |
 | The merge with the main checkout conflicts. | The changes stay small and touch the same lines as the uncommitted work of the main checkout only in `src/hooks/autoContinue.ts`, `src/components/AssistantChatWindow.tsx` and `src/prompts/boardAssistantPreamble.test.ts`. The same change on both sides merges without a conflict. |
 | The branch base is behind the project branch. | The branch base is `4d11f85`. The project branch `main` is at `9733a6d` and has two more commits. The plan lists the effect of both commits. The integrator notes at the end of this document say what to do when the merge conflicts in `src/mobile/useBoardData.ts`. |
 
@@ -474,12 +481,17 @@ Run these commands in the feature worktree
 | 3 | `npm run build` | The build ends with `✓ built`. No error. |
 | 4 | `git status --short` | Only the planned files are listed. `node_modules/` and `dist/` do not appear. |
 
-The implementation step must first make the `node_modules` of the worktree
-available. On Windows:
+The `node_modules` of the worktree is already a junction to
+`C:\Users\rober\work\kanban\node_modules`. The four checks of this table run
+without any setup. If the junction is gone, make it again on Windows:
 
 ```
 New-Item -ItemType Junction -Path node_modules -Target C:\Users\rober\work\kanban\node_modules
 ```
+
+The command fails when the path already exists. Check it first with
+`Test-Path node_modules`. The folder is in `.gitignore`, so it never enters
+the commit.
 
 ## Task split for the implementation step
 
