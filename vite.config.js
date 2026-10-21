@@ -274,9 +274,10 @@ async function reconcileRunning() {
   if (reconcileBusy) return;
   reconcileBusy = true;
   try {
-    const [running, blocked] = await Promise.all([
+    const [running, blocked, all] = await Promise.all([
       cli(["task", "list", "--status", "running"]).catch(() => []),
       cli(["task", "list", "--status", "blocked"]).catch(() => []),
+      cli(["task", "list"]).catch(() => []),
     ]);
     // A reconciler error can mark a task blocked while its OpenCode session is
     // still active. Include blocked tasks so the session remains authoritative.
@@ -284,6 +285,16 @@ async function reconcileRunning() {
       ...(Array.isArray(running) ? running : []),
       ...(Array.isArray(blocked) ? blocked : []),
     ];
+    // Child tasks: a task that delegated work has children with its own
+    // session id as parent. A parent whose turn ended without the completion
+    // marker keeps waiting for them.
+    const childrenByParent = new Map();
+    for (const row of Array.isArray(all) ? all : []) {
+      const parent = String(row.parentSessionId || row.parent_session_id || "").trim();
+      if (!parent) continue;
+      if (!childrenByParent.has(parent)) childrenByParent.set(parent, []);
+      childrenByParent.get(parent).push(row);
+    }
     const apiBase = ocApiBase();
     const H = ocAuthHeaders();
     for (const t of rows) {
@@ -313,7 +324,12 @@ async function reconcileRunning() {
         const failLike = ltype === "idle" && ["failed", "error"].includes(outcome);
         const sessionFailed = ["failed", "error"].includes(outcome);
         const lastActivity = messageTimestamp(last) || messageTimestamp(session) || updatedAt;
-        const stale = t.status === "running" && !succeeded && !failLike && !sessionFailed &&
+        // An idle session is WAITING for the next message. That is normal for a
+        // delegating agent: it ends its turn and the board delivers the result
+        // of the sub-task later. Only a session that is mid-turn and silent is
+        // stuck.
+        const sessionIdle = ltype === "idle";
+        const stale = t.status === "running" && !succeeded && !failLike && !sessionFailed && !sessionIdle &&
           lastActivity > 0 && Date.now() - lastActivity >= STALE_SESSION_MS;
         if (stale) {
           await interruptSession(apiBase, H, sid).catch(() => null);
@@ -325,7 +341,10 @@ async function reconcileRunning() {
           continue;
         }
         if (!succeeded && !failLike && !sessionFailed) {
-          if (t.status === "blocked") {
+          // The session works and is not stuck. A blocked task with a live
+          // session goes back to running. Never re-arm an idle session: it is
+          // waiting, and re-arming would start the task a second time.
+          if (t.status === "blocked" && !sessionIdle) {
             await cli(["task", "update", t.id, "--actor", "reconciler", "--status", "running"])
               .catch(() => null);
           }
@@ -341,7 +360,17 @@ async function reconcileRunning() {
           }
         }
         const completion = completionStatus({ succeeded, failed: failLike || sessionFailed, kind: t.kind, finalAssistantText: completionSignal });
-        const next = completion?.status || "blocked";
+        let next = completion?.status || "blocked";
+        // A delegating agent ends its turn before the delegated work is done.
+        // Its sub-tasks carry the work. The task stays running and waits for
+        // the board to deliver their results into its session.
+        if (next === "blocked" && succeeded && !completionSignal.includes("KANBAN_TASK_INCOMPLETE")) {
+          const children = childrenByParent.get(String(sid)) || [];
+          const waiting = children.filter((c) => c.status === "running" || c.status === "backlog");
+          if (waiting.length > 0) {
+            next = "running";
+          }
+        }
         // Last assistant text (skip user/system) → result, unless already set.
         let resultText = "";
         for (let i = messages.length - 1; i >= 0; i--) {

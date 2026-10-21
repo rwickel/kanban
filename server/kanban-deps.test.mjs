@@ -76,12 +76,23 @@ test('kanban.py task dependencies', async (t) => {
   });
 
   await t.test('task update persists fields and resets startup state on running', () => {
+    // From another status: the handshake resets, so the board starts the task.
+    runJson(['task', 'move', A, 'backlog']);
     runJson(['task', 'update', A, '--startup-phase', 'ready', '--startup-error', 'old']);
     const updated = runJson(['task', 'update', A, '--status', 'running', '--title', 'Updated']);
     assert.equal(updated.title, 'Updated');
     assert.equal(updated.status, 'running');
     assert.equal(updated.startupPhase, null);
     assert.equal(updated.startupError, null);
+  });
+
+  await t.test('a task that is already running keeps its startup state', () => {
+    // The reconciler keeps a waiting task running. The handshake must stay, or
+    // the board starts the same task a second time.
+    runJson(['task', 'update', A, '--startup-phase', 'ready']);
+    const again = runJson(['task', 'update', A, '--status', 'running']);
+    assert.equal(again.status, 'running');
+    assert.equal(again.startupPhase, 'ready');
   });
 
   await t.test('watch blocks stale oneshot tasks but keeps services running', () => {

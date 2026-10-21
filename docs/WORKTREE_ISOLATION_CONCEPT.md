@@ -131,6 +131,29 @@ step stops the chain, and the orchestrator decides: fix it in the same
 worktree, or send the step again. The result is delivered either way, so the
 orchestrator always knows what happened.
 
+## How the board reads a running session
+
+The board watches every running task and reads its OpenCode session.
+
+| Session state | The board does |
+|---|---|
+| the turn ended with `KANBAN_TASK_COMPLETE` | the task is `done` |
+| the turn ended without the marker | the task is `blocked` — **unless** the task has sub-tasks that still run |
+| the turn ended without the marker, and sub-tasks are running | the task stays `running` and waits for their results |
+| the session failed | the task is `blocked` with the error of the session |
+| the session is idle and waits for the next message | **nothing**. An idle session is waiting, not stuck. |
+| the session works and is silent for 10 minutes | the task is `blocked` (stale) and the session is interrupted |
+| the task is `blocked` and its session still works | the task goes back to `running` |
+
+Two rules matter for the orchestration:
+
+- **A delegating agent ends its turn before the delegated work is done.** The
+  board keeps such a task `running` as long as its sub-tasks run. The
+  orchestrator wakes up when the board queues their results into its session.
+- **A task that stays `running` keeps its startup handshake.** The board does
+  not start it a second time. Only a real status change (for example
+  `backlog → running`) resets the handshake and starts the task.
+
 ## Data model
 
 ```

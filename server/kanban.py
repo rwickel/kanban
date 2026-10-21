@@ -1630,9 +1630,12 @@ def cmd_task_update(args):
         sets.append("status = ?")
         params.append(require_status(args.status))
         changes["status"] = args.status
+        old_status = row["status"]
         # Same arming as cmd_task_move: status flips via update (drag =
         # PATCH, plugin = task update) must reset the runner handshake too.
-        if args.status == "running" and args.startup_phase is None:
+        # Only when the status really changes: a task that is already running
+        # keeps its handshake, so the board does not start it a second time.
+        if args.status == "running" and args.startup_phase is None and old_status != "running":
             sets.append("startup_phase = ?")
             params.append(None)
             changes["startup_phase"] = None
@@ -1726,8 +1729,14 @@ def cmd_task_move(args):
     # this, a re-run of a finished task (done → backlog → running) keeps the
     # stale `ready` phase and execution never fires again.
     if status == "running":
-        conn.execute("UPDATE tasks SET status = ?, heartbeat_at = ?, startup_phase = ?, startup_error = ?, updated_at = ? WHERE id = ?",
-                     (status, now_iso(), None, None, now_iso(), args.task_id))
+        # A task that is already running keeps its handshake. The arming reset
+        # only happens on a real change, so the board does not start it twice.
+        if old != "running":
+            conn.execute("UPDATE tasks SET status = ?, heartbeat_at = ?, startup_phase = ?, startup_error = ?, updated_at = ? WHERE id = ?",
+                         (status, now_iso(), None, None, now_iso(), args.task_id))
+        else:
+            conn.execute("UPDATE tasks SET status = ?, heartbeat_at = ?, updated_at = ? WHERE id = ?",
+                         (status, now_iso(), now_iso(), args.task_id))
     else:
         conn.execute("UPDATE tasks SET status = ?, heartbeat_at = ?, updated_at = ? WHERE id = ?",
                      (status, row["heartbeat_at"] if "heartbeat_at" in row.keys() else None, now_iso(), args.task_id))
