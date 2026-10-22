@@ -564,6 +564,27 @@ async function reconcileRunning() {
 // Every finished run costs its parent one model pass — that's the documented
 // price of "results link back to this chat".
 
+/**
+ * The parent sessions that own a plan: a coding orchestrator or a goal task.
+ * They must continue their work when a result arrives. The user facing
+ * assistant has no task row and only reports.
+ */
+async function parentsWithPlan(parentSessions) {
+  const out = new Set();
+  if (!parentSessions.length) return out;
+  const rows = await cli(["task", "list"]).catch(() => []);
+  for (const t of Array.isArray(rows) ? rows : []) {
+    const sid = String(t.sessionId || t.session_id || "").trim();
+    if (!sid || !parentSessions.includes(sid)) continue;
+    const agent = String(t.agentId || t.agent_id || "").trim();
+    const kind = String(t.kind || "").trim();
+    if (agent === "coding-orchestrator" || agent === "board-manager" || kind === "goal") {
+      out.add(sid);
+    }
+  }
+  return out;
+}
+
 async function deliverResultsToParents() {
   // Pure rules live in scripts/linkback.mjs (unit tested) — here is only I/O.
   if (!linkbackEnabled(process.env.KANBAN_RESULT_LINKBACK)) return;
@@ -580,7 +601,10 @@ async function deliverResultsToParents() {
       // every pass so the scan stays clean even when mixed with live rows.
       await cli(["task", "notify-mark", ...selfIds, "--actor", "notifier"]).catch(() => null);
     }
-    const plan = planDeliveries(byParent, LINKBACK_CAP_PER_PARENT);
+    // A parent that owns a plan must continue after a result. The user facing
+    // assistant only reports and waits for the user.
+    const continueParents = await parentsWithPlan([...byParent.keys()]);
+    const plan = planDeliveries(byParent, LINKBACK_CAP_PER_PARENT, { continueParents });
     const apiBase = ocApiBase();
     const H = ocAuthHeaders();
     for (const { parent, text, ids } of plan.values()) {

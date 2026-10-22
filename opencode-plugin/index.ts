@@ -51,7 +51,7 @@ export default {
 
       editor.add({
         name: "kanban_list_models",
-        description: "List models available from the connected OpenCode providers for delegation.",
+        description: "kanban_list_models: kanban_list_models: List models available from the connected OpenCode providers for delegation.",
         input: { type: "object", properties: {}, additionalProperties: false },
         options: { namespace: "kanban" },
         execute: async () => {
@@ -82,7 +82,7 @@ export default {
       editor.add({
         name: "kanban_update_project_models",
         description:
-          "Replace a project's allowed model list after checking it against the current OpenCode model list. Pass an empty array to remove the restriction.",
+          "kanban_update_project_models: Replace a project's allowed model list after checking it against the current OpenCode model list. Pass an empty array to remove the restriction.",
         input: {
           type: "object",
           properties: {
@@ -130,7 +130,7 @@ export default {
       editor.add({
         name: "kanban_create_board",
         description:
-          "Create a new kanban board (project). Returns the created board JSON including its uuid. Pass folder (name inside KANBAN_PROJECTS_ROOT) or path (must be inside KANBAN_PROJECTS_ROOT).",
+          "kanban_create_board: Create a new kanban board (project). Returns the created board JSON including its uuid. Pass folder (name inside KANBAN_PROJECTS_ROOT) or path (must be inside KANBAN_PROJECTS_ROOT).",
         input: {
           type: "object",
           properties: {
@@ -167,7 +167,7 @@ export default {
 
       editor.add({
         name: "kanban_list_boards",
-        description: "List all kanban boards (projects) from the shared store.",
+        description: "kanban_list_boards: kanban_list_boards: List all kanban boards (projects) from the shared store.",
         input: { type: "object", properties: {}, additionalProperties: false },
         options: { namespace: "kanban" },
         execute: async () => cliResult(await runCli(["project", "list", "--json"])),
@@ -175,7 +175,7 @@ export default {
 
       editor.add({
         name: "kanban_get_board",
-        description: "Show one kanban board by id with its task counts.",
+        description: "kanban_get_board: kanban_get_board: Show one kanban board by id with its task counts.",
         input: {
           type: "object",
           properties: { projectId: str("Board uuid (project id)") },
@@ -196,7 +196,7 @@ export default {
       editor.add({
         name: "kanban_update_board",
         description:
-          "Patch a kanban board's name, folder/path, description, git settings, or agent team. Returns updated board JSON.",
+          "kanban_update_board: Patch a kanban board's name, folder/path, description, git settings, or agent team. Returns updated board JSON.",
         input: {
           type: "object",
           properties: {
@@ -236,7 +236,7 @@ export default {
 
       editor.add({
         name: "kanban_delete_board",
-        description: "Delete a kanban board and all its tasks. This cannot be undone.",
+        description: "kanban_delete_board: kanban_delete_board: Delete a kanban board and all its tasks. This cannot be undone.",
         input: {
           type: "object",
           properties: { projectId: str("Board uuid (project id) to delete") },
@@ -255,7 +255,7 @@ export default {
       editor.add({
         name: "kanban_create_task",
         description:
-          "Create a new task in a project's backlog. Returns the created task JSON including its uuid. The calling session is attached as parentSessionId automatically, and the server links the new task to the task that owns that session (parentTaskId). Never pass a parent session yourself: the parent is always the session you run in. Pass blockedByTaskIds to make the task wait for other tasks of the same project.",
+          "kanban_create_task: Create a new task in a project's backlog. Returns the created task JSON including its uuid. The calling session is attached as parentSessionId automatically, and the server links the new task to the task that owns that session (parentTaskId). Never pass a parent session yourself: the parent is always the session you run in. Pass blockedByTaskIds to make the task wait for other tasks of the same project.",
         input: {
           type: "object",
           properties: {
@@ -298,7 +298,7 @@ export default {
       editor.add({
         name: "kanban_list_tasks",
         description:
-          "List tasks from the shared store, optionally filtered by project and/or status.",
+          "kanban_list_tasks: List tasks from the shared store, optionally filtered by project and/or status.",
         input: {
           type: "object",
           properties: {
@@ -318,7 +318,7 @@ export default {
 
       editor.add({
         name: "kanban_task_status",
-        description: "Show one task by id. Without a task id, list recent board events.",
+        description: "kanban_task_status: kanban_task_status: Show one task by id. Without a task id, list recent board events.",
         input: {
           type: "object",
           properties: { taskId: str("Task uuid. If omitted, lists recent events instead.") },
@@ -333,7 +333,7 @@ export default {
 
       editor.add({
         name: "kanban_start_task",
-        description: "Start or retry an existing blocked/backlog/done task in place. Requires an agent on the project team and an available, allowed model/provider pair. Never creates a duplicate task.",
+        description: "kanban_start_task: kanban_start_task: Start or retry an existing blocked/backlog/done task in place. Requires an agent on the project team and an available, allowed model/provider pair. Never creates a duplicate task.",
         input: {
           type: "object",
           properties: {
@@ -362,7 +362,7 @@ export default {
       editor.add({
         name: "kanban_update_status",
         description:
-          "Move a kanban task to a new status. Call with status 'done' when complete, 'blocked' if stuck. Prefer task_result for the answer; result/resultContext here are stored alongside the move. Do NOT rewrite the description.",
+          "kanban_update_status: Move a kanban task to a new status. Call with status 'done' when complete, 'blocked' if stuck. Prefer task_result for the answer; result/resultContext here are stored alongside the move. Do NOT rewrite the description.",
         input: {
           type: "object",
           properties: {
@@ -392,7 +392,7 @@ export default {
       editor.add({
         name: "kanban_task_result",
         description:
-          "Optional. Store or override the board's visible result for a task (shown under the card). Normally the last assistant message becomes the result automatically — use this only when you need a different, corrected, or richer result. Never write your answer into the description.",
+          "kanban_task_result: Optional. Store or override the board's visible result for a task (shown under the card). Normally the last assistant message becomes the result automatically — use this only when you need a different, corrected, or richer result. Never write your answer into the description.",
         input: {
           type: "object",
           properties: {
@@ -420,7 +420,7 @@ export default {
       editor.add({
         name: "kanban_update_task",
         description:
-          "Patch a task's metadata (title/description/priority/parent-session/depends-on). The description is the original task brief — do NOT overwrite it with your answer. Write your answer with task_result instead. Returns updated task JSON.",
+          "kanban_update_task: Patch a task's metadata (title/description/priority/parent-session/depends-on). The description is the original task brief — do NOT overwrite it with your answer. Write your answer with task_result instead. Returns updated task JSON.",
         input: {
           type: "object",
           properties: {
@@ -461,7 +461,7 @@ export default {
       editor.add({
         name: "kanban_worktree",
         description:
-          "Manage the per-task git worktrees that isolate parallel tasks. action=create gives a task its own folder and branch; action=sync rebases the branch of a task onto the current project branch (call it before the verification step, so the checks run against the current code); action=merge merges that branch into the project branch; action=remove deletes the worktree folder; action=list shows all worktrees of a board. A task that reaches 'done' is merged automatically - use merge to retry a failed or conflicting merge.",
+          "kanban_worktree: Manage the per-task git worktrees that isolate parallel tasks. action=create gives a task its own folder and branch; action=sync rebases the branch of a task onto the current project branch (call it before the verification step, so the checks run against the current code); action=merge merges that branch into the project branch; action=remove deletes the worktree folder; action=list shows all worktrees of a board. A task that reaches 'done' is merged automatically - use merge to retry a failed or conflicting merge.",
         input: {
           type: "object",
           properties: {
@@ -514,7 +514,7 @@ export default {
       editor.add({
         name: "kanban_heartbeat",
         description:
-          "Report that this task is still alive, with a short progress note. The progress text shows on the board card. Send it once before you wait for a sub-task. Never loop or sleep: end your turn instead — the board queues the result of a finished sub-task into your session.",
+          "kanban_heartbeat: Report that this task is still alive, with a short progress note. The progress text shows on the board card. Send it once before you wait for a sub-task. Never loop or sleep: end your turn instead — the board queues the result of a finished sub-task into your session.",
         input: {
           type: "object",
           properties: {
@@ -538,7 +538,7 @@ export default {
       editor.add({
         name: "kanban_feature",
         description:
-          "Manage the feature worktrees of this board. A feature groups the steps of one unit of work (concept, implementation, verification, review, merge). action=create gives the feature one worktree and one branch that all its steps share. action=show lists the feature with its tasks. action=list shows the features of a board. action=merge merges the feature branch into the project branch (main) — only the integrator does this. action=delete removes the feature worktree; its tasks stay on the board.",
+          "kanban_feature: Manage the feature worktrees of this board. A feature groups the steps of one unit of work (concept, implementation, verification, review, merge). action=create gives the feature one worktree and one branch that all its steps share. action=show lists the feature with its tasks. action=list shows the features of a board. action=merge merges the feature branch into the project branch (main) — only the integrator does this. action=delete removes the feature worktree; its tasks stay on the board.",
         input: {
           type: "object",
           properties: {
@@ -593,7 +593,7 @@ export default {
       editor.add({
         name: "kanban_delegate",
         description:
-          "Create a task for another agent on the team and start it immediately. Fire-and-forget by default — returns { task, sessionId, waited:false, parentSessionId } right away so the caller can fan out. Pass wait:true to block until done/blocked. This session is attached as parentSessionId automatically and is always the parent of the new task; never pass a parent session yourself. The subtask flips to done/blocked when the teammate is done. Pass blockedByTaskIds to make the subtask wait for other tasks: when a predecessor is not done yet the subtask is created in the backlog (started:false) instead of running. Pass featureId to run the subtask in the worktree of a feature, shared with the other steps of that feature. Every subtask without a feature gets its own git worktree, so parallel subtasks never share files. When you delegate from inside a delegated task, keep wait:false — the board queues the subtask result back into your session.",
+          "kanban_delegate: Create a task for another agent on the team and start it immediately. Fire-and-forget by default — returns { task, sessionId, waited:false, parentSessionId } right away so the caller can fan out. Pass wait:true to block until done/blocked. This session is attached as parentSessionId automatically and is always the parent of the new task; never pass a parent session yourself. The subtask flips to done/blocked when the teammate is done. Pass blockedByTaskIds to make the subtask wait for other tasks: when a predecessor is not done yet the subtask is created in the backlog (started:false) instead of running. Pass featureId to run the subtask in the worktree of a feature, shared with the other steps of that feature. Every subtask without a feature gets its own git worktree, so parallel subtasks never share files. When you delegate from inside a delegated task, keep wait:false — the board queues the subtask result back into your session.",
         input: {
           type: "object",
           properties: {
@@ -639,7 +639,7 @@ export default {
       editor.add({
         name: "kanban_message_to",
         description:
-          "Send a follow-up into an existing subtask session. Fire-and-forget by default. The answer is queued into the calling parent chat. Pass wait:true only when an immediate tool result is required.",
+          "kanban_message_to: Send a follow-up into an existing subtask session. Fire-and-forget by default. The answer is queued into the calling parent chat. Pass wait:true only when an immediate tool result is required.",
         input: {
           type: "object",
           properties: {

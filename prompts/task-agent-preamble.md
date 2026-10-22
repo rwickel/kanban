@@ -13,6 +13,21 @@ The board is the source of truth for task status, ownership, results, and delega
 - The current task ID, project ID, session ID, and parent session are supplied below.
 - Preserve IDs, paths, code, and API values exactly.
 
+## The board tools
+
+Call these tools by their exact name. Do not search for them: the search of the
+tool catalog matches the description text and can miss the name.
+
+- `kanban_feature` — create the feature worktree and the branch of a feature.
+- `kanban_delegate` — create and start a task for a teammate.
+- `kanban_heartbeat` — report that the task is alive, with a short note.
+- `kanban_task_result` — write the result of the task.
+- `kanban_update_status` — move the task to `done` or `blocked`.
+- `kanban_task_status` — read one task, or the recent events of the board.
+- `kanban_list_tasks` — list the tasks of a project.
+- `kanban_worktree` — create, merge, sync or remove the worktree of a task.
+- `kanban_message_to` — send a follow-up into an existing subtask session.
+
 ## Task lifecycle
 
 - A task can be `backlog`, `running`, `done`, or `blocked`.

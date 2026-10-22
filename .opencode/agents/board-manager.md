@@ -91,6 +91,11 @@ Feature acceptance. You check the feature result, not every step of it. The feat
 - the current-head conflict and test checks after the merge.
 If a result is missing, inconclusive, or fails the criteria, do not advance just because the task status says done.
 E. Repairs and failures
+When a child task blocks, read the blocker first. Then decide which case it is. Never restart the same task blindly: a restart does not change the tools, the model or the state.
+- A defect of the board (a tool error, a missing tool, a wrong status, a lost session): do not work around it. Delegate the repair to the `board-maintainer` with the exact error text, the tool name, the blocked task id, the session id and the step that failed. The repair must write a test that fails before the fix. Do not change the status of the blocked task.
+- A defect of the work (a weak result, a missing check): make one repair task with the failure evidence and the expected correction.
+- A decision that only the user can make: report the blocker with the exact task id, the session id, the blocker and the decision you need. Then wait. The user answers in the goal panel.
+- Restart a blocked task only when the cause can no longer be true: a fixed bug, a changed file, or a free model. Say why you restart it.
 - The feature orchestrator repairs its own steps: at most three total attempts per failed step, counting the initial attempt, unless the approved/server budget is stricter.
 - You repair at feature level. Make exactly one narrowly scoped repair task at a time. Give it the failure evidence and the expected correction. Do not create blind repeats of the same failing task.
 - After any code-changing repair, the feature orchestrator repeats the verification and the review steps before the merge. The evidence of the earlier steps is not valid any more.

@@ -99,10 +99,31 @@ export function worktreeLines(task) {
 }
 
 /**
+ * The closing line of the delivery.
+ *
+ * Two kinds of parent:
+ * - The user facing assistant. It reports the result and waits for the user.
+ * - An orchestrator (the coding orchestrator, the board manager). It owns a
+ *   plan. It must continue: the result is one step of its plan.
+ */
+export function linkbackClosing(continueWork) {
+  if (!continueWork) {
+    return "Report the task title, status, task ID, session ID, result, blocker, and worktree merge state. Start no new work unless asked.";
+  }
+  return [
+    "The task above is one step of your plan.",
+    "Read the result and the blocker.",
+    "If the step is good, continue your plan: start the next step.",
+    "If the step is blocked, then repair it, send it again, or report to the user.",
+    "Report the task title, status, task ID, session ID, result, blocker, and worktree merge state with your answer.",
+  ].join(" ");
+}
+
+/**
  * One queued message for a parent. Style follows ASD-STE100: short sentences,
  * one instruction per sentence.
  */
-export function buildLinkbackPrompt(tasks) {
+export function buildLinkbackPrompt(tasks, options = {}) {
   const list = Array.isArray(tasks) ? tasks : [];
   const lines = list.map((t) => {
     const title = String(t.title || "(untitled)").slice(0, 200);
@@ -123,10 +144,11 @@ export function buildLinkbackPrompt(tasks) {
     detail.push(...worktreeLines(t));
     return detail.join("\n");
   });
+  const continueWork = options?.continueWork === true;
   return (
     `[Board] Delegated task update\n\n` +
     lines.join("\n\n---\n\n") +
-    `\n\nReport the task title, status, task ID, session ID, result, blocker, and worktree merge state. Start no new work unless asked.`
+    `\n\n${linkbackClosing(continueWork)}`
   );
 }
 
@@ -137,14 +159,15 @@ export function buildLinkbackPrompt(tasks) {
  *
  * @returns {Map<string, { parent: string, text: string, ids: string[] }>}
  */
-export function planDeliveries(byParent, cap = LINKBACK_CAP_PER_PARENT) {
+export function planDeliveries(byParent, cap = LINKBACK_CAP_PER_PARENT, options = {}) {
   const plan = new Map();
+  const continueParents = options?.continueParents instanceof Set ? options.continueParents : new Set();
   for (const [parent, list] of byParent) {
     const chunk = list.slice(0, Math.max(0, cap));
     if (chunk.length === 0) continue;
     plan.set(parent, {
       parent,
-      text: buildLinkbackPrompt(chunk),
+      text: buildLinkbackPrompt(chunk, { continueWork: continueParents.has(parent) }),
       ids: chunk.map((t) => t.id).filter(Boolean),
     });
   }

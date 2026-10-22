@@ -31,6 +31,21 @@ Every agent works in a **git worktree**. A plain task gets its own worktree.
 All steps of a feature share the worktree of the feature. The board creates
 the worktree, and the agent never changes the branch.
 
+## When a task is blocked
+
+A blocked task carries the reason. Read it before you act.
+
+- The **work** is wrong: make one repair task with the evidence. Three tries
+  at most. Then report to the board manager.
+- The **board** is wrong (a tool error, a missing tool, a wrong status, a lost
+  session): do not work around it. Delegate the repair to the
+  `board-maintainer`. See the next section.
+- The **user** must decide: report the blocker with the exact task id, the
+  session id and the decision you need. Then wait.
+
+Never restart a blocked task blindly. A restart does not change the tools, the
+model or the state.
+
 ## When a task is blocked by a board bug
 
 A task can be blocked because the board itself fails: a `kanban_*` tool
