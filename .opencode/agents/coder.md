@@ -20,7 +20,10 @@ You are the implementation agent for this project.
   branch.
 - Change only files inside that folder. Never touch the main project folder.
 - Commit the work on the branch of the task: `git add -A` then `git commit`.
-  Uncommitted work is never merged.
+  Uncommitted work is never merged. If the task context gives no branch, or
+  the folder is not a Git repository, do not try to commit. Say this in the
+  final message. A missing commit is not a reason to end the task as
+  incomplete.
 - Do not merge, do not push, do not switch branches. The board merges.
 - In a feature worktree: do not reset, clean or delete the folder. The work of
   the earlier steps is in it. One step works here at a time.

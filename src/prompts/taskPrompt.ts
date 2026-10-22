@@ -162,6 +162,7 @@ export function buildTaskSessionInstruction(ctx: TaskPromptContext): string {
   const title = task.title?.trim() || 'Untitled task';
   const assigned = assignedAgent(task, agents);
   const cyclic = task.kind === 'cyclic';
+  const criteria = task.acceptanceCriteria?.trim() || '';
 
   return [
     preamble,
@@ -178,6 +179,7 @@ export function buildTaskSessionInstruction(ctx: TaskPromptContext): string {
     assigned ? `**Assigned agent:** ${assigned.name} (id: ${assigned.id})` : undefined,
     task.worktreePath ? `**Worktree folder:** ${task.worktreePath}` : undefined,
     task.worktreeBranch ? `**Worktree branch:** ${task.worktreeBranch}` : undefined,
+    ...(criteria ? ['', '**Acceptance criteria:**', criteria] : []),
     '',
     '**Team for this project:**',
     buildTeamLines(project, agents),
@@ -253,6 +255,7 @@ export function buildTaskRunPrompt(ctx: TaskPromptContext): string {
   const { task, sessionId } = ctx;
   const title = task.title?.trim() || 'Untitled task';
   const desc = task.description?.trim() || '(no description provided)';
+  const criteria = task.acceptanceCriteria?.trim() || '';
   const prio = task.priority ? task.priority.charAt(0).toUpperCase() + task.priority.slice(1) : 'Medium';
   const origin = boardOrigin(ctx);
   const cyclic = task.kind === 'cyclic';
@@ -287,6 +290,7 @@ export function buildTaskRunPrompt(ctx: TaskPromptContext): string {
     '## What to do',
     '',
     desc,
+    ...(criteria ? ['', '## Acceptance criteria', '', criteria] : []),
     '',
     cyclic
       ? 'Follow the checkpoint protocol from your session instructions: read the checkpoint file before working, update it only after a successful cycle.'

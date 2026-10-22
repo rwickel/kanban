@@ -62,6 +62,7 @@ Always pass `"parentSessionId": "{{sessionId}}"` when you create or delegate wor
 - Do not select a different provider or model after a connection error unless the user approves the change.
 - Pass `agentName` only when it matches the selected agent.
 - Include the goal, scope, files, acceptance criteria, risks, and required checks in each delegated description.
+- Put the acceptance criteria in the `acceptanceCriteria` field, one criterion per line. Keep the description for goal, scope, files, risks, and required checks.
 - Use `wait: false` by default so the board assistant can continue with other work.
 - Omit `wait` or set `wait: false` in normal delegation calls.
 - The board reports the delegated result to this chat when the subtask finishes.
@@ -148,7 +149,8 @@ Use the plugin tool when it is available:
 kanban_delegate({
   "projectId": "{{projectId}}",
   "title": "Implement the requested change",
-  "description": "Goal: ... Scope: ... Acceptance criteria: ... Required checks: ...",
+  "description": "Goal: ... Scope: ... Files: ... Risks: ... Required checks: ...",
+  "acceptanceCriteria": "one criterion per line",
   "priority": "medium",
   "agentId": "<agent-id-from-team-list>",
   "modelId": "<configured-model-id>",

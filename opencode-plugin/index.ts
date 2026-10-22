@@ -262,6 +262,9 @@ export default {
             projectId: str("Project uuid the task belongs to"),
             title: str("Task title"),
             description: str("Task description"),
+            acceptanceCriteria: str(
+              "Acceptance criteria, one per line. The board shows them on the card and sends them to the teammate.",
+            ),
             priority: priorityEnum("Priority (default medium)"),
             parentSessionId: str("Override the parent session (default: this session)"),
             blockedByTaskIds: blockedByProp(
@@ -280,6 +283,7 @@ export default {
             "--actor", "agent",
           ]
           if (input.description) argv.push("--description", input.description)
+          if (input.acceptanceCriteria) argv.push("--acceptance-criteria", input.acceptanceCriteria)
           if (input.priority) argv.push("--priority", input.priority)
           if (Array.isArray(input.blockedByTaskIds) && input.blockedByTaskIds.length > 0) {
             argv.push("--blocked-by", input.blockedByTaskIds.map((v: unknown) => String(v).trim()).filter(Boolean).join(","))
@@ -591,6 +595,9 @@ export default {
             projectId: str("Project uuid the subtask belongs to"),
             title: str("Subtask title"),
             description: str("Subtask description / instructions for the teammate"),
+            acceptanceCriteria: str(
+              "Acceptance criteria, one per line. The board stores them on the card and sends them to the teammate.",
+            ),
             priority: priorityEnum("Priority (default medium)"),
             agentId: str("Teammate agent id (must be in the project's team). Required."),
             agentName: str("Teammate agent display name"),

@@ -830,7 +830,7 @@ function worktreePromptLines(worktree) {
 // Returns { task, sessionId } on success; throws { status, message } on failure.
 async function delegateTask(opts) {
   const {
-    projectId, title, description = "", priority = "medium",
+    projectId, title, description = "", acceptanceCriteria = "", priority = "medium",
     agentId, agentName, modelId, modelProviderID,
     parentSessionId, result, resultContext, featureId,
     timeoutSec = 600, pollMs = 3000, wait = false,
@@ -857,6 +857,7 @@ async function delegateTask(opts) {
   const created = await cli([
     "task", "create", "--project", projectId, "--title", title, "--actor", "delegate",
     "--description", description, "--priority", priority,
+    ...(acceptanceCriteria ? ["--acceptance-criteria", String(acceptanceCriteria)] : []),
     ...(resolvedAgentId ? ["--agent-id", resolvedAgentId] : []),
     ...(resolvedAgentName ? ["--agent-name", resolvedAgentName] : []),
     ...(modelId ? ["--model-id", modelId] : []),
@@ -910,7 +911,9 @@ async function delegateTask(opts) {
     const prompt =
       `You are ${resolvedAgentName || resolvedAgentId || agentName || agentId || "a teammate"} executing a delegated subtask. Complete it end-to-end in ${workDir || project.path || project.name}.\n` +
       worktreePromptLines(worktree) +
-      `Task id: ${tid}\nProject id: ${projectId}\nTask: ${title}\nDescription: ${description || "(none)"}\nSession id: ${session.id} (pass as parentSessionId when you create/delegate follow-up tasks).\n\n` +
+      `Task id: ${tid}\nProject id: ${projectId}\nTask: ${title}\nDescription: ${description || "(none)"}\n` +
+      (acceptanceCriteria ? `Acceptance criteria: ${acceptanceCriteria}\n` : "") +
+      `Session id: ${session.id} (pass as parentSessionId when you create/delegate follow-up tasks).\n\n` +
       `Before finishing, verify every acceptance criterion and required check. End with KANBAN_TASK_COMPLETE only when all are met; otherwise explain what remains and end with KANBAN_TASK_INCOMPLETE. A successful session alone does not prove completion. Do NOT call kanban_update_status or PATCH the task status yourself. ` +
       (styleGuide ? `\n${styleGuide}\n` : "") +
       `Fire-and-forget: the delegator already returned. Send one heartbeat with a short progress note (kanban_heartbeat), then end your turn. The board queues the result of a finished sub-task into your session. Never sleep or poll in a loop.`;
@@ -983,6 +986,7 @@ async function startExistingTask(taskId, opts = {}) {
 
   const agentName = opts.agentName || task.agentName || agentId;
   const description = task.description || "";
+  const acceptanceCriteria = task.acceptanceCriteria || "";
   const projectPath = project.path || "";
   const base = ((loadServerCreds().url || "http://127.0.0.1:4099") + "").replace(/\/+$/, "");
   const apiBase = base.endsWith("/api") ? base : `${base}/api`;
@@ -1008,7 +1012,7 @@ async function startExistingTask(taskId, opts = {}) {
     await cli(["task", "update", taskId, "--actor", "delegate", "--session-id", session.id,
       "--startup-phase", "ready"]);
     const styleGuide = loadStyleGuide();
-    const prompt = `You are ${agentName} executing an existing Kanban task. Complete it end-to-end in ${workDir || projectPath || project.name}.\n${worktreePromptLines(worktree)}Task id: ${taskId}\nProject id: ${task.projectId}\nTask: ${task.title}\nDescription: ${description || "(none)"}\nSession id: ${session.id}\n\nReview every acceptance criterion and required check before reporting. End with KANBAN_TASK_COMPLETE only when all are satisfied and verified. Otherwise explain what remains and end with KANBAN_TASK_INCOMPLETE. Do not change the task status manually.${styleGuide ? `\n${styleGuide}\n` : ""}`;
+    const prompt = `You are ${agentName} executing an existing Kanban task. Complete it end-to-end in ${workDir || projectPath || project.name}.\n${worktreePromptLines(worktree)}Task id: ${taskId}\nProject id: ${task.projectId}\nTask: ${task.title}\nDescription: ${description || "(none)"}\n${acceptanceCriteria ? `Acceptance criteria: ${acceptanceCriteria}\n` : ""}Session id: ${session.id}\n\nReview every acceptance criterion and required check before reporting. End with KANBAN_TASK_COMPLETE only when all are satisfied and verified. Otherwise explain what remains and end with KANBAN_TASK_INCOMPLETE. Do not change the task status manually.${styleGuide ? `\n${styleGuide}\n` : ""}`;
     const prompted = await fetch(`${apiBase}/session/${encodeURIComponent(session.id)}/prompt`, {
       method: "POST", headers: H, body: JSON.stringify({ text: prompt }),
     });

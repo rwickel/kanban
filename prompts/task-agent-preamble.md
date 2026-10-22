@@ -18,9 +18,10 @@ The board is the source of truth for task status, ownership, results, and delega
 - A task can be `backlog`, `running`, `done`, or `blocked`.
 - Work only on the supplied task. Do not create duplicate tasks.
 - Do not change status manually. The board only treats a session as a successful run; that alone does not prove this task is complete.
-- Before your final answer, compare every acceptance criterion and required check with the work and evidence. If any item is incomplete, do not report completion: explain the remaining work and end with the exact marker `KANBAN_TASK_INCOMPLETE`.
+- Before your final answer, compare every acceptance criterion and required check with the work and evidence. Only the criteria and checks that the task lists count. If any listed item is incomplete, do not report completion: explain the remaining work and end with the exact marker `KANBAN_TASK_INCOMPLETE`.
 - End a fully verified completion with the exact marker `KANBAN_TASK_COMPLETE`.
 - Do not claim completion while work is incomplete, blocked, or missing verification.
+- Do not end a task as incomplete because a step was not requested, or because the project has no Git repository. Say it in the final result instead.
 - Keep temporary notes in the task description or final result.
 
 ## Required work method
@@ -30,7 +31,7 @@ The board is the source of truth for task status, ownership, results, and delega
 3. Follow the task description, acceptance criteria, and project instructions.
 4. Make the smallest complete change that solves the task.
 5. Validate the change with the relevant tests, build, lint, or checks.
-6. Commit the finished work on the current branch when the task runs in a worktree.
+6. Commit the finished work on the current branch when the task runs in a worktree. When the task runs in a plain folder with no branch, skip this step and say so in the final result.
 7. Report the worktree branch, the changed files, verification, and remaining blockers in the final result.
 
 ## Worktree isolation
@@ -39,6 +40,7 @@ The board is the source of truth for task status, ownership, results, and delega
 - Change only files inside the worktree. Do not edit the main project folder.
 - Do not merge, do not push, and do not switch branches. The board merges the branch.
 - Commit the work on the worktree branch (`git add -A` then `git commit -m "..."`). Uncommitted work is not merged.
+- If the task context gives no branch, or the folder is not a Git repository, do not try to commit. Say this in the final result. A missing commit is not a reason to end the task as incomplete.
 - Run tests and builds inside the worktree.
 
 ## Delegation and follow-up

@@ -32,6 +32,7 @@ function buildDelegatePrompt({
   projectId,
   title,
   description,
+  acceptanceCriteria,
   projectPath,
   sessionId,
   worktree,
@@ -63,6 +64,7 @@ function buildDelegatePrompt({
     `You are ${agentLabel || "a teammate"} executing a delegated subtask. Complete it end-to-end in ${place}.\n` +
     isolation +
     `Task id: ${taskId}\nProject id: ${projectId}\nTask: ${title}\nDescription: ${description || "(none)"}\n` +
+    (acceptanceCriteria ? `Acceptance criteria: ${acceptanceCriteria}\n` : "") +
     `Session id: ${sessionId} (pass as parentSessionId when you create/delegate follow-up tasks).\n\n` +
     `Before finishing, verify every acceptance criterion and required check. End with KANBAN_TASK_COMPLETE only when all are met; otherwise explain what remains and end with KANBAN_TASK_INCOMPLETE. A successful session alone does not prove completion. Do NOT call kanban_update_status or PATCH the task status yourself. Never write your answer into the description.` +
     (styleGuide ? `\n${styleGuide}\n` : "") +
@@ -141,6 +143,7 @@ export async function delegateTool(args, context, ctx) {
   const projectId = args.projectId
   const title = args.title
   const description = args.description || ""
+  const acceptanceCriteria = (args.acceptanceCriteria || "").trim()
   const priority = args.priority || "medium"
 
   if (!args.agentId) {
@@ -163,6 +166,7 @@ export async function delegateTool(args, context, ctx) {
     "--actor", "delegate",
     "--description", description,
     "--priority", priority,
+    ...(acceptanceCriteria ? ["--acceptance-criteria", acceptanceCriteria] : []),
     ...(args.agentId ? ["--agent-id", args.agentId] : []),
     ...(args.agentName ? ["--agent-name", args.agentName] : []),
     ...(args.modelId ? ["--model-id", args.modelId] : []),
@@ -260,6 +264,7 @@ export async function delegateTool(args, context, ctx) {
       projectId,
       title,
       description,
+      acceptanceCriteria,
       projectPath,
       sessionId: session.id,
       worktree,

@@ -91,6 +91,8 @@ the worktree, and the agent never changes the branch.
 - The board is the source of truth. Do not change a task status by hand.
 - Never create a duplicate task.
 - Commit the work on the branch of the task. Uncommitted work is not merged.
+  If the task gives no branch, or the folder is not a Git repository, do not
+  try to commit. Say this in the final message.
 - Do not merge, do not push, do not switch branches.
 - In a feature worktree: do not reset, clean or delete the folder.
 - Report the branch and the changed files in the final result.

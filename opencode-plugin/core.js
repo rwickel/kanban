@@ -165,14 +165,24 @@ export function kanbanBases() {
   return [`http://127.0.0.1:3001`, `http://127.0.0.1:${KANBAN_BRIDGE_PORT}`];
 }
 
-/** fetch against the first board base that accepts a connection. */
+/**
+ * fetch against the first board base that accepts a connection.
+ *
+ * A dropped socket or a board that is still starting is a transient error.
+ * Retry a few times per base before giving up, so a short network blip does
+ * not fail the tool call.
+ */
 export async function kanbanFetch(path, init = {}) {
   let lastError;
+  const attempts = 3;
   for (const base of kanbanBases()) {
-    try {
-      return await fetch(`${base}${path}`, init);
-    } catch (err) {
-      lastError = err;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        return await fetch(`${base}${path}`, init);
+      } catch (err) {
+        lastError = err;
+        if (attempt < attempts) await sleep(400 * attempt);
+      }
     }
   }
   throw lastError ?? new Error("kanban API unreachable");
