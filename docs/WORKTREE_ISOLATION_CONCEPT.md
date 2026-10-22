@@ -119,12 +119,12 @@ next step when the result arrives. `wait: true` exists for a caller that must
 have the finished result in its own tool return; it is not needed here and it
 keeps the calling session busy.
 
-**The completion marker and the result are two different things.**
+**The result and the status are two different things.**
 
 | | What it does |
 |---|---|
 | the result | the board queues it into the parent session, **also when the step ends `blocked`** |
-| the marker | the board reads the last message: `KANBAN_TASK_COMPLETE` → the step is `done`; anything else → the step is `blocked` with the reason "completion was not verified" |
+| the status | the board reads the session: a session that ended → the step is `done`; a failed session → the step is `blocked`. A step that cannot finish calls `kanban_update_status` with `blocked`. |
 
 Only a `done` predecessor releases the next step of a feature. A `blocked`
 step stops the chain, and the orchestrator decides: fix it in the same
@@ -137,10 +137,8 @@ The board watches every running task and reads its OpenCode session.
 
 | Session state | The board does |
 |---|---|
-| the turn ended with `KANBAN_TASK_COMPLETE` | the task is `done` |
-| the turn ended with `KANBAN_TASK_INCOMPLETE` | the task is `blocked` — **unless** it has sub-tasks that still run |
-| the turn ended without the marker | the task is `blocked` — **unless** it has sub-tasks that still run |
-| the turn ended without the marker, and sub-tasks are running | the task stays `running` and waits for their results |
+| the session ended normally | the task is `done` — **unless** it has sub-tasks that still run |
+| the session ended normally and sub-tasks are running | the task stays `running` and waits for their results |
 | the session failed | the task is `blocked` with the error of the session |
 | the session was interrupted or aborted | the task is `blocked`. It is **not** re-armed |
 | the session is idle and waits for the next message | **nothing**. An idle session is waiting, not stuck. |
@@ -152,8 +150,9 @@ Three rules matter for the orchestration:
 - **A delegating agent ends its turn before the delegated work is done.** The
   board keeps such a task `running` as long as its sub-tasks run. The
   orchestrator wakes up when the board queues their results into its session.
-  It must not write `KANBAN_TASK_INCOMPLETE` while it waits: the marker means
-  the work is really not done.
+  It must not report the feature as done while it waits. While a sub-task
+  runs, the feature is simply not finished: end the turn with a short progress
+  note. The board keeps the task `running` while its steps run.
 - **A delegating agent must not sleep or poll.** A sleep loop blocks its own
   session, and the board cannot deliver a result into a busy session. It sends
   one `kanban_heartbeat` with the progress and ends the turn.

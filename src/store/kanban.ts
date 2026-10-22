@@ -416,6 +416,13 @@ export async function removeTaskBlockedBy(taskId: string, dependsOnId: string): 
   return updateTask(taskId, { blockedByTaskIds: next });
 }
 
+// ---- task-to-task link (parentTaskId) ----
+
+/** Read the child tasks of a task: the tasks created inside that task. */
+export async function getTaskChildren(taskId: string): Promise<Task[]> {
+  return api<Task[]>(`/api/kanban/tasks/${encodeURIComponent(taskId)}/children`);
+}
+
 // ---- message_to: follow-up in the SAME session (no new task) ----
 export interface MessageToResult {
   sessionId: string;

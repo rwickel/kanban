@@ -17,25 +17,46 @@ is available.
 
 | Agent | Role | Owns |
 |---|---|---|
-| `board-manager` | product owner and user interface | the request, the board, the report to the user |
-| `coding-orchestrator` | feature owner | one feature: worktree, steps, delegation, review |
+| `board-manager` | product owner and user interface | the request, the proposal, the approval, the board, the report to the user |
+| `coding-orchestrator` | feature owner (feature orchestrator) | one feature: worktree, steps, delegation, review |
 | `planner` | concept step | goal, scope, files, acceptance criteria, risks, checks |
 | `coder` | implementation step | the change |
 | `testing` | verification step | the tests and the test evidence |
 | `reviewer` | review step | the findings on the complete diff |
 | `integrator` | merge step | the pull request and the merge into main |
+| `board-maintainer` | tool repair | bugs in the board, the server, the plugin, the reconciler |
 | `general-task` | everything else | research, writing, preparation |
 
 Every agent works in a **git worktree**. A plain task gets its own worktree.
 All steps of a feature share the worktree of the feature. The board creates
 the worktree, and the agent never changes the branch.
 
+## When a task is blocked by a board bug
+
+A task can be blocked because the board itself fails: a `kanban_*` tool
+returns a wrong error, a delegate hangs, a task keeps the wrong status, a
+result never arrives, or the worktree is wrong.
+
+Do not work around such a fault. Do not change the status of the blocked task
+by hand, and do not rewrite the task description.
+
+1. Delegate the repair to the `board-maintainer` with a complete brief: the
+   exact error text, the tool name, the blocked task id, the session id, and
+   the step that failed.
+2. The `board-maintainer` finds the cause, writes a test that fails before the
+   fix, fixes the code, and reports the restart that the user must do.
+3. After the fix is merged, start the blocked task again with
+   `kanban_start_task`. It never creates a duplicate task.
+
+The board is the product and the tool at the same time. A fault in the tool
+is a product defect and gets the same treatment as any other defect.
+
 ## Model routing policy
 
-- Use **OpenAI GPT-5.6 Luna** for simple, bounded, and routine tasks.
+- Use **OpenAI GPT-6 Luna** for simple, bounded, and routine tasks.
 - Every delegated subtask uses **OpenAI GPT-5.6 Luna** by default, including
   coding, testing, review, and integration subtasks.
-- Use **OpenAI GPT-5.6 Sol** only for complex tasks that need deeper reasoning,
+- Use **OpenAI GPT-6 Sol** only for complex tasks that need deeper reasoning,
   architecture work, difficult debugging, or multi-step coordination. Sol
   requires an explicit decision by the board manager or planner; it is not the
   default for subtasks.
@@ -52,11 +73,16 @@ the worktree, and the agent never changes the branch.
 ## Team workflow
 
 1. **Board manager** clarifies the request, checks existing Kanban/GitHub work,
-   and splits it into a feature or a single task.
-2. **Coding orchestrator** creates the feature: one worktree, one branch
-   `kanban/feature-<id>`. It plans the steps and delegates them one after the
-   other. The steps are chained with `blockedByTaskIds`, so the folder always
-   has one writer.
+   and splits it into a feature or a single task. It writes a proposal and
+   waits for the approval of the user.
+2. **Coding orchestrator** (the feature orchestrator) creates the feature: one
+   worktree, one branch `kanban/feature-<id>`. It plans the steps and delegates
+   them one after the other. The steps are chained with `blockedByTaskIds`, so
+   the folder always has one writer.
+   The board manager may start several coding orchestrators at the same time.
+   Each one owns its own feature and its own worktree, so the features do not
+   touch the same files. Only the merges into the project branch run one
+   after the other.
 3. **Planner** writes the concept in the feature worktree and commits it.
 4. **Coder** implements the change in the same worktree and commits it.
 5. **Testing** writes and runs the tests in the same worktree and reports the
@@ -97,15 +123,16 @@ the worktree, and the agent never changes the branch.
 - In a feature worktree: do not reset, clean or delete the folder.
 - Report the branch and the changed files in the final result.
 
-## The completion marker
+## The result and the status
 
 Two different things.
 
 - **The result comes back either way.** The board queues the result of every
   finished task into the parent session, also when the task ends `blocked`.
-- **The marker sets the status.** The board reads the last message:
-  `KANBAN_TASK_COMPLETE` → `done`, anything else → `blocked` with the reason
-  "completion was not verified".
+- **The board sets the status.** A task whose session ended is `done`. A task
+  whose session failed is `blocked`. A task that cannot finish calls
+  `kanban_update_status` with `blocked` and reports what remains. A task with
+  running sub-tasks stays `running`: it waits for them.
 
 Only a `done` predecessor releases the next step of a feature. A `blocked`
 step stops the chain.

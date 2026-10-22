@@ -15,7 +15,7 @@
 // through the running server's own ctx.session client, so no extra
 // `opencode serve` and no port or password is needed for delegation.
 
-import { callingSessionId, cliResult, jsonResult, kanbanFetch, ocBase, ocH, runCli, toolError } from "./core.js"
+import { callerSessionId, callingSessionId, cliResult, jsonResult, kanbanFetch, ocBase, ocH, runCli, toolError } from "./core.js"
 import { delegateTool, messageToTool } from "./delegate.js"
 
 // Optional arguments are expressed by leaving the key out of `required`,
@@ -255,7 +255,7 @@ export default {
       editor.add({
         name: "kanban_create_task",
         description:
-          "Create a new task in a project's backlog. Returns the created task JSON including its uuid. The calling session is attached as parentSessionId automatically. Pass blockedByTaskIds to make the task wait for other tasks of the same project.",
+          "Create a new task in a project's backlog. Returns the created task JSON including its uuid. The calling session is attached as parentSessionId automatically, and the server links the new task to the task that owns that session (parentTaskId). Never pass a parent session yourself: the parent is always the session you run in. Pass blockedByTaskIds to make the task wait for other tasks of the same project.",
         input: {
           type: "object",
           properties: {
@@ -266,7 +266,6 @@ export default {
               "Acceptance criteria, one per line. The board shows them on the card and sends them to the teammate.",
             ),
             priority: priorityEnum("Priority (default medium)"),
-            parentSessionId: str("Override the parent session (default: this session)"),
             blockedByTaskIds: blockedByProp(
               "Depends-on: predecessor task ids (same project) that must be done before this task may start. Unknown ids, self-references, foreign-project ids and cycles are rejected with an error.",
             ),
@@ -288,7 +287,9 @@ export default {
           if (Array.isArray(input.blockedByTaskIds) && input.blockedByTaskIds.length > 0) {
             argv.push("--blocked-by", input.blockedByTaskIds.map((v: unknown) => String(v).trim()).filter(Boolean).join(","))
           }
-          const parent = callingSessionId(input.parentSessionId, context)
+          // The parent of the new task is always the calling session. Never
+          // take an explicit value: the board builds the task tree from it.
+          const parent = callerSessionId(context)
           if (parent) argv.push("--parent-session-id", parent)
           return cliResult(await runCli(argv))
         },
@@ -556,13 +557,17 @@ export default {
           additionalProperties: false,
         },
         options: { namespace: "kanban" },
-        execute: async (input: any) => {
+        execute: async (input: any, context: any) => {
           const action = String(input.action || "").trim().toLowerCase()
           if (action === "create") {
             if (!input.projectId?.trim()) toolError("projectId required")
             if (!input.title?.trim()) toolError("title required")
+            // The owner session: the steps that this session delegates later
+            // join this feature automatically.
+            const owner = callerSessionId(context)
             const argv = ["feature", "create", "--project", String(input.projectId).trim(),
-              "--title", String(input.title).trim(), "--actor", "agent"]
+              "--title", String(input.title).trim(), "--actor", "agent",
+              ...(owner ? ["--owner-session-id", owner] : [])]
             if (input.description) argv.push("--description", String(input.description))
             if (input.base) argv.push("--base", String(input.base).trim())
             return cliResult(await runCli(argv))
@@ -588,7 +593,7 @@ export default {
       editor.add({
         name: "kanban_delegate",
         description:
-          "Create a task for another agent on the team and start it immediately. Fire-and-forget by default — returns { task, sessionId, waited:false, parentSessionId } right away so the caller can fan out. Pass wait:true to block until done/blocked. This session is attached as parentSessionId automatically; an explicit parentSessionId wins. The subtask flips to done/blocked when the teammate is done. Pass blockedByTaskIds to make the subtask wait for other tasks: when a predecessor is not done yet the subtask is created in the backlog (started:false) instead of running. Pass featureId to run the subtask in the worktree of a feature, shared with the other steps of that feature. Every subtask without a feature gets its own git worktree, so parallel subtasks never share files. When you delegate from inside a delegated task, keep wait:false — the board queues the subtask result back into your session.",
+          "Create a task for another agent on the team and start it immediately. Fire-and-forget by default — returns { task, sessionId, waited:false, parentSessionId } right away so the caller can fan out. Pass wait:true to block until done/blocked. This session is attached as parentSessionId automatically and is always the parent of the new task; never pass a parent session yourself. The subtask flips to done/blocked when the teammate is done. Pass blockedByTaskIds to make the subtask wait for other tasks: when a predecessor is not done yet the subtask is created in the backlog (started:false) instead of running. Pass featureId to run the subtask in the worktree of a feature, shared with the other steps of that feature. Every subtask without a feature gets its own git worktree, so parallel subtasks never share files. When you delegate from inside a delegated task, keep wait:false — the board queues the subtask result back into your session.",
         input: {
           type: "object",
           properties: {
@@ -603,7 +608,6 @@ export default {
             agentName: str("Teammate agent display name"),
             modelId: str("Model id for the teammate session"),
             modelProviderID: str("Model provider id for the teammate session"),
-            parentSessionId: str("Override the parent session (default: this session)"),
             featureId: str(
               "Feature uuid. The task then works in the feature worktree and on the feature branch, shared with the other steps of that feature. Use it only for the steps of one feature, one step at a time.",
             ),
@@ -626,7 +630,7 @@ export default {
         options: { namespace: "kanban" },
         execute: async (input: any, context: any) =>
           delegateTool(
-            { ...input, parentSessionId: callingSessionId(input.parentSessionId, context) },
+            { ...input, parentSessionId: callerSessionId(context) },
             context,
             ctx,
           ),

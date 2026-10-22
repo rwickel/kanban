@@ -66,7 +66,7 @@ function buildDelegatePrompt({
     `Task id: ${taskId}\nProject id: ${projectId}\nTask: ${title}\nDescription: ${description || "(none)"}\n` +
     (acceptanceCriteria ? `Acceptance criteria: ${acceptanceCriteria}\n` : "") +
     `Session id: ${sessionId} (pass as parentSessionId when you create/delegate follow-up tasks).\n\n` +
-    `Before finishing, verify every acceptance criterion and required check. End with KANBAN_TASK_COMPLETE only when all are met; otherwise explain what remains and end with KANBAN_TASK_INCOMPLETE. A successful session alone does not prove completion. Do NOT call kanban_update_status or PATCH the task status yourself. Never write your answer into the description.` +
+    `Before finishing, verify every acceptance criterion and required check. Your final message is the task result: keep it short and concrete (what changed, the branch, the changed files, the commands and their output). If a criterion is not met, call kanban_update_status with blocked and explain what remains. Do NOT PATCH the task status yourself. Never write your answer into the description.` +
     (styleGuide ? `\n${styleGuide}\n` : "") +
     ` Fire-and-forget: the delegator already returned.`
   )

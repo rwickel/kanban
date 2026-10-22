@@ -120,13 +120,29 @@ Invoke-WebRequest http://localhost:3001/api/kanban/tasks/5e344f3b-6909-4fb4-9bcf
 
 Missing id → `404 { ok:false, error:"Task not found: <id>" }`.
 
+### `GET /api/kanban/tasks/:id/children`
+
+The child tasks of a task: the tasks that were created inside that task.
+The link is automatic, so no client action is needed.
+
+```powershell
+Invoke-WebRequest http://localhost:3001/api/kanban/tasks/<id>/children -UseBasicParsing |
+  Select-Object -ExpandProperty Content
+# → Task[]
+```
+
 ### `POST /api/kanban/tasks`
 
 Body (JSON): `projectId` + `title` required; optional
 `description`, `status`, `priority`, `id`, `agentId`, `agentName`,
 `sessionId`, `modelId`, `modelProviderID`, `startupPhase`, `startupError`,
-`parentSessionId`, `featureId`, `result`, `resultContext`,
+`parentSessionId`, `parentTaskId`, `featureId`, `result`, `resultContext`,
 `blockedByTaskIds`.
+
+`parentTaskId` is the task-to-task link: the task that created this task.
+Omit it and the server sets it automatically — the task that owns
+`parentSessionId` becomes the parent. A task from another project, an
+unknown id, or the task itself is rejected with `400`.
 
 `featureId` puts the task into a feature: it works in the feature worktree
 and on the feature branch, and only one step of a feature may run at a time.
@@ -153,7 +169,7 @@ Partial update — any of `title`, `description`, `status`, `priority`,
 `agentId`, `agentName`, `sessionId`, `modelId`, `modelProviderID`,
 `startupPhase`, `startupError`, `parentSessionId`, `result`, `resultContext`,
 `acceptanceCriteria`, `kind`, `cycleIntervalSec`, `dueDate`, `worktreeNote`,
-`blockedByTaskIds`. This is how the board pins a session
+`blockedByTaskIds`, `parentTaskId` (empty string clears the link). This is how the board pins a session
 and how an agent-equivalent HTTP call flips state:
 
 ```powershell

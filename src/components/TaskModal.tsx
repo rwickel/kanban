@@ -5,7 +5,7 @@ import { fetchModels } from '../api/opencode';
 import { getTaskModelPref, saveTaskModelPref } from '../store/serverConfig';
 import { formatModelRef, isModelAllowed, resolveSessionModel } from '../store/modelResolution';
 import { normalizeBlockedBy, validateBlockedBy } from '../store/dependencies';
-import { mergeTaskWorktree, removeTaskWorktree, syncTaskWorktree } from '../store/kanban';
+import { getTaskChildren, mergeTaskWorktree, removeTaskWorktree, syncTaskWorktree } from '../store/kanban';
 import AttachmentList from './AttachmentList';
 
 interface TaskModalProps {
@@ -55,6 +55,8 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
   const [blockedBy, setBlockedBy] = useState<string[]>([]);
   const [depSearch, setDepSearch] = useState('');
   const [depError, setDepError] = useState<string | null>(null);
+  // Child tasks: the tasks that were created inside this task.
+  const [children, setChildren] = useState<Task[]>([]);
   // Worktree (isolated git folder of this task) — read-only info + merge/remove.
   const [wt, setWt] = useState<{ path?: string | null; branch?: string | null; state?: string | null; note?: string | null }>({});
   const [wtBusy, setWtBusy] = useState(false);
@@ -102,7 +104,20 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
     // allows it → the project's first allowed model → nothing (server default).
     setSelectedModel(formatModelRef(resolveSessionModel(task, { allowedModels }, getTaskModelPref())));
     loadModels();
+    loadChildren();
   }, [task, isOpen]);
+
+  const loadChildren = async () => {
+    if (!task?.id) {
+      setChildren([]);
+      return;
+    }
+    try {
+      setChildren(await getTaskChildren(task.id));
+    } catch {
+      setChildren([]);
+    }
+  };
 
   const loadModels = async () => {
     setModelsLoading(true);
@@ -333,6 +348,26 @@ export default function TaskModal({ isOpen, onClose, onSave, task, availableAgen
             )}
             {depError && <p className="text-[11px] text-red-400/90 mt-1">{depError}</p>}
           </div>
+          {task && (
+            <div>
+              <label className="block text-[12px] font-medium t-soft mb-1">
+                Subtasks <span className="muted font-normal">(tasks created inside this task)</span>
+              </label>
+              {children.length === 0 ? (
+                <p className="text-[11px] muted">No subtasks. Tasks that this task creates appear here.</p>
+              ) : (
+                <ul className="rounded border border-[var(--border)] divide-y divide-[var(--border)]">
+                  {children.map((c) => (
+                    <li key={c.id} className="flex items-center gap-2 px-2 py-1.5">
+                      <span className="flex-1 text-[12px] truncate">{c.title}</span>
+                      <span className={`pill ${depStatusCls[c.status]} px-1.5 py-0 text-[10px] uppercase shrink-0`}>{c.status}</span>
+                      <span className="text-[10px] muted mono shrink-0">{c.id.slice(0, 8)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
           {(task?.worktreeBranch || task?.worktreePath) && (
             <div>
               <label className="block text-[12px] font-medium t-soft mb-1">

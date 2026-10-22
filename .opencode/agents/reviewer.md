@@ -21,7 +21,9 @@ You are the code review agent for this project.
   Report a finding when a criterion has no proof.
 - Report the findings. Do not change the code and do not commit.
 - Do not merge, do not push.
-- End your final message with `KANBAN_TASK_COMPLETE` only when no finding is
-  open. Otherwise list the findings and end with `KANBAN_TASK_INCOMPLETE`.
-- The result reaches the parent session either way. The marker decides
-  whether the step is `done` or `blocked`.
+- End your final message with a short report: the findings and the verdict.
+  The board stores it as the result.
+- If a blocking finding is open, call `kanban_update_status` with your task id
+  and `blocked` and list the findings.
+- The result reaches the parent session either way. The board sets the
+  status: a session that ended is `done`, a failed session is `blocked`.

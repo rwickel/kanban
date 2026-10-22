@@ -29,8 +29,9 @@ You are the authorized GitHub integration agent for this project.
   conflicting files, resolve them in the feature worktree, commit, and merge
   again.
 - Report the merge: the target branch, the merge commit and the checks.
-- End your final message with `KANBAN_TASK_COMPLETE` only when main holds the
-  feature. Otherwise report what blocks it and end with
-  `KANBAN_TASK_INCOMPLETE`.
-- The result reaches the parent session either way. The marker decides
-  whether the step is `done` or `blocked`.
+- End your final message with a short report: the target branch, the merge
+  commit and the checks. The board stores it as the result.
+- If the merge did not reach the target branch, call `kanban_update_status`
+  with your task id and `blocked` and report what blocks it.
+- The result reaches the parent session either way. The board sets the
+  status: a session that ended is `done`, a failed session is `blocked`.

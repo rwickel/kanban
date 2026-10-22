@@ -1,24 +1,18 @@
-export function completionStatus({ succeeded, failed, kind, finalAssistantText = "" }) {
-  // The marker must be the LAST line of the message. An agent that quotes a
-  // result (which ends with the marker) must not close its own task with it.
-  const lines = String(finalAssistantText || "")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const lastLine = lines[lines.length - 1] || "";
-  // The marker is the agent's own statement that the work is done. It wins over
-  // a session failure that happens AFTER the final message: a session can
-  // break while it cleans up, and that must not undo finished work.
-  const complete = /(?:^|\s)KANBAN_TASK_COMPLETE(?:\s|$)/.test(lastLine);
-  const incomplete = /(?:^|\s)KANBAN_TASK_INCOMPLETE(?:\s|$)/.test(lastLine);
-  if (complete && !incomplete) {
-    return { status: kind === "cyclic" ? "backlog" : "done", reason: "explicitly complete" }
-  }
-  if (incomplete) return { status: "blocked", reason: "agent reported incomplete work" }
+// The status of a task after its session ended.
+//
+// There is no completion marker. The session outcome decides:
+//   - the session failed        -> blocked
+//   - the session ended normally -> done (a cyclic task goes back to backlog)
+//   - a goal task                -> running (it waits for the user or children)
+//
+// An agent that cannot finish sets the status itself with
+// kanban_update_status(blocked). The board keeps that decision.
+export function completionStatus({ succeeded, failed, kind }) {
   if (failed) return { status: "blocked", reason: "session failed" }
   if (!succeeded) return null
-  return {
-    status: "blocked",
-    reason: "completion was not verified",
-  }
+  // A goal task waits: for the user, for the answer to a question, or for
+  // its children. It is not done and it is not stuck.
+  if (kind === "goal") return { status: "running", reason: "goal task waits" }
+  if (kind === "cyclic") return { status: "backlog", reason: "the session ended" }
+  return { status: "done", reason: "the session ended" }
 }

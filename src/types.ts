@@ -26,6 +26,9 @@ export interface Task {
   modelProviderID?: string;
   /** Session that created this task (delegation chain) — empty when created by user/board */
   parentSessionId?: string | null;
+  /** Task that created this task (task-to-task link).
+   *  Set automatically from the parent session — see the server. */
+  parentTaskId?: string | null;
   /** Last assistant message + context written on done/blocked (or at any time) */
   result?: string | null;
   resultContext?: string | null;

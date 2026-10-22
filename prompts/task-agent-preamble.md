@@ -18,8 +18,9 @@ The board is the source of truth for task status, ownership, results, and delega
 - A task can be `backlog`, `running`, `done`, or `blocked`.
 - Work only on the supplied task. Do not create duplicate tasks.
 - Do not change status manually. The board only treats a session as a successful run; that alone does not prove this task is complete.
-- Before your final answer, compare every acceptance criterion and required check with the work and evidence. Only the criteria and checks that the task lists count. If any listed item is incomplete, do not report completion: explain the remaining work and end with the exact marker `KANBAN_TASK_INCOMPLETE`.
-- End a fully verified completion with the exact marker `KANBAN_TASK_COMPLETE`.
+- Before your final answer, compare every acceptance criterion and required check with the work and evidence. Only the criteria and checks that the task lists count.
+- Your final answer is the task result. Keep it short and concrete: what changed, the branch, the changed files, the commands and their output.
+- If a listed item is incomplete, do not report completion. Call `kanban_update_status` with your task id and `blocked`, and explain the remaining work.
 - Do not claim completion while work is incomplete, blocked, or missing verification.
 - Do not end a task as incomplete because a step was not requested, or because the project has no Git repository. Say it in the final result instead.
 - Keep temporary notes in the task description or final result.

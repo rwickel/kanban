@@ -115,6 +115,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     cycle_interval_sec INTEGER,
     progress TEXT NOT NULL DEFAULT '',
     parent_session_id TEXT,
+    -- Task-to-task link: the task that created this task. Set automatically
+    -- from the parent session (see resolve_parent_task_id).
+    parent_task_id TEXT,
+    -- Who set the current status: the actor of the last status write.
+    status_by TEXT,
     blocked_by_task_ids TEXT NOT NULL DEFAULT '[]',
     result TEXT,
     result_context TEXT,
@@ -131,6 +136,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id);
+-- NOTE: idx_tasks_parent_task is created in get_conn() AFTER the column
+-- backfill, so old DBs (no parent_task_id column yet) do not fail here.
 -- A feature groups the tasks of one unit of work. All its tasks share one
 -- git worktree and one branch, so the steps of a feature never fight over
 -- files. The feature branch is merged into the project branch at the end.
@@ -140,6 +147,9 @@ CREATE TABLE IF NOT EXISTS features (
     title TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'active',
+    -- The session that created the feature (the feature orchestrator). A task
+    -- that is delegated by that session joins the same feature.
+    owner_session_id TEXT,
     worktree_path TEXT,
     worktree_branch TEXT,
     base_branch TEXT,
@@ -190,6 +200,8 @@ def get_conn(db_path: Path) -> sqlite3.Connection:
         ("cycle_interval_sec", "INTEGER"),
         ("progress", "TEXT NOT NULL DEFAULT ''"),
         ("parent_session_id", "TEXT"),
+        ("parent_task_id", "TEXT"),
+        ("status_by", "TEXT"),
         ("blocked_by_task_ids", "TEXT NOT NULL DEFAULT '[]'"),
         ("result", "TEXT"),
         ("result_context", "TEXT"),
@@ -210,6 +222,9 @@ def get_conn(db_path: Path) -> sqlite3.Connection:
     ):
         if col not in cols:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {ddl}")
+    fcols = {r[1] for r in conn.execute("PRAGMA table_info(features)").fetchall()}
+    if "owner_session_id" not in fcols:
+        conn.execute("ALTER TABLE features ADD COLUMN owner_session_id TEXT")
     pcols = {r[1] for r in conn.execute("PRAGMA table_info(projects)").fetchall()}
     for col, ddl in (
         ("agent_ids", "TEXT NOT NULL DEFAULT '[]'"),
@@ -226,6 +241,8 @@ def get_conn(db_path: Path) -> sqlite3.Connection:
         "CREATE INDEX IF NOT EXISTS idx_tasks_parent_notified "
         "ON tasks(status, parent_session_id, notified_at)"
     )
+    # Task-to-task link index (column added above for old DBs).
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_parent_task ON tasks(parent_task_id)")
     conn.commit()
     return conn
 
@@ -320,6 +337,64 @@ def git_run(repo, *args, timeout=120):
 def git_toplevel(repo) -> str:
     code, out, _ = git_run(repo, "rev-parse", "--show-toplevel")
     return out if code == 0 else ""
+
+
+def not_a_git_repo_error(repo) -> str:
+    """Clear error with the fix steps for a project folder without git."""
+    return (f"Project is not a git repository: {repo}. "
+            f"Fix: run 'git init' and 'git commit' in the folder, or let the board "
+            f"create a local repository for it.")
+
+
+def ensure_git_repo(repo, branch="main"):
+    """Make sure the project folder is a git repository with one commit.
+
+    A worktree needs a commit. So a fresh local repository gets the project
+    files in its first commit. Heavy folders (node_modules, dist, ...) stay
+    out. The exclude list lives inside .git, so the project files are not
+    changed.
+
+    Returns {"ok", "created", "note"}. Never raises.
+    """
+    if git_toplevel(repo):
+        return {"ok": True, "created": False, "note": "existing repository"}
+    if not Path(repo).exists():
+        return {"ok": False, "created": False, "note": "project path does not exist"}
+    code, out, err = git_run(repo, "init")
+    if code != 0:
+        return {"ok": False, "created": False,
+                "note": f"git init failed: {(err or out).strip()[:200]}"}
+    # The project branch is the first branch of the new repository.
+    git_run(repo, "symbolic-ref", "HEAD", f"refs/heads/{branch or 'main'}")
+    # Identity for the first commit. Local only, the global config is not touched.
+    git_run(repo, "config", "user.name", "Kanban Board")
+    git_run(repo, "config", "user.email", "kanban@local")
+    # Heavy folders never belong in the first commit. The exclude file lives
+    # inside .git, so no file of the project is changed.
+    exclude = Path(repo) / ".git" / "info" / "exclude"
+    try:
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with open(exclude, "a", encoding="utf-8") as fh:
+            fh.write("\n# added by the kanban board\n"
+                     "node_modules/\n.venv/\nvenv/\ndist/\nbuild/\n.next/\n"
+                     "target/\n__pycache__/\n")
+    except OSError:
+        pass
+    git_run(repo, "add", "-A")
+    code, out, err = git_run(repo, "commit", "-m", "chore: initial commit")
+    if code != 0:
+        # An empty folder has nothing to commit. An empty commit is enough.
+        code2, out2, err2 = git_run(repo, "commit", "--allow-empty", "-m", "chore: initial commit")
+        if code2 != 0:
+            # The repository is not usable. Remove it, so the folder stays as it was.
+            try:
+                shutil.rmtree(Path(repo) / ".git", ignore_errors=True)
+            except OSError:
+                pass
+            return {"ok": False, "created": False,
+                    "note": f"initial commit failed: {(err2 or err or out2 or out).strip()[:200]}"}
+    return {"ok": True, "created": True,
+            "note": "created a local git repository (no remote)"}
 
 
 def git_remote_name(repo, preferred="origin") -> str:
@@ -565,8 +640,17 @@ def cmd_worktree_create(args):
     if not repo or not Path(repo).exists():
         fail(f"Project path does not exist: {repo or '(empty)'}")
     top = git_toplevel(repo)
+    repo_note = ""
     if not top:
-        fail(f"Project is not a git repository: {repo}")
+        # No repository yet: the board creates a local one, so the task gets a
+        # worktree like in every other project.
+        made = ensure_git_repo(repo, project["git_branch"] or "main")
+        if not made["ok"]:
+            fail(not_a_git_repo_error(repo) + f" ({made['note']})")
+        repo_note = made["note"]
+        top = git_toplevel(repo)
+        if not top:
+            fail(not_a_git_repo_error(repo))
 
     path = worktree_path_for(project, task["id"])
     branch = worktree_branch_for(task["id"])
@@ -622,7 +706,7 @@ def cmd_worktree_create(args):
     conn.commit()
     print(json.dumps({"ok": True, "path": str(path), "branch": branch,
                       "base": base, "reused": False, "copied": copied,
-                      "pull": pull_note}, indent=2))
+                      "pull": pull_note, "repoNote": repo_note}, indent=2))
     conn.close()
 
 
@@ -707,7 +791,7 @@ def merge_worktree(task, project, target=None, cleanup=False):
     repo = (project["path"] or "").strip()
     top = git_toplevel(repo)
     if not top:
-        return {"ok": False, "merged": False, "error": f"Project is not a git repository: {repo}"}
+        return {"ok": False, "merged": False, "error": not_a_git_repo_error(repo)}
     branch = (task["worktree_branch"] if "worktree_branch" in task.keys() else "") or ""
     if not branch:
         return {"ok": False, "merged": False, "error": "Task has no worktree branch"}
@@ -723,7 +807,14 @@ def merge_worktree(task, project, target=None, cleanup=False):
                 "error": f"Main repo is on branch '{current}', not '{target}'. "
                          f"Check out '{target}' first, then merge again."}
 
-    with _MergeLock(top):
+    with _MergeLock(top) as merge_lock:
+        # The lock is the guard against two merges in one repository. If it
+        # is not held, the merge must not run: two merges would touch the
+        # same index and the same project branch. The caller retries later.
+        if not merge_lock.acquired:
+            return {"ok": False, "merged": False, "conflict": False,
+                    "error": "Another merge is running in this repository. Try again later.",
+                    "branch": branch, "target": target}
         # 1. The commit gate: only committed work is merged. Uncommitted work
         #    would stay in the worktree and the card would say "done" while
         #    the result is incomplete.
@@ -826,7 +917,7 @@ def cmd_worktree_sync(args):
     path = (task["worktree_path"] if "worktree_path" in task.keys() else "") or ""
     target = (args.target or "").strip() or (project["git_branch"] or "main")
     if not top:
-        fail(f"Project is not a git repository: {repo}")
+        fail(not_a_git_repo_error(repo))
     if not branch:
         fail("The task has no worktree branch")
     if is_ancestor(top, target, branch):
@@ -1034,6 +1125,7 @@ def row_to_feature(r, tasks=None) -> dict:
         "worktreePath": r["worktree_path"] if "worktree_path" in keys else None,
         "worktreeBranch": r["worktree_branch"] if "worktree_branch" in keys else None,
         "baseBranch": r["base_branch"] if "base_branch" in keys else None,
+        "ownerSessionId": r["owner_session_id"] if "owner_session_id" in keys else None,
         "mergeNote": r["merge_note"] if "merge_note" in keys else None,
         "taskIds": tasks or [],
         "createdAt": r["created_at"],
@@ -1056,8 +1148,17 @@ def cmd_feature_create(args):
     if not repo or not Path(repo).exists():
         fail(f"Project path does not exist: {repo or '(empty)'}")
     top = git_toplevel(repo)
+    repo_note = ""
     if not top:
-        fail(f"Project is not a git repository: {repo}")
+        # No repository yet: the board creates a local one, so the feature
+        # gets a worktree and a branch.
+        made = ensure_git_repo(repo, project["git_branch"] or "main")
+        if not made["ok"]:
+            fail(not_a_git_repo_error(repo) + f" ({made['note']})")
+        repo_note = made["note"]
+        top = git_toplevel(repo)
+        if not top:
+            fail(not_a_git_repo_error(repo))
 
     fid = args.id or new_uuid()
     if conn.execute("SELECT id FROM features WHERE id = ?", (fid,)).fetchone():
@@ -1096,16 +1197,18 @@ def cmd_feature_create(args):
     conn.execute(
         """INSERT INTO features (id, project_id, title, description, status,
                                 worktree_path, worktree_branch, base_branch,
-                                created_at, updated_at)
-           VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)""",
-        (fid, args.project, args.title, args.description or "", str(path), branch, base, ts, ts),
+                                owner_session_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)""",
+        (fid, args.project, args.title, args.description or "", str(path), branch, base,
+         getattr(args, "owner_session_id", None), ts, ts),
     )
     log_event(conn, None, args.actor, "feature.created",
               {"id": fid, "projectId": args.project, "title": args.title, "branch": branch,
                "copied": copied, "pull": pull_note})
     conn.commit()
     row = conn.execute("SELECT * FROM features WHERE id = ?", (fid,)).fetchone()
-    print(json.dumps({**row_to_feature(row), "copied": copied, "pull": pull_note}, indent=2))
+    print(json.dumps({**row_to_feature(row), "copied": copied, "pull": pull_note,
+                      "repoNote": repo_note}, indent=2))
     conn.close()
 
 
@@ -1399,6 +1502,8 @@ def row_to_task(r: sqlite3.Row) -> dict:
         "dueDate": r["due_date"] if "due_date" in keys else None,
         "progress": r["progress"] if "progress" in keys and r["progress"] else "",
         "parentSessionId": r["parent_session_id"] if "parent_session_id" in keys else None,
+        "parentTaskId": r["parent_task_id"] if "parent_task_id" in keys else None,
+        "statusBy": r["status_by"] if "status_by" in keys else None,
         "blockedByTaskIds": parse_id_list(
             r["blocked_by_task_ids"] if "blocked_by_task_ids" in keys else None
         ),
@@ -1413,6 +1518,91 @@ def row_to_task(r: sqlite3.Row) -> dict:
         "createdAt": r["created_at"],
         "updatedAt": r["updated_at"],
     }
+
+
+def resolve_parent_task_id(conn, parent_session_id, project_id, explicit=None):
+    """Find the parent task of a new task.
+
+    Automatic: the parent session points to the session of the task that
+    created this task. The task row that owns that session is the parent.
+    An explicit parent task id always wins.
+    """
+    explicit = (explicit or "").strip()
+    if explicit:
+        return explicit
+    session_id = (parent_session_id or "").strip()
+    if not session_id:
+        return None
+    row = conn.execute(
+        "SELECT id FROM tasks WHERE session_id = ? AND project_id = ? "
+        "ORDER BY updated_at DESC LIMIT 1",
+        (session_id, project_id),
+    ).fetchone()
+    if not row:
+        row = conn.execute(
+            "SELECT id FROM tasks WHERE session_id = ? ORDER BY updated_at DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+    return row["id"] if row else None
+
+
+def inherit_feature_for_session(conn, session_id):
+    """The feature a task delegated by this session belongs to.
+
+    Two cases:
+    1. The session belongs to a task that is already in a feature (a step of a
+       feature delegates a repair task -> the repair stays in the feature).
+    2. The session owns a feature it created (the feature orchestrator
+       created the feature and now delegates its steps).
+    """
+    session_id = (session_id or "").strip()
+    if not session_id:
+        return None
+    row = conn.execute(
+        "SELECT feature_id FROM tasks WHERE session_id = ? AND feature_id IS NOT NULL "
+        "AND TRIM(feature_id) != '' ORDER BY updated_at DESC LIMIT 1",
+        (session_id,),
+    ).fetchone()
+    if row:
+        return row["feature_id"]
+    row = conn.execute(
+        "SELECT id FROM features WHERE owner_session_id = ? ORDER BY created_at DESC LIMIT 1",
+        (session_id,),
+    ).fetchone()
+    return row["id"] if row else None
+
+
+def check_parent_task(conn, task_id, parent_task_id, project_id):
+    """Validate a parent task link. Returns the id or None (no parent)."""
+    parent_task_id = (parent_task_id or "").strip()
+    if not parent_task_id:
+        return None
+    if task_id and parent_task_id == task_id:
+        fail("Self-parent rejected: a task cannot be its own parent.")
+    row = conn.execute("SELECT id, project_id FROM tasks WHERE id = ?", (parent_task_id,)).fetchone()
+    if not row:
+        fail(f"Parent task not found: {parent_task_id}")
+    if project_id and row["project_id"] != project_id:
+        fail(f"Parent task {parent_task_id} belongs to another project")
+    return parent_task_id
+
+
+def link_children_by_session(conn, session_id, task_id):
+    """Backfill the task-to-task link for children of a session.
+
+    A child task can be created before its parent knows its session id.
+    When the parent task gets its session, the children that were created
+    from that session get the parent task id.
+    """
+    session_id = (session_id or "").strip()
+    if not session_id or not task_id:
+        return 0
+    cur = conn.execute(
+        "UPDATE tasks SET parent_task_id = ?, updated_at = ? "
+        "WHERE parent_task_id IS NULL AND parent_session_id = ? AND id != ?",
+        (task_id, now_iso(), session_id, task_id),
+    )
+    return cur.rowcount or 0
 
 
 def project_allowed_models(r) -> list:
@@ -1493,8 +1683,8 @@ def require_priority(v: str) -> str:
 
 def require_kind(v) -> str:
     v = (v or "oneshot").strip().lower()
-    if v not in ("oneshot", "cyclic", "service"):
-        fail(f"Invalid kind '{v}'. Valid: oneshot, cyclic, service")
+    if v not in ("oneshot", "cyclic", "service", "goal"):
+        fail(f"Invalid kind '{v}'. Valid: oneshot, cyclic, service, goal")
     return v
 
 
@@ -1823,9 +2013,22 @@ def cmd_task_create(args):
     # A brand-new row cannot close a cycle yet, so only id checks run here.
     blocked_raw = getattr(args, "blocked_by", None)
     blocked_ids = require_blocked_by(conn, tid, blocked_raw, project_id=args.project) if blocked_raw is not None else []
+    # Task-to-task link. Automatic: the task that owns the parent session is
+    # the parent task. An explicit --parent-task-id wins.
+    parent_session_id = getattr(args, "parent_session_id", None)
+    parent_task_id = resolve_parent_task_id(
+        conn, parent_session_id, args.project, getattr(args, "parent_task_id", None)
+    )
+    if parent_task_id:
+        parent_task_id = check_parent_task(conn, tid, parent_task_id, args.project)
     # Feature group: the task works in the feature worktree, on the feature
     # branch. The worktree location is on the task row from the start.
     feature_id = (getattr(args, "feature", None) or "").strip()
+    if not feature_id and parent_session_id:
+        # A step of a feature joins the feature of its parent session. The
+        # feature orchestrator creates the feature and then delegates the
+        # steps; the steps must work in the feature worktree, not in their own.
+        feature_id = inherit_feature_for_session(conn, parent_session_id) or ""
     feature_row = None
     if feature_id:
         feature_row = conn.execute("SELECT * FROM features WHERE id = ?", (feature_id,)).fetchone()
@@ -1841,17 +2044,19 @@ def cmd_task_create(args):
                               agent_id, agent_name, session_id, model_id, model_provider_id,
                               startup_phase, startup_error, kind, heartbeat_at,
                                expected_sec, cycle_interval_sec, progress, parent_session_id,
+                                parent_task_id,
                                 result, result_context, acceptance_criteria, due_date,
                               blocked_by_task_ids, feature_id,
                               worktree_path, worktree_branch, worktree_state,
                               created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (tid, args.project, args.title, args.description or "", status, priority,
          args.agent_id, args.agent_name, args.session_id,
          args.model_id, args.model_provider,
          args.startup_phase, args.startup_error, kind, ts if status == "running" else None,
           expected, cycle_interval, getattr(args, "progress", None) or "",
          getattr(args, "parent_session_id", None),
+          parent_task_id or None,
           getattr(args, "result", None), getattr(args, "result_context", None),
            getattr(args, "acceptance_criteria", None), getattr(args, "due_date", None),
          json.dumps(blocked_ids),
@@ -1963,6 +2168,12 @@ def cmd_task_update(args):
         sets.append("priority = ?")
         params.append(require_priority(args.priority))
         changes["priority"] = args.priority
+    # Who set the status. The reconciler uses it: a task that the agent (or
+    # the watchdog) blocked keeps that status.
+    if args.status is not None:
+        sets.append("status_by = ?")
+        params.append((args.actor or "cli").strip() or "cli")
+        changes["statusBy"] = params[-1]
     old_status = row["status"]
     keep_phase = bool(getattr(args, "keep_startup_phase", False))
     if args.status is not None:
@@ -2029,12 +2240,25 @@ def cmd_task_update(args):
         sets.append("blocked_by_task_ids = ?")
         params.append(json.dumps(blocked_ids))
         changes["blockedByTaskIds"] = blocked_ids
+    # Task-to-task link: --parent-task-id "id" sets the parent, "" sets none.
+    if getattr(args, "parent_task_id", None) is not None:
+        raw = str(args.parent_task_id).strip()
+        parent = check_parent_task(conn, args.task_id, raw, row["project_id"]) if raw else None
+        sets.append("parent_task_id = ?")
+        params.append(parent)
+        changes["parentTaskId"] = parent
     if not sets:
         fail("Nothing to update. Pass --title/--description/--status/--priority/...")
     sets.append("updated_at = ?")
     params.append(now_iso())
     params.append(args.task_id)
     conn.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", params)
+    # A task that gets its session id is the parent of the tasks that were
+    # created from that session. Link them now.
+    if args.session_id:
+        linked = link_children_by_session(conn, args.session_id, args.task_id)
+        if linked:
+            changes["linkedChildren"] = linked
     log_event(conn, args.task_id, args.actor, "task.edited", changes)
     conn.commit()
     if args.status == "running":
@@ -2100,14 +2324,14 @@ def cmd_task_move(args):
             # a second session for the same task (two features, two merges).
             if phase is None and (args.actor or "") == "delegate":
                 phase = "sending-prompt"
-            conn.execute("UPDATE tasks SET status = ?, heartbeat_at = ?, startup_phase = ?, startup_error = ?, updated_at = ? WHERE id = ?",
-                         (status, now_iso(), phase, None, now_iso(), args.task_id))
+            conn.execute("UPDATE tasks SET status = ?, status_by = ?, heartbeat_at = ?, startup_phase = ?, startup_error = ?, updated_at = ? WHERE id = ?",
+                         (status, (args.actor or "cli"), now_iso(), phase, None, now_iso(), args.task_id))
         else:
-            conn.execute("UPDATE tasks SET status = ?, heartbeat_at = ?, updated_at = ? WHERE id = ?",
-                         (status, now_iso(), now_iso(), args.task_id))
+            conn.execute("UPDATE tasks SET status = ?, status_by = ?, heartbeat_at = ?, updated_at = ? WHERE id = ?",
+                         (status, (args.actor or "cli"), now_iso(), now_iso(), args.task_id))
     else:
-        conn.execute("UPDATE tasks SET status = ?, heartbeat_at = ?, updated_at = ? WHERE id = ?",
-                     (status, row["heartbeat_at"] if "heartbeat_at" in row.keys() else None, now_iso(), args.task_id))
+        conn.execute("UPDATE tasks SET status = ?, status_by = ?, heartbeat_at = ?, updated_at = ? WHERE id = ?",
+                     (status, (args.actor or "cli"), row["heartbeat_at"] if "heartbeat_at" in row.keys() else None, now_iso(), args.task_id))
     log_event(conn, args.task_id, args.actor, "task.moved",
               {"from": old, "to": status, "comment": args.comment})
     conn.commit()
@@ -2151,6 +2375,34 @@ def cmd_task_deps(args):
     conn.close()
 
 
+def cmd_task_children(args):
+    """List the child tasks of a task (tasks created inside that task)."""
+    conn = get_conn(args.db)
+    row = conn.execute("SELECT id FROM tasks WHERE id = ?", (args.task_id,)).fetchone()
+    if not row:
+        fail(f"Task not found: {args.task_id}")
+    rows = conn.execute(
+        "SELECT * FROM tasks WHERE parent_task_id = ? ORDER BY created_at ASC",
+        (args.task_id,),
+    ).fetchall()
+    children = [row_to_task(r) for r in rows]
+    # Old rows: children that only have the parent session. Link them now.
+    parent = conn.execute(
+        "SELECT session_id FROM tasks WHERE id = ?", (args.task_id,)
+    ).fetchone()
+    session_id = (parent["session_id"] or "") if parent else ""
+    if session_id:
+        link_children_by_session(conn, session_id, args.task_id)
+        rows = conn.execute(
+            "SELECT * FROM tasks WHERE parent_task_id = ? ORDER BY created_at ASC",
+            (args.task_id,),
+        ).fetchall()
+        children = [row_to_task(r) for r in rows]
+    conn.commit()
+    print(json.dumps(children, indent=2))
+    conn.close()
+
+
 def cmd_task_delete(args):
     conn = get_conn(args.db)
     row = conn.execute("SELECT * FROM tasks WHERE id = ?", (args.task_id,)).fetchone()
@@ -2169,6 +2421,10 @@ def cmd_task_delete(args):
             pass
     # Referential cleanup: other tasks must not keep pointing at a dead id.
     scrub_dependency_refs(conn, args.task_id)
+    conn.execute(
+        "UPDATE tasks SET parent_task_id = NULL WHERE parent_task_id = ?",
+        (args.task_id,),
+    )
     conn.execute("DELETE FROM tasks WHERE id = ?", (args.task_id,))
     log_event(conn, None, args.actor, "task.deleted",
               {"id": args.task_id, "title": row["title"]})
@@ -2209,7 +2465,8 @@ def cmd_task_watch(args):
     import datetime as _dt
     conn = get_conn(args.db)
     rows = conn.execute(
-        "SELECT * FROM tasks WHERE status = 'running' AND (kind IS NULL OR kind = 'oneshot')"
+        "SELECT * FROM tasks WHERE status = 'running' "
+        "AND (kind IS NULL OR kind = 'oneshot')"
     ).fetchall()
     now = _dt.datetime.now(_dt.timezone.utc)
     stalled = []
@@ -2232,7 +2489,7 @@ def cmd_task_watch(args):
             msg = f"stalled: no heartbeat for {int(age)}s (limit {limit}s)"
             ts = now_iso()
             conn.execute(
-                "UPDATE tasks SET status = 'blocked', startup_phase = 'error', startup_error = ?, updated_at = ? WHERE id = ?",
+                "UPDATE tasks SET status = 'blocked', status_by = 'watchdog', startup_phase = 'error', startup_error = ?, updated_at = ? WHERE id = ?",
                 (msg, ts, r["id"]),
             )
             log_event(conn, r["id"], args.actor, "task.stalled",
@@ -2430,6 +2687,7 @@ def main(argv=None):
     fc.add_argument("--title", required=True)
     fc.add_argument("--description", default="")
     fc.add_argument("--base", default=None, help="Base branch (default: the project branch)")
+    fc.add_argument("--owner-session-id", default=None, help="Session that created the feature (the feature orchestrator)")
     fc.add_argument("--id", default=None)
     fc.add_argument("--actor", default="cli")
     fc.set_defaults(func=cmd_feature_create)
@@ -2470,11 +2728,12 @@ def main(argv=None):
     tc.add_argument("--model-provider", default=None)
     tc.add_argument("--startup-phase", default=None)
     tc.add_argument("--startup-error", default=None)
-    tc.add_argument("--kind", default=None, choices=("oneshot", "cyclic", "service"), help="Task kind: oneshot, cyclic, or service")
+    tc.add_argument("--kind", default=None, choices=("oneshot", "cyclic", "service", "goal"), help="Task kind: oneshot, cyclic, service, or goal")
     tc.add_argument("--expected-sec", type=int, default=None, help="Stall timeout in seconds for oneshot (default 600). Ignored for service.")
     tc.add_argument("--cycle-interval-sec", type=int, default=None)
     tc.add_argument("--progress", default=None, help="Free-text progress, e.g. 'step 3/10' or 'vite :5173 pid 1234'")
     tc.add_argument("--parent-session-id", default=None, help="Parent session that created this task (empty = user/board)")
+    tc.add_argument("--parent-task-id", default=None, help="Parent task id. Automatic when omitted: the task that owns the parent session.")
     tc.add_argument("--result", default=None, help="Task result: last message + context on done/blocked")
     tc.add_argument("--result-context", default=None, help="Extra context for the task result")
     tc.add_argument("--acceptance-criteria", default=None, help="Optional acceptance criteria")
@@ -2511,7 +2770,7 @@ def main(argv=None):
                     help="Keep the startup phase on a status change. Use it when the "
                          "session is already alive and must not be started again.")
     tu.add_argument("--startup-error", default=None)
-    tu.add_argument("--kind", default=None, choices=("oneshot", "cyclic", "service"))
+    tu.add_argument("--kind", default=None, choices=("oneshot", "cyclic", "service", "goal"))
     tu.add_argument("--expected-sec", type=int, default=None)
     tu.add_argument("--cycle-interval-sec", type=int, default=None)
     tu.add_argument("--progress", default=None)
@@ -2523,6 +2782,7 @@ def main(argv=None):
     tu.add_argument("--blocked-by", default=None, help="Comma-separated predecessor ids; '' clears the list (validated: exists, same project, no self/cycle)")
     tu.add_argument("--worktree-note", default=None, help="Note about the worktree (merge result, session loss, conflict)")
     tu.add_argument("--worktree-state", default=None, help="Worktree state: active | merged | conflict | pending | removed")
+    tu.add_argument("--parent-task-id", default=None, help="Parent task id. Empty string clears the link.")
     tu.add_argument("--actor", default="cli")
     tu.set_defaults(func=cmd_task_update)
 
@@ -2540,6 +2800,10 @@ def main(argv=None):
     tb = tsub.add_parser("deps", help="Show dependency relations (blocked-by, dependents, readiness).")
     tb.add_argument("task_id")
     tb.set_defaults(func=cmd_task_deps)
+
+    tch = tsub.add_parser("children", help="List the child tasks of a task.")
+    tch.add_argument("task_id")
+    tch.set_defaults(func=cmd_task_children)
 
     td = tsub.add_parser("delete", help="Delete task.")
     td.add_argument("task_id")

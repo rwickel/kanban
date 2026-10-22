@@ -140,6 +140,20 @@ export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export function callingSessionId(explicit, context) {
   const given = typeof explicit === "string" ? explicit.trim() : "";
   if (given) return given;
+  return callerSessionId(context);
+}
+
+/**
+ * The session that called the tool. The parent of a new task is ALWAYS the
+ * caller: the board links the child to the calling task (parentTaskId) and
+ * queues the result back into the calling session.
+ *
+ * An explicit parent session must not win here. A delegate that passes the
+ * session id it was given ("the session that created me") links the child to
+ * the grandparent, and the tree of the board breaks. The agent never needs to
+ * name the parent: it is always the session it runs in.
+ */
+export function callerSessionId(context) {
   const fromContext = typeof context?.sessionID === "string" ? context.sessionID.trim() : "";
   if (fromContext) return fromContext;
   const fromEnv = typeof process.env.OPENCODE_SESSION_ID === "string"

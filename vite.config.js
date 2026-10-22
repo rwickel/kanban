@@ -460,14 +460,13 @@ async function reconcileRunning() {
           succeeded,
           failed: failLike || sessionFailed || sessionStopped,
           kind: t.kind,
-          finalAssistantText: completionSignal,
         });
         let next = completion?.status || "blocked";
         // A delegating agent ends its turn before the delegated work is done.
-        // It may even say "not complete" — it means the FEATURE is not done, not
-        // that the agent is stuck. Its sub-tasks carry the work, so the task
-        // stays running and waits for their results in its session.
-        if (next === "blocked" && succeeded) {
+        // It means the FEATURE is not done, not that the agent is stuck. Its
+        // sub-tasks carry the work, so the task stays running and waits for
+        // their results in its session.
+        if ((next === "blocked" || next === "done") && succeeded) {
           const children = childrenByParent.get(String(sid)) || [];
           const childActive = children.some((c) => c.status === "running" || c.status === "backlog");
           // A step that just ended: the agent is woken up now and creates the
@@ -482,6 +481,12 @@ async function reconcileRunning() {
           if (childActive || childJustEnded) {
             next = "running";
           }
+        }
+        // A task that the agent or the watchdog blocked keeps that status.
+        // The board does not guess over a decision that somebody else made.
+        const statusBy = String(t.statusBy || t.status_by || "").trim();
+        if (t.status === "blocked" && sessionIdle && statusBy && statusBy !== "reconciler") {
+          continue;
         }
         // A task of a merged feature is finished work. It moves to the
         // archive like the other steps, so the board shows only the open
@@ -526,7 +531,7 @@ async function reconcileRunning() {
             }
           }
           const context = succeeded
-            ? completion?.reason || "completion was not verified"
+            ? completion?.reason || "the session ended"
               : errorText
                 ? `session outcome: ${outcome}; error: ${errorText}`
                 : `session outcome: ${outcome}; no error detail reported by the session`;
@@ -914,7 +919,7 @@ async function delegateTask(opts) {
       `Task id: ${tid}\nProject id: ${projectId}\nTask: ${title}\nDescription: ${description || "(none)"}\n` +
       (acceptanceCriteria ? `Acceptance criteria: ${acceptanceCriteria}\n` : "") +
       `Session id: ${session.id} (pass as parentSessionId when you create/delegate follow-up tasks).\n\n` +
-      `Before finishing, verify every acceptance criterion and required check. End with KANBAN_TASK_COMPLETE only when all are met; otherwise explain what remains and end with KANBAN_TASK_INCOMPLETE. A successful session alone does not prove completion. Do NOT call kanban_update_status or PATCH the task status yourself. ` +
+      `Before finishing, verify every acceptance criterion and required check. Your final message is the task result: keep it short and concrete (what changed, the branch, the changed files, the commands and their output). If a criterion is not met, call kanban_update_status with blocked and explain what remains. Do NOT PATCH the task status yourself. ` +
       (styleGuide ? `\n${styleGuide}\n` : "") +
       `Fire-and-forget: the delegator already returned. Send one heartbeat with a short progress note (kanban_heartbeat), then end your turn. The board queues the result of a finished sub-task into your session. Never sleep or poll in a loop.`;
     const pRes = await fetch(`${apiBase}/session/${session.id}/prompt`, {
@@ -1012,7 +1017,7 @@ async function startExistingTask(taskId, opts = {}) {
     await cli(["task", "update", taskId, "--actor", "delegate", "--session-id", session.id,
       "--startup-phase", "ready"]);
     const styleGuide = loadStyleGuide();
-    const prompt = `You are ${agentName} executing an existing Kanban task. Complete it end-to-end in ${workDir || projectPath || project.name}.\n${worktreePromptLines(worktree)}Task id: ${taskId}\nProject id: ${task.projectId}\nTask: ${task.title}\nDescription: ${description || "(none)"}\n${acceptanceCriteria ? `Acceptance criteria: ${acceptanceCriteria}\n` : ""}Session id: ${session.id}\n\nReview every acceptance criterion and required check before reporting. End with KANBAN_TASK_COMPLETE only when all are satisfied and verified. Otherwise explain what remains and end with KANBAN_TASK_INCOMPLETE. Do not change the task status manually.${styleGuide ? `\n${styleGuide}\n` : ""}`;
+    const prompt = `You are ${agentName} executing an existing Kanban task. Complete it end-to-end in ${workDir || projectPath || project.name}.\n${worktreePromptLines(worktree)}Task id: ${taskId}\nProject id: ${task.projectId}\nTask: ${task.title}\nDescription: ${description || "(none)"}\n${acceptanceCriteria ? `Acceptance criteria: ${acceptanceCriteria}\n` : ""}Session id: ${session.id}\n\nReview every acceptance criterion and required check before reporting. Your final message is the task result: keep it short and concrete (what changed, the branch, the changed files, the commands and their output). If a criterion is not met, call kanban_update_status with blocked and explain what remains.${styleGuide ? `\n${styleGuide}\n` : ""}`;
     const prompted = await fetch(`${apiBase}/session/${encodeURIComponent(session.id)}/prompt`, {
       method: "POST", headers: H, body: JSON.stringify({ text: prompt }),
     });
@@ -1166,6 +1171,7 @@ function kanbanDocs(req) {
       { method: "POST", path: "/api/kanban/tasks", body: "projectId*, title*, description?, status?, priority?, id?, agentId?, agentName?, sessionId?, modelId?, modelProviderID?, startupPhase?, startupError?, parentSessionId?, featureId?, result?, resultContext?, blockedByTaskIds?[]", returns: "Task" },
       { method: "PATCH", path: "/api/kanban/tasks/:id", body: "title?, description?, status?, priority?, agentId?, agentName?, sessionId?, modelId?, modelProviderID?, startupPhase?, startupError?, parentSessionId?, result?, resultContext?, blockedByTaskIds?[] (array replaces, [] clears)", returns: "Task" },
       { method: "GET", path: "/api/kanban/tasks/:id/dependencies", returns: "{id, status, blockedByTaskIds[], predecessors[{id,exists,status,title,done}], dependents[], ready}" },
+      { method: "GET", path: "/api/kanban/tasks/:id/children", returns: "Task[] — the tasks created inside this task" },
       { method: "GET", path: "/api/kanban/tasks/:id/worktree", returns: "{taskId, path, branch, state, note}" },
       { method: "POST", path: "/api/kanban/tasks/:id/worktree", returns: "{ok, path, branch, base, reused} — own git worktree for this task" },
       { method: "POST", path: "/api/kanban/tasks/:id/worktree/merge", body: "target?, cleanup?", returns: "{ok, merged, conflict, files[], error}" },
@@ -1214,6 +1220,7 @@ function kanbanOpenApi() {
       startupPhase: { type: ["string", "null"] },
       startupError: { type: ["string", "null"] },
       parentSessionId: { type: ["string", "null"] },
+      parentTaskId: { type: ["string", "null"], description: "The task that created this task. Set automatically from the parent session." },
       result: { type: ["string", "null"] },
       resultContext: { type: ["string", "null"] },
       blockedByTaskIds: { type: "array", items: { type: "string", format: "uuid" }, description: "Predecessor task ids that must be done first. Self-references, unknown ids, foreign-project ids and cycles are rejected with 400." },
@@ -1271,7 +1278,7 @@ function kanbanOpenApi() {
         },
         post: {
           summary: "Create task",
-          requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["projectId", "title"], properties: { projectId: { type: "string" }, title: { type: "string" }, description: { type: "string" }, status: { type: "string" }, priority: { type: "string" }, id: { type: "string" }, agentId: { type: "string" }, agentName: { type: "string" }, sessionId: { type: "string" }, modelId: { type: "string" }, modelProviderID: { type: "string" }, startupPhase: { type: "string" }, startupError: { type: "string" }, parentSessionId: { type: "string" }, result: { type: "string" }, resultContext: { type: "string" }, blockedByTaskIds: { type: "array", items: { type: "string" } } } } } } },
+          requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["projectId", "title"], properties: { projectId: { type: "string" }, title: { type: "string" }, description: { type: "string" }, status: { type: "string" }, priority: { type: "string" }, id: { type: "string" }, agentId: { type: "string" }, agentName: { type: "string" }, sessionId: { type: "string" }, modelId: { type: "string" }, modelProviderID: { type: "string" }, startupPhase: { type: "string" }, startupError: { type: "string" }, parentSessionId: { type: "string" }, parentTaskId: { type: "string" }, result: { type: "string" }, resultContext: { type: "string" }, blockedByTaskIds: { type: "array", items: { type: "string" } } } } } } },
           responses: { 200: { description: "Task", content: { "application/json": { schema: taskSchema } } }, 400: { description: "projectId and title required", content: { "application/json": { schema: errSchema } } } },
         },
       },
@@ -1284,7 +1291,7 @@ function kanbanOpenApi() {
         patch: {
           summary: "Update task",
           parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-          requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: { title: { type: "string" }, description: { type: "string" }, status: { type: "string" }, priority: { type: "string" }, agentId: { type: "string" }, agentName: { type: "string" }, sessionId: { type: "string" }, modelId: { type: "string" }, modelProviderID: { type: "string" }, startupPhase: { type: "string" }, startupError: { type: "string" }, parentSessionId: { type: "string" }, result: { type: "string" }, resultContext: { type: "string" }, blockedByTaskIds: { type: "array", items: { type: "string" } } } } } } },
+          requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: { title: { type: "string" }, description: { type: "string" }, status: { type: "string" }, priority: { type: "string" }, agentId: { type: "string" }, agentName: { type: "string" }, sessionId: { type: "string" }, modelId: { type: "string" }, modelProviderID: { type: "string" }, startupPhase: { type: "string" }, startupError: { type: "string" }, parentSessionId: { type: "string" }, parentTaskId: { type: "string" }, result: { type: "string" }, resultContext: { type: "string" }, blockedByTaskIds: { type: "array", items: { type: "string" } } } } } } },
           responses: { 200: { description: "Task", content: { "application/json": { schema: taskSchema } } }, 400: { description: "invalid dependencies (unknown id, self-reference, cycle)", content: { "application/json": { schema: errSchema } } }, 404: { description: "not found", content: { "application/json": { schema: errSchema } } } },
         },
         delete: {
@@ -1306,6 +1313,13 @@ function kanbanOpenApi() {
           summary: "Dependency relations of a task (predecessors, dependents, readiness)",
           parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
           responses: { 200: { description: "{id,status,blockedByTaskIds,predecessors,dependents,ready}", content: { "application/json": { schema: { type: "object" } } } }, 404: { description: "not found", content: { "application/json": { schema: errSchema } } } },
+        },
+      },
+      "/api/kanban/tasks/{id}/children": {
+        get: {
+          summary: "Child tasks of a task (the tasks created inside this task)",
+          parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+          responses: { 200: { description: "Task[]", content: { "application/json": { schema: { type: "array", items: taskSchema } } } }, 404: { description: "not found", content: { "application/json": { schema: errSchema } } } },
         },
       },
       "/api/kanban/projects": {
@@ -1470,6 +1484,8 @@ function kanbanApi() {
             if (b.startupPhase) argv.push("--startup-phase", b.startupPhase);
             if (b.startupError !== undefined) argv.push("--startup-error", b.startupError || "");
             if (b.parentSessionId !== undefined && b.parentSessionId !== null) argv.push("--parent-session-id", String(b.parentSessionId));
+            // Task-to-task link. Omitted = automatic (parent session decides).
+            if (b.parentTaskId !== undefined && b.parentTaskId !== null) argv.push("--parent-task-id", String(b.parentTaskId));
             if (b.featureId !== undefined && b.featureId !== null) argv.push("--feature", String(b.featureId));
             if (b.result !== undefined && b.result !== null) argv.push("--result", String(b.result));
             if (b.resultContext !== undefined && b.resultContext !== null) argv.push("--result-context", String(b.resultContext));
@@ -1498,6 +1514,7 @@ function kanbanApi() {
               ["--model-provider", "modelProviderID"],
               ["--startup-phase", "startupPhase"], ["--startup-error", "startupError"],
               ["--parent-session-id", "parentSessionId"],
+              ["--parent-task-id", "parentTaskId"],
               ["--result", "result"], ["--result-context", "resultContext"],
                ["--acceptance-criteria", "acceptanceCriteria"],
                 ["--kind", "kind"], ["--cycle-interval-sec", "cycleIntervalSec"], ["--due-date", "dueDate"],
@@ -1556,6 +1573,10 @@ function kanbanApi() {
           // GET /api/kanban/tasks/:id/dependencies → {id, blockedByTaskIds, predecessors, dependents, ready}
           if (req.method === "GET" && parts[0] === "tasks" && parts.length === 3 && parts[2] === "dependencies") {
             return json(res, 200, await cli(["task", "deps", parts[1]]));
+          }
+          // GET /api/kanban/tasks/:id/children → Task[] (tasks created inside this task)
+          if (req.method === "GET" && parts[0] === "tasks" && parts.length === 3 && parts[2] === "children") {
+            return json(res, 200, await cli(["task", "children", parts[1]]));
           }
           // GET /api/kanban/tasks/:id/worktree → {path, branch, state, note}
           if (req.method === "GET" && parts[0] === "tasks" && parts.length === 3 && parts[2] === "worktree") {

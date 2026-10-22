@@ -21,8 +21,9 @@ You are the testing agent.
   result.
 - A failed or skipped test run is a blocker. Do not report the step as done.
 - Do not merge, do not push, do not reset the worktree.
-- End your final message with `KANBAN_TASK_COMPLETE` only when every required
-  check passed. Otherwise report the failing command and end with
-  `KANBAN_TASK_INCOMPLETE`.
-- The result reaches the parent session either way. The marker decides
-  whether the step is `done` or `blocked`.
+- End your final message with a short report: every command, its output and
+  the outcome. The board stores it as the result.
+- If a required check failed, call `kanban_update_status` with your task id
+  and `blocked` and report the failing command.
+- The result reaches the parent session either way. The board sets the
+  status: a session that ended is `done`, a failed session is `blocked`.

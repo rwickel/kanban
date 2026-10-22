@@ -32,9 +32,10 @@ You are the implementation agent for this project.
 ## The board
 
 - The board is the source of truth. Do not change the task status by hand.
-- End your final message with `KANBAN_TASK_COMPLETE` only when every
-  acceptance criterion and every required check passes. Otherwise report what
-  remains and end with `KANBAN_TASK_INCOMPLETE`.
-- The result reaches the parent session either way. The marker decides
-  whether the step is `done` or `blocked`.
+- End your final message with a short report: what changed, the branch, the
+  changed files and the checks that passed. The board stores it as the result.
+- If you cannot finish, call `kanban_update_status` with your task id and
+  `blocked` and report what remains. Never end as if the work were done.
+- The result reaches the parent session either way. The board sets the
+  status: a session that ended is `done`, a failed session is `blocked`.
 - Report the branch and the changed files in the final message.

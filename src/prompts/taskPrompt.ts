@@ -143,7 +143,7 @@ function projectLine(task: Task, project: Project | null | undefined): string {
 
 function parentSessionLine(task: Task, sessionId: string): string {
   if (task.parentSessionId) {
-    return `${task.parentSessionId} (the session that created this task — report back there if needed)`;
+    return `${task.parentSessionId} (the session that created this task — report back there if needed; never use it as the parent of a task you create)`;
   }
   void sessionId;
   return '— (created directly by user/board)';
@@ -188,9 +188,11 @@ export function buildTaskSessionInstruction(ctx: TaskPromptContext): string {
     '',
     '- Execute autonomously end-to-end: read the project, plan if needed, make the changes, leave it in a working state.',
     '- Work only on this task. Do not create duplicate or replacement tasks.',
+    '- The board links every task you create to your own session. Never pass a parent session id yourself: the parent is always the session you run in.',
     '- Ask the user only if blocked; keep the final message concise — it becomes the stored task result automatically.',
     '- A successful session alone does not prove completion. Verify every acceptance criterion and required check before reporting.',
-    '- End with the exact marker KANBAN_TASK_COMPLETE only when all criteria and checks pass; otherwise explain what remains and end with KANBAN_TASK_INCOMPLETE.',
+    '- Your final message is the task result. Keep it short and concrete: what changed, the branch, the changed files, the commands and their output.',
+    '- If a criterion or a check is not met, do not report completion. Call kanban_update_status with your task id and blocked, and explain what remains.',
     '- Do not change task status manually. The board uses these explicit markers to decide whether work is done or blocked.',
     '- Do not write the task result into the task description.',
     ...(task.worktreePath ? [
