@@ -12,7 +12,8 @@ import { useSessionStream } from '../hooks/useSessionStream';
 import { useSpeechInput } from '../hooks/useSpeechInput';
 import { useChatSize, CHAT_EDGE_GAP } from '../hooks/useChatSize';
 import { useAutoContinue } from '../hooks/useAutoContinue';
-import { autoContinueMinToMs, hasUserHistory, readAutoContinueIdleMin, readAutoContinuePref, saveAutoContinuePref } from '../hooks/autoContinue';
+import { useSubtasksRunning, hasRunningTask } from '../hooks/useSubtasksRunning';
+import { autoContinueIdleMs, formatAutoContinueIdle, hasUserHistory, readAutoContinueIdleMin, readAutoContinuePref, saveAutoContinuePref } from '../hooks/autoContinue';
 import { STATUS_DOT, ThinkingBlock, ToolRow, ChatBubble, ChatErrorRow, ReviewTarget } from './ChatFeed';
 import { chatToMarkdown, ChatMessage } from './chatEvents';
 import FilePreviewModal from './FilePreviewModal';
@@ -27,7 +28,7 @@ import {
   saveAssistantPrefs,
 } from '../store/assistantSession';
 import { isModelAllowed } from '../store/modelResolution';
-import { createTask } from '../store/kanban';
+import { createTask, getTasks } from '../store/kanban';
 import AttachmentList from './AttachmentList';
 import { loadAttachments } from '../attachments';
 
@@ -156,13 +157,27 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
 
   // Board-assistant only. The last message id + status form the activity
   // token; every new visible activity restarts the idle window. The idle
-  // time itself is configurable on the Settings page (default 5 minutes).
+  // time itself is configurable on the Settings page (standard: 10 seconds).
   const isAssistantChat = true;
   const autoContinueIdleMin = readAutoContinueIdleMin();
+  const autoContinueIdleText = formatAutoContinueIdle(autoContinueIdleMin);
   const lastMsg = messages[messages.length - 1];
   const activityToken = lastMsg ? `${lastMsg.id}:${lastMsg.kind}:${status}` : `empty:${status}`;
+  // While a board task runs, the assistant must wait for its result. No
+  // auto-continue injection in that time.
+  const subtasksRunning = useSubtasksRunning(project?.id, autoContinue);
   const sendAutoContinue = async (text: string): Promise<boolean> => {
     if (!sessionId) return false;
+    // Fresh check right before the send: a subtask may have started after
+    // the last poll. Then wait for the next cycle instead of injecting.
+    if (project) {
+      try {
+        const tasks = await getTasks(project.id);
+        if (hasRunningTask(tasks)) return false;
+      } catch {
+        // Read failed: stay with the polled state.
+      }
+    }
     const res = await sendPrompt(sessionId, text, selectedModel, await loadAttachments(sessionId));
     if (!res.ok) {
       setSendError(`Auto-continue failed — ${res.error ?? 'unknown error'}`);
@@ -179,9 +194,10 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
     status,
     busy: busyEarly,
     hasHistory: hasUserHistory(messages),
+    subtasksRunning,
     activityToken,
     send: sendAutoContinue,
-    idleMs: autoContinueMinToMs(autoContinueIdleMin),
+    idleMs: autoContinueIdleMs(autoContinueIdleMin),
   });
 
   useEffect(() => {
@@ -575,9 +591,9 @@ export default function AssistantChatWindow({ project, availableAgents, onClose,
             onChange={toggleAutoContinue}
             className="accent-violet-500 w-3.5 h-3.5"
             aria-label="Automatisch fortsetzen"
-            title={`Sendet nach ${autoContinueIdleMin} Minuten ohne Aktivität eine Fortsetzung in dieselbe Session.`}
+            title={`Sendet nach ${autoContinueIdleText} ohne Aktivität eine Fortsetzung in dieselbe Session.`}
           />
-          <label htmlFor="assistant-auto-continue" className="text-[11px] muted mono cursor-pointer select-none" title={`Sendet nach ${autoContinueIdleMin} Minuten ohne Aktivität eine Fortsetzung in dieselbe Session.`}>
+          <label htmlFor="assistant-auto-continue" className="text-[11px] muted mono cursor-pointer select-none" title={`Sendet nach ${autoContinueIdleText} ohne Aktivität eine Fortsetzung in dieselbe Session.`}>
             Automatisch fortsetzen
           </label>
         </div>

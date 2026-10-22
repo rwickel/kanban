@@ -326,12 +326,37 @@ test('kanban.py task worktree isolation', async (t) => {
     assert.equal(git(REPO, 'status', '--porcelain').stdout.includes(' D'), false);
   });
 
-  await t.test('a task in a project without git fails with a clear error', () => {
-    mkdirSync(join(ROOT, 'plain'), { recursive: true });
+  await t.test('a project without git gets a local repository from the board', () => {
+    // The board creates the repository, so the task gets a worktree like in
+    // every other project. The project files must land in the first commit.
+    const FOLDER = join(ROOT, 'localrepo');
+    mkdirSync(join(FOLDER, 'src'), { recursive: true });
+    mkdirSync(join(FOLDER, 'node_modules'), { recursive: true });
+    writeFileSync(join(FOLDER, 'src', 'b.txt'), 'b1\n');
+    writeFileSync(join(FOLDER, 'node_modules', 'big.txt'), 'heavy\n');
+    const project = runJson(['project', 'create', '--name', 'LocalRepo', '--folder', 'localrepo']);
+    const task = runJson(['task', 'create', '--project', project.id, '--title', 'X']).id;
+    const created = runJson(['worktree', 'create', task]);
+    assert.equal(created.ok, true);
+    assert.match(created.repoNote, /local git repository/i);
+    // The folder is now a repository.
+    assert.equal(existsSync(join(FOLDER, '.git')), true);
+    // The worktree holds the project files.
+    assert.equal(existsSync(join(created.path, 'src', 'b.txt')), true);
+    // The heavy folder stays out of the commit.
+    assert.equal(existsSync(join(created.path, 'node_modules')), false);
+    // The first commit is on the project branch.
+    assert.equal(git(FOLDER, 'rev-parse', '--abbrev-ref', 'HEAD').stdout, 'main');
+  });
+
+  await t.test('a project without git and without files also gets a repository', () => {
+    const FOLDER = join(ROOT, 'plain');
+    mkdirSync(FOLDER, { recursive: true });
     const plain = runJson(['project', 'create', '--name', 'Plain', '--folder', 'plain']);
     const task = runJson(['task', 'create', '--project', plain.id, '--title', 'X']).id;
-    const r = run(['worktree', 'create', task]);
-    assert.notEqual(r.code, 0);
-    assert.match(r.stderr, /not a git repository/i);
+    const created = runJson(['worktree', 'create', task]);
+    assert.equal(created.ok, true);
+    assert.equal(existsSync(join(FOLDER, '.git')), true);
+    assert.equal(existsSync(created.path), true);
   });
 });

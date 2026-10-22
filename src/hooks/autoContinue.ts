@@ -2,10 +2,16 @@
 // Kept free of React so Node's built-in test runner can exercise the exact
 // threshold / reset / exclusion logic the chat window uses.
 
-/** 5 minutes of real inactivity before an auto-continue may fire. */
-export const AUTO_CONTINUE_IDLE_MS = 300000;
+/**
+ * Default idle time: 10 seconds of real inactivity. This value is used
+ * when the user did not choose a minute value in the settings.
+ */
+export const AUTO_CONTINUE_IDLE_MS = 10000;
 
-/** The fixed, understandable prompt injected into the same session. */
+/** Marker for the "Standard (10 seconds)" choice in the settings. */
+export const AUTO_CONTINUE_STANDARD_MIN = 0;
+
+/** Default, understandable prompt injected into the same session. The user can replace it on the Settings page. */
 export const AUTO_CONTINUE_PROMPT =
   'Continue the project based on the current board and task state. Do not repeat work that is already done.';
 
@@ -75,6 +81,11 @@ export interface AutoContinueInput {
   busy: boolean;
   /** Feed has a real user turn. */
   hasHistory: boolean;
+  /**
+   * A board task (subtask) of this project is still running. The board
+   * assistant must wait for the result, so no auto-continue is sent.
+   */
+  subtasksRunning?: boolean;
   /** Epoch ms of the last visible activity, or null when unknown. */
   lastActivityAt: number | null | undefined;
   /** Epoch ms "now". Injectable for tests. */
@@ -104,6 +115,7 @@ export function shouldAutoContinue(input: AutoContinueInput): boolean {
   if (!isAssistant) return false;
   if (!sessionId) return false;
   if (busy) return false;
+  if (input.subtasksRunning) return false;
   if (!hasHistory) return false;
   if (!isIdleStatus(status)) return false;
   if (lastActivityAt == null) return false;
@@ -141,14 +153,61 @@ export function saveAutoContinuePref(projectId: string, enabled: boolean): void 
 const AUTO_CONTINUE_IDLE_KEY = 'kanban_auto_continue_idle_minutes';
 
 /**
- * Read the configured idle time in minutes. Invalid or missing values fall
- * back to the 5-minute default.
+ * Read the configured idle time in minutes.
+ * 0 means the standard (AUTO_CONTINUE_IDLE_MS = 10 seconds).
+ * Invalid or missing values fall back to the standard.
  */
 export function readAutoContinueIdleMin(): number {
-  try { return normalizeAutoContinueMin(localStorage.getItem(AUTO_CONTINUE_IDLE_KEY)); } catch { return AUTO_CONTINUE_DEFAULT_MIN; }
+  try {
+    const raw = localStorage.getItem(AUTO_CONTINUE_IDLE_KEY);
+    if (raw === null) return AUTO_CONTINUE_STANDARD_MIN;
+    const n = Number(raw);
+    if (n === AUTO_CONTINUE_STANDARD_MIN) return AUTO_CONTINUE_STANDARD_MIN;
+    return normalizeAutoContinueMin(n);
+  } catch { return AUTO_CONTINUE_STANDARD_MIN; }
 }
 
-/** Persist the configured idle time in minutes. */
+/** Persist the configured idle time in minutes. 0 removes the value. */
 export function saveAutoContinueIdleMin(minutes: number): void {
-  try { localStorage.setItem(AUTO_CONTINUE_IDLE_KEY, String(normalizeAutoContinueMin(minutes))); } catch { /* ignore */ }
+  try {
+    if (!minutes) { localStorage.removeItem(AUTO_CONTINUE_IDLE_KEY); return; }
+    localStorage.setItem(AUTO_CONTINUE_IDLE_KEY, String(normalizeAutoContinueMin(minutes)));
+  } catch { /* ignore */ }
+}
+
+/** Convert the stored choice into milliseconds. 0 gives the 10 second default. */
+export function autoContinueIdleMs(minutes: number): number {
+  return minutes ? autoContinueMinToMs(minutes) : AUTO_CONTINUE_IDLE_MS;
+}
+
+/** Short text for the idle time, for example "10 Sekunden" or "5 Minuten". */
+export function formatAutoContinueIdle(minutes: number): string {
+  if (!minutes) return `${AUTO_CONTINUE_IDLE_MS / 1000} Sekunden`;
+  return minutes === 1 ? '1 Minute' : `${minutes} Minuten`;
+}
+
+const AUTO_CONTINUE_PROMPT_KEY = 'kanban_auto_continue_prompt';
+
+/**
+ * Read the user-configured auto-continue prompt. Missing, empty, or
+ * whitespace-only values fall back to the built-in default.
+ */
+export function readAutoContinuePrompt(): string {
+  try {
+    const raw = localStorage.getItem(AUTO_CONTINUE_PROMPT_KEY);
+    const trimmed = raw?.trim();
+    return trimmed ? trimmed : AUTO_CONTINUE_PROMPT;
+  } catch { return AUTO_CONTINUE_PROMPT; }
+}
+
+/**
+ * Persist the user-configured auto-continue prompt. An empty value or the
+ * default itself removes the stored entry again, so "reset" has no state.
+ */
+export function saveAutoContinuePrompt(prompt: string): void {
+  const trimmed = prompt.trim();
+  try {
+    if (!trimmed || trimmed === AUTO_CONTINUE_PROMPT) localStorage.removeItem(AUTO_CONTINUE_PROMPT_KEY);
+    else localStorage.setItem(AUTO_CONTINUE_PROMPT_KEY, trimmed);
+  } catch { /* ignore */ }
 }

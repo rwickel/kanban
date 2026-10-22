@@ -2,7 +2,7 @@ import { ArrowLeft, Check, Languages, Monitor, Moon, Smartphone, Sun, Timer, Typ
 import { useState, type ReactNode } from 'react';
 import { Theme, useTheme } from '../hooks/useTheme';
 import { FontSize, PreferredView, SPEECH_LANGS, usePreferences } from '../hooks/usePreferences';
-import { AUTO_CONTINUE_MIN_OPTIONS, readAutoContinueIdleMin, saveAutoContinueIdleMin } from '../hooks/autoContinue';
+import { AUTO_CONTINUE_IDLE_MS, AUTO_CONTINUE_MIN_OPTIONS, AUTO_CONTINUE_PROMPT, AUTO_CONTINUE_STANDARD_MIN, readAutoContinueIdleMin, readAutoContinuePrompt, saveAutoContinueIdleMin, saveAutoContinuePrompt } from '../hooks/autoContinue';
 
 const FONT_SIZES: { value: FontSize; label: string }[] = [
   { value: 13, label: 'Compact' },
@@ -15,11 +15,24 @@ export default function SettingsPage() {
   const { theme, setTheme } = useTheme();
   const { preferredView, setPreferredView, fontSize, setFontSize, speechLang, setSpeechLang } = usePreferences();
   const [autoContinueIdleMin, setAutoContinueIdleMinState] = useState<number>(() => readAutoContinueIdleMin());
+  const [autoContinuePrompt, setAutoContinuePromptState] = useState<string>(() => readAutoContinuePrompt());
+  const [savedAutoContinuePrompt, setSavedAutoContinuePrompt] = useState<string>(() => readAutoContinuePrompt());
   const backPath = window.location.search.includes('from=mobile') ? '/m' : '/';
 
   const chooseAutoContinueIdle = (min: number) => {
     saveAutoContinueIdleMin(min);
     setAutoContinueIdleMinState(min);
+  };
+
+  const savePrompt = () => {
+    saveAutoContinuePrompt(autoContinuePrompt);
+    setSavedAutoContinuePrompt(autoContinuePrompt);
+  };
+
+  const resetPrompt = () => {
+    setAutoContinuePromptState(AUTO_CONTINUE_PROMPT);
+    saveAutoContinuePrompt(AUTO_CONTINUE_PROMPT);
+    setSavedAutoContinuePrompt(AUTO_CONTINUE_PROMPT);
   };
 
   const chooseView = (value: PreferredView) => {
@@ -77,8 +90,15 @@ export default function SettingsPage() {
 
         <SettingSection
           title="Auto-continue idle time"
-          description={`Board assistant sends one continue prompt into the same session after this idle time. Only runs when "Automatisch fortsetzen" is enabled. Default: ${AUTO_CONTINUE_MIN_OPTIONS[1]} minutes.`}
+          description={`Board assistant sends one continue prompt into the same session after this idle time. Only runs when "Automatisch fortsetzen" is enabled. Standard: ${AUTO_CONTINUE_IDLE_MS / 1000} seconds.`}
         >
+          <Choice
+            label="Standard"
+            detail={`${AUTO_CONTINUE_IDLE_MS / 1000} seconds`}
+            icon={Timer}
+            selected={autoContinueIdleMin === AUTO_CONTINUE_STANDARD_MIN}
+            onClick={() => chooseAutoContinueIdle(AUTO_CONTINUE_STANDARD_MIN)}
+          />
           {AUTO_CONTINUE_MIN_OPTIONS.map((min) => (
             <Choice
               key={min}
@@ -88,6 +108,38 @@ export default function SettingsPage() {
               onClick={() => chooseAutoContinueIdle(min)}
             />
           ))}
+        </SettingSection>
+
+        <SettingSection
+          title="Auto-continue prompt"
+          description="Text the board assistant sends into the same session when it auto-continues. Leave empty or the default to use the built-in prompt."
+        >
+          <div className="settings-prompt">
+            <textarea
+              className="settings-textarea"
+              rows={4}
+              spellCheck={false}
+              value={autoContinuePrompt}
+              onChange={(e) => setAutoContinuePromptState(e.target.value)}
+              aria-label="Auto-continue prompt"
+            />
+            <div className="settings-actions">
+              <button
+                className="settings-btn is-primary"
+                onClick={savePrompt}
+                disabled={autoContinuePrompt === savedAutoContinuePrompt}
+              >
+                Save prompt
+              </button>
+              <button
+                className="settings-btn"
+                onClick={resetPrompt}
+                disabled={autoContinuePrompt.trim() === AUTO_CONTINUE_PROMPT}
+              >
+                Reset to default
+              </button>
+            </div>
+          </div>
         </SettingSection>
       </div>
     </main>

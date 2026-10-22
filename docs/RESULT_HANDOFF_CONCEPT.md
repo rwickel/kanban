@@ -18,6 +18,29 @@
   session contract (Layer 2), because it changes with every run.
 - The board keeps the handoff on a **ledger**. Each handoff is consumed once.
 
+## The facts of the code
+
+The design rests on these facts. Each one was checked in the code on
+2026-10-22.
+
+| Fact | Where |
+|---|---|
+| The result of a finished task is stored on the task row | `server/kanban.py`, `tasks.result` and `tasks.result_context` |
+| The last assistant message of a session becomes the result | `vite.config.js`, the reconciler |
+| The result is delivered to the parent session by a ledger, not by a caller | `server/kanban.py`, `task notify-pending` and `task notify-mark` |
+| The delivery is a queued message, so a busy chat is not cut | `vite.config.js`, `POST /session/:id/prompt` with `delivery: "queue"` |
+| The delivery is stamped only after the message was sent | `vite.config.js`, `notify-mark` after a 2xx |
+| A re-start clears the result of the task | `vite.config.js`, `startExistingTask`: `--result ""` |
+| The agent of a task can change on the row, but the session stays | `server/kanban.py`, `task update --agent-id` |
+| The board owns the team of a project | `server/kanban.py`, `projects.agent_ids` |
+| The model of a task is checked against the allowed list | `vite.config.js`, `validateTaskModel` |
+| The prompt has three layers | `src/prompts/taskPrompt.ts` |
+| The prompt is built in four places | see "The four prompt builders" |
+| The description is the brief, the result is the answer | the rules of `src/prompts/taskPrompt.ts` |
+
+**The gap in one line.** The result of a task reaches the parent session
+and the card. It reaches no other task.
+
 ## Terms
 
 | Term | Meaning |
@@ -137,13 +160,24 @@ says so (`startNow: true`) or when a user starts B later.
 
 1. Task A ends `done` with a result. The agent is `planner`.
 2. The parent calls `kanban_reassign` with `taskId: A` and `agentId: coder`.
-3. The board reads the result of A and stores one handoff row on A with
+3. The board checks that `coder` is on the team of the project
+   (`projects.agent_ids`) and that the model of the new agent is allowed.
+4. The board reads the result of A and stores one handoff row on A with
    `kind: carry_over`. The row names the old agent and the old session.
-4. The board starts a new session for the new agent. The old session id stays
+5. The board starts a new session for the new agent. The old session id stays
    in the event log, not in the task row.
-5. The new run prompt carries the carry-over text.
+6. The new run prompt carries the carry-over text.
 
 The carry-over counts against the same caps as any other handoff.
+
+**The carry-over must be stored before the result is cleared.** A re-start
+clears the result today. See "The order of the operations on a re-assign".
+
+**Today the agent can change without a new session.** The row has an
+`agent_id`, the CLI has `task update --agent-id`, and the PATCH route accepts
+`agentId`. But the session stays the session of the old agent, so the new
+agent works in a session of the old agent. A real re-assign needs a new
+session, a new contract and the carry-over.
 
 **A blocked source is allowed.** The handoff then carries the blocker line
 too, and the run prompt marks it: "source task is blocked". The next agent
@@ -180,6 +214,44 @@ Read the full result with GET /api/kanban/tasks/8f2c… when you need more.
 A delegated task can start with the result of an earlier task in the same
 call.
 
+## The four prompt builders
+
+The code today builds the prompt in **four** places. Each one must add the
+same block.
+
+| Builder | Used by | File |
+|---|---|---|
+| `buildTaskRunPrompt` | the desktop start, the mobile start | `src/prompts/taskPrompt.ts` |
+| `buildDelegatePrompt` | the plugin delegate | `opencode-plugin/delegate.js` |
+| the delegate prompt of the HTTP route | `POST /api/kanban/delegate` | `vite.config.js` |
+| the prompt of `startExistingTask` | `POST /api/kanban/tasks/:id/start` | `vite.config.js` |
+
+**One shared function.** The block and the caps live in a new pure module
+`scripts/handoff.mjs`, next to `scripts/linkback.mjs`. The four builders call
+it. A copy of the text in four files would drift.
+
+```
+buildHandoffBlock(handoffs) → "## Input from earlier work\n\n…" | ""
+```
+
+The pure module is unit tested, like `scripts/linkback.mjs`.
+
+## The order of the operations on a re-assign
+
+A re-start **clears the result** of the task today
+(`vite.config.js`, `startExistingTask`: `--result "" --result-context ""`).
+So the board must read the result **before** the reset.
+
+```
+1. read the result of the task        ← the old result
+2. store the carry-over handoff        ← the snapshot
+3. clear the result, start the new session
+4. build the run prompt with the carry-over
+```
+
+If the board clears first, the carry-over is empty. The result is gone and
+the new agent gets nothing.
+
 ## Rules
 
 | Rule | Reason |
@@ -193,6 +265,10 @@ call.
 | A handoff never changes `notified_at`. | the link-back ledger stays correct |
 | A handoff never changes `parentSessionId`. | the delivery chain stays correct |
 | The snapshot is trimmed. The full text stays on the board. | the prompt must stay small |
+| The carry-over is stored before the result is cleared. | a re-start clears the result |
+| The new agent must be on the project team. | the board owns the team (`projects.agent_ids`) |
+| The model of the new agent must be allowed. | `projects.allowed_models` and `validateTaskModel` |
+| A re-assign starts a new session. | the new agent has its own contract and its own tools |
 
 ## Caps
 
@@ -303,10 +379,11 @@ python server/kanban.py handoff consume --task <taskId>
 | File | Change |
 |---|---|
 | `server/kanban.py` | the table `task_handoffs`, the CLI group `handoff`, the route data of a task, the event `task.handoff` |
-| `opencode-plugin/index.ts` | the tools `kanban_hand_off`, `kanban_reassign`, `kanban_task_handoffs` |
+| `scripts/handoff.mjs` | **new** — the pure block builder and the caps, with the tests |
+| `opencode-plugin/index.ts` | the tools `kanban_hand_off`, `kanban_reassign`, `kanban_task_handoffs`; `kanban_delegate` takes `fromTaskIds` |
 | `opencode-plugin/delegate.js` | the delegate prompt takes the inputs of the new task |
 | `src/prompts/taskPrompt.ts` | the run prompt takes the inputs, and prints the "Input from earlier work" block |
-| `vite.config.js` | the task start and the delegate route read the pending handoffs and pass them to the prompt |
+| `vite.config.js` | the delegate route and `startExistingTask` read the pending handoffs and pass them to the prompt; the carry-over is stored before the result is cleared |
 | `src/store/kanban.ts` | the client functions for the handoff routes |
 | `src/components/TaskModal.tsx` | shows the handoffs of a task, with the source and the state |
 | `src/types.ts` | the type `TaskHandoff` |
@@ -336,12 +413,21 @@ python server/kanban.py handoff consume --task <taskId>
   prompt, so old handoffs that were consumed do not cost prompt space.
 - The result of the source can contain secrets. The rule "no secrets" of
   `AGENTS.md` applies to the source agent, not to the board.
+- The block goes into four prompt builders. A copy of the text in each file
+  would drift. Use the shared module `scripts/handoff.mjs`.
 
-## Not covered by a test
+## Tests
 
-The agent behaviour after a handoff: that the agent really uses the input and
-does not treat it as the brief. That is a prompt rule. The run prompt states
-the rule, and the review step is the check.
+| Area | File | Cases |
+|---|---|---|
+| the block and the caps | `scripts/handoff.test.mjs` | the block, the caps, the oldest source is dropped first, the dropped ids are named, no block without a handoff |
+| the store | `server/kanban-handoff.test.mjs` | the row, the snapshot, the consume, a source without a result is refused, a foreign project is refused, the carry-over of the same task |
+| the prompt | `src/prompts/taskPrompt.test.ts` | the run prompt holds the block, the session contract does not |
+
+**Not covered by a test**: the agent behaviour after a handoff. That the
+agent really uses the input and does not treat it as the brief. That is a
+prompt rule. The run prompt states the rule, and the review step is the
+check.
 
 ## See also
 

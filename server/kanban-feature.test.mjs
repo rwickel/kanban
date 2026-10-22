@@ -73,6 +73,19 @@ test('kanban.py feature worktree', async (t) => {
     assert.equal(git(feature.worktreePath, 'branch', '--show-current').stdout, feature.worktreeBranch);
   });
 
+  await t.test('a feature of a project without git gets a local repository', () => {
+    // The board creates the repository, so the feature gets a worktree.
+    const FOLDER = join(ROOT, 'localfeat');
+    mkdirSync(join(FOLDER, 'src'), { recursive: true });
+    writeFileSync(join(FOLDER, 'src', 'c.txt'), 'c1\n');
+    const project = runJson(['project', 'create', '--name', 'LocalFeat', '--folder', 'localfeat']);
+    const feature = runJson(['feature', 'create', '--project', project.id, '--title', 'Feature Local']);
+    assert.ok(feature.id);
+    assert.match(feature.repoNote, /local git repository/i);
+    assert.equal(existsSync(join(FOLDER, '.git')), true);
+    assert.equal(existsSync(join(feature.worktreePath, 'src', 'c.txt')), true);
+  });
+
   await t.test('a task of the feature carries the worktree location', () => {
     const features = runJson(['feature', 'list', '--project', P]);
     const F = features[0].id;

@@ -7,11 +7,12 @@ import { isModelAllowed } from '../store/modelResolution';
 import { useSessionStream } from '../hooks/useSessionStream';
 import { useSpeechInput } from '../hooks/useSpeechInput';
 import { useAutoContinue } from '../hooks/useAutoContinue';
-import { autoContinueMinToMs, hasUserHistory, readAutoContinueIdleMin, readAutoContinuePref, saveAutoContinuePref } from '../hooks/autoContinue';
+import { useSubtasksRunning, hasRunningTask } from '../hooks/useSubtasksRunning';
+import { autoContinueIdleMs, formatAutoContinueIdle, hasUserHistory, readAutoContinueIdleMin, readAutoContinuePref, saveAutoContinuePref } from '../hooks/autoContinue';
 import { STATUS_DOT, ThinkingBlock, ToolRow, ChatBubble, ChatErrorRow } from '../components/ChatFeed';
 import { ChatMessage, chatToMarkdown } from '../components/chatEvents';
 import FilePreviewModal from '../components/FilePreviewModal';
-import { updateTask } from '../store/kanban';
+import { updateTask, getTasks } from '../store/kanban';
 import { ArrowLeft, Send, Loader2, Square, Mic, MicOff, Plus, Download, Check, RefreshCw } from 'lucide-react';
 
 const WELCOME: ChatMessage = {
@@ -104,17 +105,31 @@ export default function MobileChat({
   }, [status]);
 
   // Opt-in auto-continue (desktop parity). Assistant chats only — a task
-  // chat is excluded by `isAssistant`. Same fixed prompt, same session.
+  // chat is excluded by `isAssistant`. Configurable prompt, same session.
   // busyAuto mirrors `busy` below; computed before the null guard because
   // useAutoContinue must run unconditionally.
   const busyAuto = status === 'live' || status === 'connecting' || sending || stopping || interrupted;
   const autoContinueIdleMin = readAutoContinueIdleMin();
+  const autoContinueIdleText = formatAutoContinueIdle(autoContinueIdleMin);
   const [autoContinue, setAutoContinue] = useState<boolean>(() =>
     isAssistant ? readAutoContinuePref(project!.id) : false);
   const lastMsg = messages[messages.length - 1];
   const activityToken = lastMsg ? `${lastMsg.id}:${lastMsg.kind}:${status}` : `empty:${status}`;
+  // While a board task runs, the assistant must wait for its result. No
+  // auto-continue injection in that time.
+  const subtasksRunning = useSubtasksRunning(project?.id, autoContinue);
   const sendAutoContinue = async (text: string): Promise<boolean> => {
     if (!activeSessionId) return false;
+    // Fresh check right before the send: a subtask may have started after
+    // the last poll. Then wait for the next cycle instead of injecting.
+    if (project) {
+      try {
+        const tasks = await getTasks(project.id);
+        if (hasRunningTask(tasks)) return false;
+      } catch {
+        // Read failed: stay with the polled state.
+      }
+    }
     const res = await sendPrompt(activeSessionId, text, selectedModel);
     if (!res.ok) {
       setSendError(`Auto-continue failed — ${res.error ?? 'unknown error'}`);
@@ -131,9 +146,10 @@ export default function MobileChat({
     status,
     busy: busyAuto,
     hasHistory: hasUserHistory(messages),
+    subtasksRunning,
     activityToken,
     send: sendAutoContinue,
-    idleMs: autoContinueMinToMs(autoContinueIdleMin),
+    idleMs: autoContinueIdleMs(autoContinueIdleMin),
   });
   const toggleAutoContinue = () => {
     if (!project) return;
@@ -406,9 +422,9 @@ export default function MobileChat({
               onChange={toggleAutoContinue}
               className="accent-violet-500 w-3.5 h-3.5"
               aria-label="Automatisch fortsetzen"
-              title={`Sendet nach ${autoContinueIdleMin} Minuten ohne Aktivität eine Fortsetzung in dieselbe Session.`}
+              title={`Sendet nach ${autoContinueIdleText} ohne Aktivität eine Fortsetzung in dieselbe Session.`}
             />
-            <span className="text-[11px] muted mono" title={`Sendet nach ${autoContinueIdleMin} Minuten ohne Aktivität eine Fortsetzung in dieselbe Session.`}>Automatisch fortsetzen</span>
+            <span className="text-[11px] muted mono" title={`Sendet nach ${autoContinueIdleText} ohne Aktivität eine Fortsetzung in dieselbe Session.`}>Automatisch fortsetzen</span>
           </label>
         )}
         {!task && <ChatBubble msg={{ ...WELCOME, markdown: isAssistant ? `Board assistant for ${project?.name ?? ''} (${who}). Ask about the board or delegate work. Finished tasks report back here.` : WELCOME.markdown }} agentName={agentName} modelName={modelHint} showAvatar onFileClick={setPreviewPath} />}

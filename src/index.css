@@ -158,6 +158,24 @@ html, body {
 .settings-detail { margin-left: auto; opacity: .8; font-family: var(--font-mono); font-size: 12px; }
 .settings-check { margin-left: auto; }
 .settings-choice .settings-detail + .settings-check { margin-left: 8px; }
+.settings-prompt { display: flex; flex-direction: column; gap: 10px; }
+.settings-textarea {
+  width: 100%; box-sizing: border-box; min-height: 96px; resize: vertical;
+  padding: 10px 12px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); font-family: var(--font-mono); font-size: 13px; line-height: 1.5;
+}
+.settings-textarea:focus { outline: none; border-color: var(--accent); }
+.settings-actions { display: flex; gap: 8px; }
+.settings-btn {
+  min-height: 38px; padding: 0 14px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface-2); color: var(--text-2);
+  font-size: 13px; font-weight: 600;
+}
+.settings-btn:hover:not(:disabled) { border-color: var(--border-strong); }
+.settings-btn:disabled { opacity: .5; cursor: default; }
+.settings-btn.is-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 
 /* Markdown */
 .md-body p { margin: 0.35em 0; }
