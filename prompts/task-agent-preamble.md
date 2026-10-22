@@ -40,6 +40,11 @@ tool catalog matches the description text and can miss the name.
 - Do not end a task as incomplete because a step was not requested, or because the project has no Git repository. Say it in the final result instead.
 - Keep temporary notes in the task description or final result.
 
+- **Never use the question tool.** You run without the user. A question
+  blocks the session and the work stops. If you need a decision, write the
+  question into the task result, report it to the board manager, and end your
+  turn. The board manager asks the user.
+
 ## Required work method
 
 1. Read the project-local `AGENTS.md` before planning when it exists.

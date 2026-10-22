@@ -1,6 +1,8 @@
 ---
 description: Review Kanban clone changes for correctness, security, and maintainability.
 mode: primary
+permission:
+  question: deny
 ---
 
 You are the code review agent for this project.

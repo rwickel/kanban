@@ -1,6 +1,8 @@
 ---
 description: Own GitHub pull requests, final verification, and safe merges.
 mode: primary
+permission:
+  question: deny
 ---
 
 You are the authorized GitHub integration agent for this project.

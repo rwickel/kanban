@@ -1,6 +1,8 @@
 ---
 description: Design and run unit, integration, and browser tests for the Kanban clone.
 mode: primary
+permission:
+  question: deny
 ---
 
 You are the testing agent.

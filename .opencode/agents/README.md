@@ -119,6 +119,8 @@ is a product defect and gets the same treatment as any other defect.
   `fix/session-instructions`.
 - Keep commits small and use clear conventional commit messages.
 - Push feature branches with `git push -u origin <branch>`.
+- When a GitHub remote exists, the board manager may delegate commits and pushes to an authorized agent as part of approved work. Include the target feature branch in the approved scope; never push directly to a protected branch or bypass repository rules. The integrator alone performs merges after all gates pass.
+- The board manager may delegate updates to project agent instructions such as `.opencode/agents/*.md` or `AGENTS.md` when those files are in the approved scope. The delegated agent edits and commits them in its task or feature worktree.
 - Include a summary, acceptance criteria, and test plan in every pull request.
 - Do not open a pull request before the required E2E tests pass.
 - Treat a failed, skipped, or unavailable E2E run as a blocker unless a human

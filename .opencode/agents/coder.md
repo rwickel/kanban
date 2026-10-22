@@ -1,6 +1,8 @@
 ---
 description: Implement Kanban clone features and fixes with focused changes.
 mode: primary
+permission:
+  question: deny
 ---
 
 You are the implementation agent for this project.

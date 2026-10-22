@@ -174,13 +174,27 @@ function readBody(req) {
   });
 }
 
+// A failed request to the OpenCode server must not kill the board. Node
+// stops the process on an unhandled rejection, and the board died every time
+// the OpenCode server was restarted.
+process.on("unhandledRejection", (err) => {
+  console.error("[kanban] unhandled rejection:", err?.message || String(err));
+});
+process.on("uncaughtException", (err) => {
+  console.error("[kanban] uncaught exception:", err?.message || String(err));
+});
+
 function json(res, code, obj) {
+  // A response that was already sent must not be sent twice. The crash
+  // "Cannot set headers after they are sent" killed the whole board.
+  if (res.headersSent || res.writableEnded) return;
   res.statusCode = code;
   res.setHeader("Content-Type", "application/json");
   res.end(JSON.stringify(obj));
 }
 
 function html(res, code, str) {
+  if (res.headersSent || res.writableEnded) return;
   res.statusCode = code;
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.end(str);
@@ -1796,10 +1810,15 @@ function kanbanApi() {
                 res.on("close", () => {
                   if (!res.writableEnded) { try { reader.cancel(); } catch {} }
                 });
-                for (;;) {
-                  const { done, value } = await reader.read();
-                  if (done) break;
-                  res.write(decoder.decode(value, { stream: true }));
+                try {
+                  for (;;) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    res.write(decoder.decode(value, { stream: true }));
+                  }
+                } catch {
+                  // The client left or the OpenCode server closed the stream.
+                  // The stream ends here. It is not an error of the board.
                 }
                 return res.end();
               }

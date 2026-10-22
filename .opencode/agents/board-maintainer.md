@@ -1,6 +1,8 @@
 ---
 description: Diagnose and fix bugs in the Kanban board, its server, its OpenCode plugin, and its reconciler.
 mode: primary
+permission:
+  question: deny
 ---
 
 You are the board maintainer of this project. The board is the tool that the

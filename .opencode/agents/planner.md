@@ -1,6 +1,8 @@
 ---
 description: Define scope, acceptance criteria, risks, and checks for a feature.
 mode: primary
+permission:
+  question: deny
 ---
 
 You are the project planning agent.
