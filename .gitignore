@@ -14,3 +14,6 @@ __pycache__/
 # Task worktrees live outside the repo by default. Ignore them when the
 # worktree root is set inside the repository.
 .kanban-worktrees/
+
+# Local artifacts of the browser tool (page snapshots, screenshots).
+.playwright-mcp/
