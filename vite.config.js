@@ -318,14 +318,30 @@ async function reconcileRunning() {
       ...(Array.isArray(blocked) ? blocked : []),
     ];
     // Child tasks: a task that delegated work has children with its own
-    // session id as parent. A parent whose turn ended without the completion
-    // marker keeps waiting for them.
+    // session id as parent. A parent whose turn ended keeps waiting for them.
     const childrenByParent = new Map();
     for (const row of Array.isArray(all) ? all : []) {
       const parent = String(row.parentSessionId || row.parent_session_id || "").trim();
       if (!parent) continue;
       if (!childrenByParent.has(parent)) childrenByParent.set(parent, []);
       childrenByParent.get(parent).push(row);
+    }
+    // A parent whose turn ended while a step still runs is not done. The board
+    // marked it done, but the work is not finished: the step is still in the
+    // board. Such a parent goes back to running, so the card tells the truth.
+    const byId = new Map();
+    for (const row of Array.isArray(all) ? all : []) byId.set(String(row.id), row);
+    const known = new Set(rows.map((t) => String(t.id)));
+    for (const row of Array.isArray(all) ? all : []) {
+      if (row.status !== "running" && row.status !== "backlog") continue;
+      const parent = String(row.parentSessionId || row.parent_session_id || "").trim();
+      if (!parent) continue;
+      const owner = Array.isArray(all) ? all.find((t) => String(t.sessionId || t.session_id || "") === parent) : null;
+      if (!owner) continue;
+      if (owner.status !== "done" && owner.status !== "archived") continue;
+      if (known.has(String(owner.id))) continue;
+      known.add(String(owner.id));
+      rows.push(owner);
     }
     // The state of every feature. A task that owns a merged feature is
     // finished work: it moves to the archive like its steps.
