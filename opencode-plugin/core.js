@@ -396,3 +396,15 @@ export async function ocPromptStop(apiBase, headers, sessionId) {
     /* best effort */
   }
 }
+
+export async function interruptTaskSession(context, apiBase, headers, sessionId) {
+  if (typeof context?.session?.interrupt === "function") {
+    try {
+      await context.session.interrupt({ sessionID: sessionId });
+      return true;
+    } catch {
+      // The tool context may not own this task session. Use the OpenCode API.
+    }
+  }
+  return ocInterrupt(apiBase, headers, sessionId);
+}

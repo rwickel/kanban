@@ -15,7 +15,7 @@
 // through the running server's own ctx.session client, so no extra
 // `opencode serve` and no port or password is needed for delegation.
 
-import { callerSessionId, callingSessionId, cliResult, jsonResult, kanbanFetch, ocBase, ocH, runCli, toolError } from "./core.js"
+import { callerSessionId, callingSessionId, cliResult, interruptTaskSession, jsonResult, kanbanFetch, ocBase, ocH, runCli, toolError } from "./core.js"
 import { delegateTool, messageToTool } from "./delegate.js"
 
 // Optional arguments are expressed by leaving the key out of `required`,
@@ -386,6 +386,33 @@ export default {
             if (u.ok) return cliResult(u)
           }
           return cliResult(moved)
+        },
+      })
+
+      editor.add({
+        name: "kanban_stop_task",
+        description: "Stop a running task session, then mark its task blocked with the stop reason.",
+        input: {
+          type: "object",
+          properties: { taskId: str("Running Kanban task uuid"), reason: str("Why the task must stop") },
+          required: ["taskId", "reason"],
+          additionalProperties: false,
+        },
+        options: { namespace: "kanban" },
+        execute: async (input: any, context: any) => {
+          const taskId = String(input.taskId).trim()
+          const current = await runCli(["task", "show", taskId])
+          if (!current.ok) return cliResult(current)
+          const task = JSON.parse(current.text)
+          if (task.status !== "running") return toolError("Only a running task can be stopped")
+          if (task.sessionId) {
+            const interrupted = await interruptTaskSession(context, ocBase(), ocH(), task.sessionId)
+            if (!interrupted) return toolError("Could not interrupt task session")
+          }
+          const moved = await runCli(["task", "move", taskId, "blocked", "--actor", "agent"])
+          if (!moved.ok) return cliResult(moved)
+          const result = await runCli(["task", "update", taskId, "--actor", "agent", "--result", `Stopped: ${String(input.reason).trim()}`])
+          return cliResult(result.ok ? result : moved)
         },
       })
 
