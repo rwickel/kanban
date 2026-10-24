@@ -16,7 +16,7 @@ import {
   groupPending,
   planDeliveries,
 } from "./scripts/linkback.mjs";
-import { completionStatus } from "./scripts/task-completion.mjs";
+import { reconciledCompletionStatus } from "./scripts/task-completion.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -486,11 +486,16 @@ async function reconcileRunning() {
             }
           }
         }
-        const completion = completionStatus({
+        const statusBy = String(t.statusBy || t.status_by || "").trim();
+        const completion = reconciledCompletionStatus({
           succeeded,
           failed: failLike || sessionFailed || sessionStopped,
           kind: t.kind,
+          currentStatus: t.status,
+          statusBy,
+          worktreeState: t.worktreeState || t.worktree_state,
         });
+        if (completion === null) continue;
         let next = completion?.status || "blocked";
         // A delegating agent ends its turn before the delegated work is done.
         // It means the FEATURE is not done, not that the agent is stuck. Its
@@ -514,10 +519,6 @@ async function reconcileRunning() {
         }
         // A task that the agent or the watchdog blocked keeps that status.
         // The board does not guess over a decision that somebody else made.
-        const statusBy = String(t.statusBy || t.status_by || "").trim();
-        if (t.status === "blocked" && sessionIdle && statusBy && statusBy !== "reconciler") {
-          continue;
-        }
         // A task of a merged feature is finished work. It moves to the
         // archive like the other steps, so the board shows only the open
         // work. The same holds for the owner of the feature: its steps are

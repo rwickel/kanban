@@ -16,3 +16,11 @@ export function completionStatus({ succeeded, failed, kind }) {
   if (kind === "cyclic") return { status: "backlog", reason: "the session ended" }
   return { status: "done", reason: "the session ended" }
 }
+
+// Preserve an explicit block and reject completion when the worktree is not verified.
+export function reconciledCompletionStatus({ currentStatus, statusBy, worktreeState, checksPassed = true, ...completion }) {
+  if (currentStatus === "blocked" && statusBy && statusBy !== "reconciler") return null
+  if (worktreeState === "conflict" || worktreeState === "unverified" || checksPassed === false)
+    return { status: "blocked", reason: "worktree or checks are not verified" }
+  return completionStatus(completion)
+}
