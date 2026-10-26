@@ -10,6 +10,7 @@ import type { ChatStatus } from '../hooks/useSessionStream';
 import type { ChatMessage, QuestionItem } from './chatEvents';
 import { linkifyFilePaths, parsePreviewHref } from './filePaths';
 import { externalLink } from './markdownLink';
+import { buildQuestionAnswer, isQuestionAnswered } from './questionForm';
 
 function linkifyKanbanRefs(markdown: string): string {
   return markdown
@@ -100,17 +101,6 @@ export function ThinkingBlock({ msg, showAvatar, agentName, modelName, onFileCli
       </div>
     </div>
   );
-}
-
-/** Serialize the picks into the form answer the backend expects: { q0, q1, … }. */
-function buildQuestionAnswer(questions: QuestionItem[], picks: Record<number, string[]>, texts: Record<number, string>): Record<string, string | string[]> {
-  const answer: Record<string, string | string[]> = {};
-  for (let i = 0; i < questions.length; i++) {
-    const q = questions[i];
-    if (q.freeText) answer[`q${i}`] = (texts[i] ?? '').trim();
-    else answer[`q${i}`] = q.multiple ? (picks[i] ?? []) : (picks[i]?.[0] ?? '');
-  }
-  return answer;
 }
 
 /** Structured answer entries for the cool list — one per question. */
@@ -301,15 +291,14 @@ function QuestionCard({
   const [texts, setTexts] = useState<Record<number, string>>({});
   const [sent, setSent] = useState(false);
 
-  const isAnswered = (i: number) => {
-    const q = questions[i];
-    if (!q) return false;
-    return q.freeText ? (texts[i] ?? '').trim().length > 0 : (picks[i]?.length ?? 0) > 0;
-  };
+  // Every question has a "Type your own answer" field when custom answers are
+  // allowed (the default). A pick and a typed answer are both valid input.
+  const isAnswered = (i: number) => isQuestionAnswered(questions[i], picks[i] ?? [], texts[i] ?? '');
   const allAnswered = questions.length > 0 && questions.every((_, i) => isAnswered(i));
   const canSubmit = !done && !sent && allAnswered && !!t.toolCallId && !!onAnswered;
 
   const toggle = (i: number, label: string) => {
+    const selected = !(picks[i] ?? []).includes(label);
     setPicks((prev) => {
       const cur = prev[i] ?? [];
       if (questions[i]?.multiple) {
@@ -318,6 +307,14 @@ function QuestionCard({
       // Single-select: picking the active label clears it.
       return { ...prev, [i]: cur.includes(label) ? [] : [label] };
     });
+    // One answer only: a pick replaces a typed answer.
+    if (selected && !questions[i]?.multiple) setTexts((prev) => ({ ...prev, [i]: '' }));
+  };
+
+  const setCustom = (i: number, value: string) => {
+    setTexts((prev) => ({ ...prev, [i]: value }));
+    // Single-select: a typed answer replaces the current pick.
+    if (value.trim() && !questions[i]?.multiple) setPicks((prev) => ({ ...prev, [i]: [] }));
   };
 
   const submit = () => {
@@ -350,40 +347,55 @@ function QuestionCard({
                   type="text"
                   value={texts[i] ?? ''}
                   disabled={done}
-                  onChange={(e) => setTexts((p) => ({ ...p, [i]: e.target.value }))}
+                  onChange={(e) => setCustom(i, e.target.value)}
                   placeholder="Type your answer…"
                   className="input mt-2 mono text-[11.5px]"
                   style={{ padding: '6px 8px', fontSize: '11.5px' }}
                 />
               ) : (
-                <ul className="mt-2 space-y-1">
-                  {q.options.map((o, j) => {
-                    const on = picked.includes(o.label);
-                    const Input = q.multiple ? 'input' : 'input';
-                    return (
-                      <li key={j}>
-                        <label
-                          className="flex gap-1.5 items-start text-[11px] cursor-pointer rounded px-1 py-0.5"
-                          style={{ background: on ? 'color-mix(in srgb, var(--blue) 8%, transparent)' : 'transparent' }}
-                        >
-                          <Input
-                            type={q.multiple ? 'checkbox' : 'radio'}
-                            name={`q-${i}`}
-                            checked={on}
-                            disabled={done}
-                            onChange={() => toggle(i, o.label)}
-                            className="shrink-0 mt-0.5"
-                            style={{ accentColor: 'var(--blue)', cursor: done ? 'default' : 'pointer' }}
-                          />
-                          <span className="min-w-0">
-                            <span className="mono t-soft">{o.label}</span>
-                            {o.description && <span className="muted"> — {o.description}</span>}
-                          </span>
-                        </label>
-                      </li>
-                    );
-                  })}
-                </ul>
+                <>
+                  <ul className="mt-2 space-y-1">
+                    {q.options.map((o, j) => {
+                      const on = picked.includes(o.label);
+                      const Input = q.multiple ? 'input' : 'input';
+                      return (
+                        <li key={j}>
+                          <label
+                            className="flex gap-1.5 items-start text-[11px] cursor-pointer rounded px-1 py-0.5"
+                            style={{ background: on ? 'color-mix(in srgb, var(--blue) 8%, transparent)' : 'transparent' }}
+                          >
+                            <Input
+                              type={q.multiple ? 'checkbox' : 'radio'}
+                              name={`q-${i}`}
+                              checked={on}
+                              disabled={done}
+                              onChange={() => toggle(i, o.label)}
+                              className="shrink-0 mt-0.5"
+                              style={{ accentColor: 'var(--blue)', cursor: done ? 'default' : 'pointer' }}
+                            />
+                            <span className="min-w-0">
+                              <span className="mono t-soft">{o.label}</span>
+                              {o.description && <span className="muted"> — {o.description}</span>}
+                            </span>
+                          </label>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  {/* The question tool adds this option automatically (`custom` is on by default). */}
+                  <label className="block mt-2">
+                    <span className="block text-[10px] uppercase tracking-widest mono muted">Type your own answer</span>
+                    <input
+                      type="text"
+                      value={texts[i] ?? ''}
+                      disabled={done}
+                      onChange={(e) => setCustom(i, e.target.value)}
+                      placeholder={q.multiple ? 'Added as an extra pick…' : 'Otherwise type your answer…'}
+                      className="input mt-1 mono text-[11.5px]"
+                      style={{ padding: '6px 8px', fontSize: '11.5px' }}
+                    />
+                  </label>
+                </>
               )}
             </div>
           </div>
