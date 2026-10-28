@@ -53,8 +53,24 @@ export function linkifyFilePaths(md: string): string {
   return out;
 }
 
+const URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'`<>]+/gi;
+
 function linkifyPlain(plain: string): string {
-  return linkifyWith(UNIX_PATH_RE, linkifyWith(WIN_PATH_RE, plain));
+  // A URL such as https://github.com/org/repo.git contains `s://`, which
+  // matches the Windows drive-path pattern (`s:` followed by a slash). Keep
+  // URLs intact and only apply file-path linking to text around them.
+  let out = '';
+  let last = 0;
+  for (const match of plain.matchAll(URL_RE)) {
+    const index = match.index ?? 0;
+    out += linkifyFileText(plain.slice(last, index)) + match[0];
+    last = index + match[0].length;
+  }
+  return out + linkifyFileText(plain.slice(last));
+}
+
+function linkifyFileText(text: string): string {
+  return linkifyWith(UNIX_PATH_RE, linkifyWith(WIN_PATH_RE, text));
 }
 
 /** href produced by linkifyFilePaths → the original absolute path, or null. */

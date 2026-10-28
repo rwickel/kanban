@@ -13,6 +13,11 @@ describe('linkifyFilePaths', () => {
     assert.equal(linkifyFilePaths(md), md);
   });
 
+  it('does not turn a plain repository URL into a file-preview link', () => {
+    const md = 'https://github.com/rwickel/kanban.git';
+    assert.equal(linkifyFilePaths(md), md);
+  });
+
   it('converts plain Windows paths to file-preview links with a filename label', () => {
     const out = linkifyFilePaths('plain C:\\Users\\rober\\work\\kanban\\utf8.txt in text');
     assert.match(out, /\[utf8\.txt\]\(file-preview:[^)]+\)/);
@@ -35,6 +40,13 @@ describe('linkifyFilePaths', () => {
     const out = linkifyFilePaths(md);
     assert.ok(out.includes('[ebay](https://www.ebay.de)'), 'external link kept');
     assert.match(out, /\[utf8\.txt\]\(file-preview:[^)]+\)/);
+  });
+
+  it('keeps a plain URL intact while linking a nearby Windows path', () => {
+    const url = 'https://github.com/rwickel/kanban.git';
+    const out = linkifyFilePaths(`${url} C:\\Users\\rober\\work\\kanban\\README.md`);
+    assert.ok(out.startsWith(url), 'URL is unchanged');
+    assert.match(out, /\[README\.md\]\(file-preview:[^)]+\)/);
   });
 
   it('leaves an already file-preview link untouched', () => {
